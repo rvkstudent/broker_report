@@ -1,0 +1,16 @@
+// trade.proto
+// Schema extracted from quik_trade_counter_min.lua (lines 729-741)
+// Must match EXACTLY - no package prefix
+
+syntax = "proto3";
+
+message TradeData {
+  int64 trade_num = 1;
+  int32 flags = 2;
+  double price = 3;
+  int32 qty = 4;
+  double value = 5;
+  string sec_code = 6;
+  string class_code = 7;
+  int64 datetime = 8;
+}

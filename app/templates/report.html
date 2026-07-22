@@ -1,0 +1,232 @@
+{% extends "base.html" %}
+{% block title %}Отчёт {{ report.filename }}{% endblock %}
+
+{% block content %}
+<nav aria-label="breadcrumb">
+    <ol class="breadcrumb">
+        <li class="breadcrumb-item"><a href="/">Главная</a></li>
+        <li class="breadcrumb-item active">{{ report.filename }}</li>
+    </ol>
+</nav>
+
+<div class="row mb-3">
+    <div class="col">
+        <h4><i class="bi bi-file-earmark-text"></i> {{ report.filename }}</h4>
+        <p class="text-muted small mb-0">{{ report.investor }} · {{ report.contract }}</p>
+        <p class="text-muted small">Период: {{ report.period_start }} — {{ report.period_end }}</p>
+    </div>
+    <div class="col-auto">
+        <form method="post" onsubmit="return confirm('Удалить отчёт?')">
+            <button class="btn btn-outline-danger btn-sm"><i class="bi bi-trash"></i> Удалить</button>
+        </form>
+    </div>
+</div>
+
+<!-- █████  Profit / Loss (trading operations only)  █████ -->
+<div class="card">
+    <div class="card-header bg-white">
+        <i class="bi bi-bar-chart-line"></i> Прибыль по трейд-сделкам (покупка → продажа внутри периода)
+        <small class="text-muted">LIFO, хронологический порядок</small>
+        <button class="btn btn-sm btn-outline-secondary float-end" type="button" data-bs-toggle="collapse" data-bs-target="#profitDetail">
+            Детали
+        </button>
+    </div>
+    <div class="card-body p-0">
+        {% if profit %}
+        <table class="table table-sm table-hover mb-0">
+            <thead class="table-light">
+                <tr>
+                    <th>Ценная бумага</th>
+                    <th class="text-end">Куплено</th>
+                    <th class="text-end">Продано</th>
+                    <th class="text-end">Валовая прибыль</th>
+                    <th class="text-end">Комиссии (трейд)</th>
+                    <th class="text-end">Чистая прибыль</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for p in profit %}
+                {% set net = p.net_profit %}
+                <tr>
+                    <td>{{ p.security_name }} <small class="text-muted">({{ p.security_code }})</small></td>
+                    <td class="text-end">{{ p.buy_qty }}</td>
+                    <td class="text-end">{{ p.sell_qty }}</td>
+                    <td class="text-end {{ 'profit-positive' if p.gross_profit >= 0 else 'profit-negative' }}">
+                        {{ '{:+,.2f}'.format(p.gross_profit) }}</td>
+                    <td class="text-end text-danger">{{ '{:,.2f}'.format(p.total_fees) }}</td>
+                    <td class="text-end {{ 'profit-positive' if net >= 0 else 'profit-negative' }} fw-bold">
+                        {{ '{:+,.2f}'.format(net) }}
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+            <tfoot class="table-light fw-bold">
+                {% set total_gross = profit | sum(attribute='gross_profit') %}
+                {% set total_ftrade = profit | sum(attribute='total_fees') %}
+                {% set total_net = profit | sum(attribute='net_profit') %}
+                {% set repo_cost = repo_total.total %}
+                <tr>
+                    <td>ПРИБЫЛЬ/УБЫТОК ПО ТРЕЙДАМ</td>
+                    <td class="text-end">{{ profit | sum(attribute='buy_qty') }}</td>
+                    <td class="text-end">{{ profit | sum(attribute='sell_qty') }}</td>
+                    <td class="text-end {{ 'profit-positive' if total_gross >= 0 else 'profit-negative' }}">
+                        {{ '{:+,.2f}'.format(total_gross) }}</td>
+                    <td class="text-end text-danger">{{ '{:,.2f}'.format(total_ftrade) }}</td>
+                    <td class="text-end {{ 'profit-positive' if total_net >= 0 else 'profit-negative' }}">
+                        {{ '{:+,.2f}'.format(total_net) }}
+                    </td>
+                </tr>
+                <tr class="text-danger">
+                    <td>РАСХОДЫ НА РЕПО (проценты + комиссии)</td>
+                    <td></td><td></td><td></td>
+                    <td class="text-end">{{ '{:,.2f}'.format(repo_cost) }}</td>
+                    <td class="text-end">−{{ '{:,.2f}'.format(repo_cost) }}</td>
+                </tr>
+                <tr class="table-dark">
+                    <td>ИТОГОВЫЙ РЕЗУЛЬТАТ (с учётом РЕПО)</td>
+                    <td></td><td></td><td></td>
+                    <td class="text-end text-danger">{{ '{:,.2f}'.format(total_ftrade + repo_cost) }}</td>
+                    <td class="text-end {{ 'profit-positive' if (total_net - repo_cost) >= 0 else 'profit-negative' }}">
+                        {{ '{:+,.2f}'.format(total_net - repo_cost) }}
+                    </td>
+                </tr>
+            </tfoot>
+        </table>
+
+        <!-- Detail: individual matched lots -->
+        <div class="collapse" id="profitDetail">
+            <div class="table-responsive">
+                <table class="table table-sm table-hover mb-0" style="font-size:12px">
+                    <thead class="table-warning">
+                        <tr>
+                            <th>ЦБ</th>
+                            <th>Кол-во</th>
+                            <th>Дата покупки</th>
+                            <th class="text-end">Цена покупки</th>
+                            <th class="text-end">Сумма покупки</th>
+                            <th>Дата продажи</th>
+                            <th class="text-end">Цена продажи</th>
+                            <th class="text-end">Сумма продажи</th>
+                            <th class="text-end">Прибыль</th>
+                            <th class="text-end">Ком. покупки</th>
+                            <th class="text-end">Ком. продажи</th>
+                            <th class="text-end">Чистая прибыль</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    {% for lot in lots %}
+                        {% set net = lot.profit - lot.buy_fee - lot.sell_fee %}
+                        <tr>
+                            <td><small>{{ lot.security_code }}</small></td>
+                            <td>{{ lot.qty }}</td>
+                            <td><small>{{ lot.buy_date }}</small></td>
+                            <td class="text-end">{{ '{:,.2f}'.format(lot.buy_price) }}</td>
+                            <td class="text-end">{{ '{:,.2f}'.format(lot.buy_amount) }}</td>
+                            <td><small>{{ lot.sell_date }}</small></td>
+                            <td class="text-end">{{ '{:,.2f}'.format(lot.sell_price) }}</td>
+                            <td class="text-end">{{ '{:,.2f}'.format(lot.sell_amount) }}</td>
+                            <td class="text-end {{ 'profit-positive' if lot.profit >= 0 else 'profit-negative' }}">
+                                {{ '{:+,.2f}'.format(lot.profit) }}</td>
+                            <td class="text-end text-danger"><small>{{ '{:,.2f}'.format(lot.buy_fee) }}</small></td>
+                            <td class="text-end text-danger"><small>{{ '{:,.2f}'.format(lot.sell_fee) }}</small></td>
+                            <td class="text-end {{ 'profit-positive' if net >= 0 else 'profit-negative' }}">
+                                {{ '{:+,.2f}'.format(net) }}</td>
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        {% else %}
+        <div class="p-4 text-muted text-center">Нет трейд-сделок (покупка + продажа внутри периода).</div>
+        {% endif %}
+    </div>
+</div>
+
+<div class="row">
+    <!-- █████  Open trades (bought, not sold)  █████ -->
+    <div class="col-md-6">
+        <div class="card h-100">
+            <div class="card-header bg-white"><i class="bi bi-cart-plus"></i> Открытые трейд-сделки (куплено, нет продажи)</div>
+            <div class="card-body p-0">
+                {% if open_trades %}
+                <div class="table-responsive">
+                    <table class="table table-sm table-hover mb-0" style="font-size:12px">
+                        <thead class="table-light">
+                            <tr><th>Ценная бумага</th><th class="text-end">Кол-во</th><th>Дата покупки</th><th class="text-end">Цена</th><th class="text-end">Стоимость</th></tr>
+                        </thead>
+                        <tbody>
+                        {% for o in open_trades %}
+                            <tr>
+                                <td><small>{{ o.security_name }} ({{ o.security_code }})</small></td>
+                                <td class="text-end">{{ o.qty }}</td>
+                                <td><small>{{ o.buy_date }}</small></td>
+                                <td class="text-end">{{ '{:,.2f}'.format(o.buy_price) }}</td>
+                                <td class="text-end">{{ '{:,.2f}'.format(o.total_cost) }}</td>
+                            </tr>
+                        {% endfor %}
+                        </tbody>
+                        <tfoot class="table-light fw-bold">
+                            <tr>
+                                <td>ИТОГО</td>
+                                <td class="text-end">{{ open_trades | sum(attribute='qty') }}</td>
+                                <td></td>
+                                <td></td>
+                                <td class="text-end">{{ '{:,.2f}'.format(open_trades | sum(attribute='total_cost')) }}</td>
+                            </tr>
+                        </tfoot>
+                    </table>
+                </div>
+                {% else %}
+                <div class="p-4 text-muted text-center">Нет открытых трейд-сделок.</div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <!-- █████  Instrument summary  █████ -->
+    <div class="col-md-6">
+        <div class="card h-100">
+            <div class="card-header bg-white"><i class="bi bi-pie-chart"></i> Сводная по открытым позициям</div>
+            <div class="card-body p-0">
+                {% if instruments %}
+                <div class="table-responsive">
+                    <table class="table table-sm table-hover mb-0" style="font-size:12px">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Инструмент</th>
+                                <th class="text-end">Кол-во</th>
+                                <th class="text-end">Ср. цена</th>
+                                <th class="text-end">Стоимость</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        {% for i in instruments %}
+                            <tr>
+                                <td><small>{{ i.security_name }} ({{ i.security_code }})</small></td>
+                                <td class="text-end">{{ i.qty }}</td>
+                                <td class="text-end">{{ '{:,.2f}'.format(i.avg_price) }}</td>
+                                <td class="text-end">{{ '{:,.2f}'.format(i.total_cost) }}</td>
+                            </tr>
+                        {% endfor %}
+                        </tbody>
+                        <tfoot class="table-light fw-bold">
+                            <tr>
+                                <td>ИТОГО</td>
+                                <td class="text-end">{{ instruments | sum(attribute='qty') }}</td>
+                                <td></td>
+                                <td class="text-end">{{ '{:,.2f}'.format(instruments | sum(attribute='total_cost')) }}</td>
+                            </tr>
+                        </tfoot>
+                    </table>
+                </div>
+                {% else %}
+                <div class="p-4 text-muted text-center">Нет данных.</div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}{% endblock %}

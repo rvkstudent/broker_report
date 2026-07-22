@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+
+# Environments
+.env
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/settings.json
+.vscode/launch.json
+
+# Lua modules (dependencies)
+lua_modules/
+
+# Generated reports
+reports/*.HTML
+reports/*.html
+
+# OS
+Thumbs.db
+.DS_Store

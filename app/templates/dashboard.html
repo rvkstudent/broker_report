@@ -1,0 +1,606 @@
+{% extends "base.html" %}
+{% block title %}Дашборд — Анализ брокерских отчетов{% endblock %}
+
+{% block content %}
+<!-- █████  QUIK connection indicator  █████ -->
+<div class="row mb-2">
+    <div class="col">
+        <span id="quikStatus" class="badge {% if quik_connected %}bg-success{% else %}bg-secondary{% endif %}">
+            {% if quik_connected %}● QUIK подключён{% else %}○ QUIK не активен{% endif %}
+        </span>
+        <span class="text-muted small ms-2" id="quikStatusTime"></span>
+    </div>
+</div>
+
+<div class="row mb-3">
+    <div class="col">
+        <h4><i class="bi bi-speedometer2"></i> Сводная аналитика</h4>
+        <p class="text-muted small mb-0">
+            Данные из всех загруженных отчётов
+            {% if date_from or date_to %}
+                · фильтр:
+                {% if date_from %}с {{ date_from }}{% endif %}
+                {% if date_to %}по {{ date_to }}{% endif %}
+                <a href="/" class="btn btn-sm btn-outline-secondary ms-2">✕ сбросить</a>
+            {% endif %}
+        </p>
+    </div>
+    <div class="col-auto">
+        <button class="btn btn-outline-primary btn-sm" data-bs-toggle="collapse" data-bs-target="#filterPanel">
+            <i class="bi bi-funnel"></i> Фильтр
+        </button>
+        <button class="btn btn-outline-secondary btn-sm" data-bs-toggle="modal" data-bs-target="#uploadModal">
+            <i class="bi bi-upload"></i> Загрузить
+        </button>
+    </div>
+</div>
+
+<!-- Filter panel -->
+<div class="collapse {% if date_from or date_to %}show{% endif %}" id="filterPanel">
+    <div class="card card-body mb-3 py-2">
+        <form method="get" class="row g-2 align-items-end">
+            <div class="col-auto">
+                <label class="form-label small">Дата с</label>
+                <input type="date" name="date_from" class="form-control form-control-sm"
+                       value="{{ date_from_iso or '' }}">
+            </div>
+            <div class="col-auto">
+                <label class="form-label small">Дата по</label>
+                <input type="date" name="date_to" class="form-control form-control-sm"
+                       value="{{ date_to_iso or '' }}">
+            </div>
+            <div class="col-auto">
+                <button class="btn btn-sm btn-primary"><i class="bi bi-search"></i> Применить</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Upload Modal -->
+<div class="modal fade" id="uploadModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data">
+                <div class="modal-header"><h5 class="modal-title">Загрузка отчёта</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+                <div class="modal-body">
+                    <input type="file" name="files" class="form-control" multiple accept=".html,.htm">
+                    <div class="text-muted small mt-2">
+                        <i class="bi bi-info-circle"></i>
+                        Новые файлы из папки проекта подхватываются автоматически раз в минуту.
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="submit" class="btn btn-primary"><i class="bi bi-cloud-arrow-up"></i> Загрузить</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- █████  Profit / Loss  █████ -->
+<div class="card">
+    <div class="card-header bg-white">
+        <i class="bi bi-bar-chart-line"></i> Прибыль по трейд-сделкам (покупка → продажа)
+        <small class="text-muted">LIFO, все отчёты</small>
+        <button class="btn btn-sm btn-outline-secondary float-end" type="button" data-bs-toggle="collapse" data-bs-target="#profitDetail">
+            Детали
+        </button>
+    </div>
+    <div class="card-body p-0">
+        {% if profit %}
+        <table class="table table-sm table-hover mb-0">
+            <thead class="table-light">
+                <tr>
+                    <th>Ценная бумага</th>
+                    <th class="text-end">Куплено</th>
+                    <th class="text-end">Продано</th>
+                    <th class="text-end">Валовая прибыль</th>
+                    <th class="text-end">Комиссии (трейд)</th>
+                    <th class="text-end">Чистая прибыль</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for p in profit %}
+                <tr>
+                    <td>{{ p.security_name }} <small class="text-muted">({{ p.security_code }})</small></td>
+                    <td class="text-end">{{ p.buy_qty }}</td>
+                    <td class="text-end">{{ p.sell_qty }}</td>
+                    <td class="text-end {{ 'profit-positive' if p.gross_profit >= 0 else 'profit-negative' }}">
+                        {{ '{:+,.2f}'.format(p.gross_profit) }}</td>
+                    <td class="text-end text-danger">{{ '{:,.2f}'.format(p.total_fees) }}</td>
+                    <td class="text-end {{ 'profit-positive' if p.net_profit >= 0 else 'profit-negative' }} fw-bold">
+                        {{ '{:+,.2f}'.format(p.net_profit) }}
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+            <tfoot class="table-light fw-bold">
+                {% set total_gross = profit | sum(attribute='gross_profit') %}
+                {% set total_ftrade = profit | sum(attribute='total_fees') %}
+                {% set total_net = profit | sum(attribute='net_profit') %}
+                {% set repo_cost = repo_total.total %}
+                <tr>
+                    <td>ПРИБЫЛЬ/УБЫТОК ПО ТРЕЙДАМ</td>
+                    <td class="text-end">{{ profit | sum(attribute='buy_qty') }}</td>
+                    <td class="text-end">{{ profit | sum(attribute='sell_qty') }}</td>
+                    <td class="text-end {{ 'profit-positive' if total_gross >= 0 else 'profit-negative' }}">
+                        {{ '{:+,.2f}'.format(total_gross) }}</td>
+                    <td class="text-end text-danger">{{ '{:,.2f}'.format(total_ftrade) }}</td>
+                    <td class="text-end {{ 'profit-positive' if total_net >= 0 else 'profit-negative' }}">
+                        {{ '{:+,.2f}'.format(total_net) }}
+                    </td>
+                </tr>
+                <tr class="text-danger">
+                    <td>РАСХОДЫ НА РЕПО (проценты + комиссии)</td>
+                    <td></td><td></td><td></td>
+                    <td class="text-end">{{ '{:,.2f}'.format(repo_cost) }}</td>
+                    <td class="text-end">−{{ '{:,.2f}'.format(repo_cost) }}</td>
+                </tr>
+                <tr class="table-dark">
+                    <td>ИТОГОВЫЙ РЕЗУЛЬТАТ (с учётом РЕПО)</td>
+                    <td></td><td></td><td></td>
+                    <td class="text-end text-danger">{{ '{:,.2f}'.format(total_ftrade + repo_cost) }}</td>
+                    <td class="text-end {{ 'profit-positive' if (total_net - repo_cost) >= 0 else 'profit-negative' }}">
+                        {{ '{:+,.2f}'.format(total_net - repo_cost) }}
+                    </td>
+                </tr>
+            </tfoot>
+        </table>
+
+        <!-- Detail lots -->
+        <div class="collapse" id="profitDetail">
+            <div class="table-responsive">
+                <table class="table table-sm table-hover mb-0" style="font-size:12px">
+                    <thead class="table-warning">
+                        <tr>
+                            <th>ЦБ</th><th>Кол-во</th><th>Дата покупки</th>
+                            <th class="text-end">Цена покупки</th><th class="text-end">Сумма</th>
+                            <th>Дата продажи</th><th class="text-end">Цена продажи</th>
+                            <th class="text-end">Сумма</th><th class="text-end">Прибыль</th>
+                            <th class="text-end">Ком.</th><th class="text-end">Чистая</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    {% for lot in lots %}
+                        {% set net = lot.profit - lot.buy_fee - lot.sell_fee %}
+                        <tr>
+                            <td><small>{{ lot.security_code }}</small></td>
+                            <td>{{ lot.qty }}</td>
+                            <td><small>{{ lot.buy_date }}</small></td>
+                            <td class="text-end">{{ '{:,.2f}'.format(lot.buy_price) }}</td>
+                            <td class="text-end">{{ '{:,.2f}'.format(lot.buy_amount) }}</td>
+                            <td><small>{{ lot.sell_date }}</small></td>
+                            <td class="text-end">{{ '{:,.2f}'.format(lot.sell_price) }}</td>
+                            <td class="text-end">{{ '{:,.2f}'.format(lot.sell_amount) }}</td>
+                            <td class="text-end {{ 'profit-positive' if lot.profit >= 0 else 'profit-negative' }}">
+                                {{ '{:+,.2f}'.format(lot.profit) }}</td>
+                            <td class="text-end text-danger"><small>{{ '{:,.2f}'.format(lot.buy_fee + lot.sell_fee) }}</small></td>
+                            <td class="text-end {{ 'profit-positive' if net >= 0 else 'profit-negative' }}">
+                                {{ '{:+,.2f}'.format(net) }}</td>
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        {% else %}
+        <div class="p-4 text-muted text-center">Нет данных за выбранный период.</div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- █████  Open trades (full width)  █████ -->
+<div class="card">
+    <div class="card-header bg-white"><i class="bi bi-cart-plus"></i> Открытые трейд-сделки (куплено, нет продажи)</div>
+    <div class="card-body p-0">
+        {% if open_trades %}
+        <div class="table-responsive">
+            <table class="table table-sm table-hover mb-0" style="font-size:12px; white-space:nowrap" id="openTradesTable">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Ценная бумага</th>
+                                <th class="text-end">Кол-во</th>
+                                <th>Дата покупки</th>
+                                <th class="text-end">Цена</th>
+                                <th class="text-end">Стоимость</th>
+                                <th class="text-end">Тек. цена</th>
+                                <th class="text-end">Прогноз P&amp;L</th>
+                                <th class="text-end">%</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        {% set ticker_colors = {'AFKS':'#2563eb','SBER':'#059669','MOEX':'#7c3aed','MTSS':'#ea580c','RAGR':'#0891b2','LQDT':'#d97706','GAZP':'#1d4ed8','RU000A10C3M0':'#be123c'} %}
+                        {% for o in open_trades %}
+                            {% set cur = o.get('current_price', 0) %}
+                            {% set buy_fee = o.total_cost * trade_fee_rate %}
+                            {% set sell_fee = cur * o.qty * trade_fee_rate %}
+                            {% set gross_pl = (cur - o.buy_price) * o.qty %}
+                            {% set net_pl = gross_pl - buy_fee - sell_fee %}
+                            {% set pl_pct = (net_pl / o.total_cost * 100) if o.total_cost > 0 else 0 %}
+                            <tr class="{{ 'bg-profit-pos' if net_pl >= 0 else 'bg-profit-neg' }}">
+                                <td><small><img class="tkr-logo" src="/api/logo/{{ o.security_code }}" alt="" loading="lazy" onerror="this.style.display='none'" /></small> <small>{{ o.security_name }} ({{ o.security_code }})</small></td>
+                                <td class="text-end">{{ o.qty }}</td>
+                                <td><small>{{ o.buy_date }}</small></td>
+                                <td class="text-end">{{ '{:,.2f}'.format(o.buy_price) }}</td>
+                                <td class="text-end">{{ '{:,.2f}'.format(o.total_cost) }}</td>
+                                <td class="text-end fw-bold">{{ '{:,.4f}'.format(cur) if cur < 10 else '{:,.2f}'.format(cur) }}</td>
+                                <td class="text-end {{ 'profit-positive' if net_pl >= 0 else 'profit-negative' }}">
+                                    <span class="pl-cell">{% if net_pl >= 0 %}<span class="arrow-up">&#9650;</span>{% else %}<span class="arrow-down">&#9660;</span>{% endif %}
+                                    {{ '{:+,.2f}'.format(net_pl) }}</span>
+                                </td>
+                                <td class="text-end {{ 'profit-positive' if net_pl >= 0 else 'profit-negative' }}">
+                                    {{ '{:+,.2f}'.format(pl_pct) }}%
+                                </td>
+                            </tr>
+                        {% endfor %}
+                        </tbody>
+                        <tfoot class="table-light fw-bold">
+                            <tr>
+                                <td>ИТОГО</td>
+                                <td class="text-end">{{ open_trades | sum(attribute='qty') }}</td>
+                                <td></td>
+                                <td></td>
+                                <td class="text-end">{{ '{:,.2f}'.format(open_trades | sum(attribute='total_cost')) }}</td>
+                                <td></td>
+                                <td></td>
+                                <td></td>
+                            </tr>
+                        </tfoot>
+                    </table>
+                </div>
+                {% else %}
+                <div class="p-4 text-muted text-center">Нет открытых позиций.</div>
+                {% endif %}
+            </div>
+        </div>
+
+<!-- █████  Instrument summary (open)  █████ -->
+<div class="row mt-3">
+    <div class="col-md-6">
+        <div class="card h-100">
+            <div class="card-header bg-white"><i class="bi bi-pie-chart"></i> Сводная по открытым позициям</div>
+            <div class="card-body p-0">
+                {% if instruments %}
+                <div class="table-responsive">
+                    <table class="table table-sm table-hover mb-0" style="font-size:12px">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Инструмент</th>
+                                <th class="text-end">Кол-во</th>
+                                <th class="text-end">Ср. цена</th>
+                                <th class="text-end">Стоимость</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        {% for i in instruments %}
+                            <tr>
+                                <td><small>{{ i.security_name }} ({{ i.security_code }})</small></td>
+                                <td class="text-end">{{ i.qty }}</td>
+                                <td class="text-end">{{ '{:,.2f}'.format(i.avg_price) }}</td>
+                                <td class="text-end">{{ '{:,.2f}'.format(i.total_cost) }}</td>
+                            </tr>
+                        {% endfor %}
+                        </tbody>
+                        <tfoot class="table-light fw-bold">
+                            <tr>
+                                <td>ИТОГО</td>
+                                <td class="text-end">{{ instruments | sum(attribute='qty') }}</td>
+                                <td></td>
+                                <td class="text-end">{{ '{:,.2f}'.format(instruments | sum(attribute='total_cost')) }}</td>
+                            </tr>
+                        </tfoot>
+                    </table>
+                </div>
+                {% else %}
+                <div class="p-4 text-muted text-center">Нет данных.</div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- █████  QUIK open positions (from OnTrade)  █████ -->
+{% if quik_positions %}
+<div class="card mt-3">
+    <div class="card-header bg-white">
+        <i class="bi bi-basket"></i> Позиции из QUIK (OnTrade)
+        <span class="badge bg-secondary">{{ quik_positions | length }}</span>
+    </div>
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-sm table-hover mb-0" style="font-size:12px" id="quikPositionsTable">
+                <thead class="table-light">
+                    <tr>
+                        <th>Код</th>
+                        <th class="text-end">Кол-во</th>
+                        <th class="text-end">Ср. цена</th>
+                        <th class="text-end">Стоимость</th>
+                        <th class="text-end">Тек. цена</th>
+                        <th class="text-end">Прогноз P&amp;L</th>
+                        <th class="text-end">%</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% set ticker_colors = {'AFKS':'#2563eb','SBER':'#059669','MOEX':'#7c3aed','MTSS':'#ea580c','RAGR':'#0891b2','LQDT':'#d97706','GAZP':'#1d4ed8','RU000A10C3M0':'#be123c'} %}
+{% for p in quik_positions %}
+                    {% set cur = prices | selectattr('sec_code', 'equalto', p.sec_code) | first %}
+                    {% set current_price = cur.price if cur else 0 %}
+                    {% set buy_fee = p.total_cost * trade_fee_rate %}
+                    {% set sell_fee = current_price * p.qty * trade_fee_rate %}
+                    {% set gross_pl = (current_price - p.avg_price) * p.qty %}
+                    {% set net_pl = gross_pl - buy_fee - sell_fee %}
+                    {% set pl_pct = (net_pl / p.total_cost * 100) if p.total_cost > 0 else 0 %}
+                    <tr class="{{ 'bg-profit-pos' if net_pl >= 0 else 'bg-profit-neg' }}">
+                        <td><small><img class="tkr-logo" src="/api/logo/{{ p.sec_code }}" alt="" loading="lazy" onerror="this.style.display='none'" /> {{ p.sec_code }}</small></td>
+                        <td class="text-end">{{ p.qty }}</td>
+                        <td class="text-end">{{ '{:,.4f}'.format(p.avg_price) if p.avg_price < 10 else '{:,.2f}'.format(p.avg_price) }}</td>
+                        <td class="text-end">{{ '{:,.2f}'.format(p.total_cost) }}</td>
+                        <td class="text-end fw-bold">{{ '{:,.4f}'.format(current_price) if current_price < 10 else '{:,.2f}'.format(current_price) }}</td>
+                        <td class="text-end {{ 'profit-positive' if net_pl >= 0 else 'profit-negative' }}">
+                            <span class="pl-cell">{% if net_pl >= 0 %}<span class="arrow-up">&#9650;</span>{% else %}<span class="arrow-down">&#9660;</span>{% endif %}
+                            {{ '{:+,.2f}'.format(net_pl) }}</span>
+                        </td>
+                        <td class="text-end {{ 'profit-positive' if net_pl >= 0 else 'profit-negative' }}">
+                            {{ '{:+,.2f}'.format(pl_pct) }}%
+                        </td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<!-- █████  QUIK trades + Current prices  █████ -->
+<div class="row mt-3">
+    <div class="col-md-7">
+        <div class="card h-100">
+            <div class="card-header bg-white">
+                <i class="bi bi-arrow-left-right"></i> Сделки из QUIK (OnTrade)
+                <span class="badge bg-secondary" id="quikCount">{{ quik_trades | length }}</span>
+                <small class="text-muted ms-2" id="quikUpdated"></small>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-sm table-hover mb-0" style="font-size:12px" class="ref-table" id="quikTable">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Код</th>
+                                <th class="text-end">Цена</th>
+                                <th class="text-end">Кол-во</th>
+                                <th class="text-end">Сумма</th>
+                                <th>Время</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        {% for t in quik_trades %}
+                            <tr>
+                                <td><small><img class="tkr-logo" src="/api/logo/{{ t.sec_code }}" alt="" loading="lazy" onerror="this.style.display='none'" /> {{ t.sec_code }}</small></td>
+                                <td class="text-end price-cell">{{ '{:,.4f}'.format(t.price) }}</td>
+                                <td class="text-end">{{ t.qty }}</td>
+                                <td class="text-end">{{ '{:,.2f}'.format(t.value) }}</td>
+                                <td><small>{{ t.created_at[11:19] }}</small></td>
+                            </tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% if not quik_trades %}
+                <div class="p-4 text-muted text-center" id="quikEmpty">Нет сделок из QUIK.</div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <!-- █████  Current prices  █████ -->
+    <div class="col-md-5">
+        <div class="card h-100">
+            <div class="card-header bg-white">
+                <i class="bi bi-graph-up"></i> Текущие цены (OnAllTrade)
+                <small class="text-muted ms-2" id="pricesUpdated"></small>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-sm table-hover mb-0" style="font-size:12px" class="ref-table" id="pricesTable">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Код</th>
+                                <th class="text-end">Цена</th>
+                                <th class="text-end">Объём</th>
+                                <th>Обновлено</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        {% for p in prices %}
+                            <tr>
+                                <td><small><img class="tkr-logo" src="/api/logo/{{ p.sec_code }}" alt="" loading="lazy" onerror="this.style.display='none'" /> {{ p.sec_code }}</small></td>
+                                <td class="text-end fw-bold price-cell">{{ '{:,.4f}'.format(p.price) }}</td>
+                                <td class="text-end">{{ p.qty }}</td>
+                                <td><small class="ts-cell">{{ p.timestamp[11:19] }}</small></td>
+                            </tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% if not prices %}
+                <div class="p-4 text-muted text-center" id="pricesEmpty">Нет данных о ценах.</div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// Форматирование цены
+function fmtPrice(p) {
+    if (p == null) return '—';
+    const a = Math.abs(p);
+    if (a < 1) return p.toFixed(4);
+    if (a < 10) return p.toFixed(4);
+    return p.toFixed(2);
+}
+
+// Обновление индикатора QUIK
+async function refreshQuikStatus() {
+    try {
+        let r = await fetch('/api/quik-connected');
+        let data = await r.json();
+        let el = document.getElementById('quikStatus');
+        if (data.connected) {
+            el.className = 'badge bg-success';
+            el.innerHTML = '● QUIK подключён';
+        } else {
+            el.className = 'badge bg-secondary';
+            el.innerHTML = '○ QUIK не активен';
+        }
+        let tm = document.getElementById('quikStatusTime');
+        if (tm) tm.textContent = new Date().toLocaleTimeString('ru');
+    } catch(e) {}
+}
+
+// Обновление таблицы сделок
+async function refreshQuik() {
+    try {
+        let r = await fetch('/api/quik-trades?limit=20');
+        let data = await r.json();
+        let tb = document.querySelector('#quikTable tbody');
+        if (!tb) return;
+        let html = '';
+        for (let t of data) {
+            html += '<tr><td><small><img class="tkr-logo" src="/api/logo/' + t.sec_code + '" alt="" loading="lazy" onerror="this.style.display=\'none\'" /> ' + t.sec_code + '</small></td>' +
+                '<td class="text-end price-cell">' + fmtPrice(t.price) + '</td>' +
+                '<td class="text-end">' + t.qty + '</td>' +
+                '<td class="text-end">' + (t.value || 0).toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2}) + '</td>' +
+                '<td><small>' + (t.created_at ? t.created_at.substr(11,8) : '') + '</small></td></tr>';
+        }
+        tb.innerHTML = html;
+        let cnt = document.getElementById('quikCount');
+        if (cnt) cnt.textContent = data.length;
+        let upd = document.getElementById('quikUpdated');
+        if (upd) upd.textContent = 'обн. ' + new Date().toLocaleTimeString('ru');
+    } catch(e) {}
+}
+
+// Обновление таблицы цен
+async function refreshPrices() {
+    try {
+        let r = await fetch('/api/prices');
+        let data = await r.json();
+        let tb = document.querySelector('#pricesTable tbody');
+        if (!tb) return;
+        let html = '';
+        for (let p of data) {
+            html += '<tr><td><small><img class="tkr-logo" src="/api/logo/' + p.sec_code + '" alt="" loading="lazy" onerror="this.style.display=\'none\'" /> ' + p.sec_code + '</small></td>' +
+                '<td class="text-end fw-bold price-cell">' + fmtPrice(p.price) + '</td>' +
+                '<td class="text-end">' + p.qty + '</td>' +
+                '<td><small class="ts-cell">' + (p.timestamp ? p.timestamp.substr(11,8) : '') + '</small></td></tr>';
+        }
+        tb.innerHTML = html;
+        let upd = document.getElementById('pricesUpdated');
+        if (upd) upd.textContent = 'обн. ' + new Date().toLocaleTimeString('ru');
+    } catch(e) {}
+}
+
+// Обновление цен в таблице открытых сделок
+const TRADE_FEE_RATE = 0.000685;
+async function refreshOpenTrades() {
+    try {
+        let r = await fetch('/api/prices');
+        let prices = await r.json();
+        let pmap = {};
+        for (let p of prices) pmap[p.sec_code] = p.price;
+
+        let tb = document.querySelector('#openTradesTable tbody');
+        if (!tb) return;
+        for (let row of tb.rows) {
+            let secCell = row.cells[0];
+            if (!secCell) continue;
+            // Extract sec_code from cell text (e.g. "MTSS (MTSS)" -> "MTSS")
+            let txt = secCell.textContent || '';
+            let m = txt.match(/\(([^)]+)\)/);
+            let code = m ? m[1] : txt.trim().split(' ')[0];
+            let curPrice = pmap[code];
+            if (curPrice == null) continue;
+
+            // qty = col 1, buy_price = col 3, total_cost = col 4
+            let qty = parseFloat(row.cells[1].textContent.replace(/\s/g,'')) || 0;
+            let buyPrice = parseFloat(row.cells[3].textContent.replace(/\s/g,'').replace(',','.')) || 0;
+            let totalCost = parseFloat(row.cells[4].textContent.replace(/\s/g,'').replace(',','.')) || 0;
+
+            // Update current price cell (col 5)
+            row.cells[5].innerHTML = fmtPrice(curPrice);
+            row.cells[5].className = 'text-end fw-bold';
+
+            // Recalc P&L
+            let buyFee = totalCost * TRADE_FEE_RATE;
+            let sellFee = curPrice * qty * TRADE_FEE_RATE;
+            let grossPl = (curPrice - buyPrice) * qty;
+            let netPl = grossPl - buyFee - sellFee;
+            let plPct = totalCost > 0 ? (netPl / totalCost * 100) : 0;
+            let isPos = netPl >= 0;
+
+            // Update P&L cell (col 6)
+            let arrow = isPos ? '<span class="arrow-up">&#9650;</span>' : '<span class="arrow-down">&#9660;</span>';
+            row.cells[6].innerHTML = '<span class="pl-cell">' + arrow + ' ' + netPl.toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2, signDisplay:'always'}) + '</span>';
+            row.cells[6].className = 'text-end ' + (isPos ? 'profit-positive' : 'profit-negative');
+
+            // Update % cell (col 7)
+            row.cells[7].innerHTML = plPct.toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2, signDisplay:'always'}) + '%';
+            row.cells[7].className = 'text-end ' + (isPos ? 'profit-positive' : 'profit-negative');
+
+            // Update row bg
+            row.className = isPos ? 'bg-profit-pos' : 'bg-profit-neg';
+        }
+    } catch(e) {}
+}
+
+// Запуск
+refreshQuikStatus();
+refreshQuik();
+refreshPrices();
+refreshOpenTrades();
+setInterval(refreshQuikStatus, 3000);
+setInterval(refreshQuik, 5000);
+setInterval(refreshPrices, 3000);
+setInterval(refreshOpenTrades, 3000);
+</script>
+
+<!-- █████  Reports list  █████ -->
+<div class="card mt-3">
+    <div class="card-header bg-white">
+        <i class="bi bi-journal-text"></i> Загруженные отчёты
+        <span class="badge bg-secondary">{{ reports | length }}</span>
+    </div>
+    <div class="card-body p-0">
+        {% if reports %}
+        <table class="table table-sm table-hover mb-0">
+            <thead class="table-light">
+                <tr>
+                    <th>Файл</th><th>Договор</th><th>Период</th><th>Загружен</th><th></th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for r in reports %}
+                <tr>
+                    <td><a href="{{ url_for('report_view', report_id=r.id) }}">{{ r.filename }}</a></td>
+                    <td>{{ r.contract }}</td>
+                    <td class="small">{{ r.period_start }} — {{ r.period_end }}</td>
+                    <td class="small">{{ r.created_at[:10] }}</td>
+                    <td>
+                        <form method="post" action="{{ url_for('report_view', report_id=r.id) }}"
+                              onsubmit="return confirm('Удалить отчёт?')" class="d-inline">
+                            <button class="btn btn-sm btn-outline-danger"><i class="bi bi-trash"></i></button>
+                        </form>
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="p-4 text-muted text-center">Нет загруженных отчётов.</div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
