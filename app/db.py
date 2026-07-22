@@ -759,13 +759,15 @@ def save_quik_trades(trades: list):
             elif flags & 0x01:
                 side = 'sell'
 
-        # Некоторые QUIK-источники присылают qty=0 при ненулевом value.
-        # Восстанавливаем qty = value / price, если price > 0.
+        # QUIK OnTrade передаёт qty в лотах. Фактическое количество
+        # акций = value / price (price — за 1 акцию).
         price = t['price']
         qty = t['qty']
-        if qty == 0 and price > 0 and t.get('value', 0) > 0:
-            qty = int(round(t['value'] / price))
         t_val = t.get('value', 0) or 0
+        if price > 0:
+            actual_qty = int(round(t_val / price))
+            if actual_qty > 0:
+                qty = actual_qty
 
         cur.execute("""
             INSERT INTO quik_trade
