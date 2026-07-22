@@ -340,13 +340,13 @@ function OnTrade(trade)
         log_info(string.format("MY TRADE #%d (%d) %s: %s/%s price=%.4f qty=%d value=%.2f flags=%d",
             tonumber(trade.trade_num) or 0, should_track_count, side_label,
             sec_code, class_code,
-            tonumber(trade.price) or 0, tonumber(trade.quantity) or 0,
+            tonumber(trade.price) or 0, tonumber(trade.qty or trade.quantity) or 0,
             tonumber(trade.value) or 0, tonumber(trade.flags) or -1))
     end
 
     -- Сохраняем цену (только последнюю)
     local price = tonumber(trade.price) or 0
-    local qty = tonumber(trade.quantity) or 0
+    local qty = tonumber(trade.qty or trade.quantity) or 0
     local value = tonumber(trade.value) or 0
     price_cache[sec_code] = {
         price = price,

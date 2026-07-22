@@ -105,8 +105,13 @@ def index():
     # Добавляем текущую цену в открытые трейд-сделки для прогноза P&L
     open_trades = list(open_trades)
     price_map = {p['sec_code']: p['price'] for p in prices}
+
+    # Подставляем названия для QUIK-сделок (у них только sec_code)
+    name_map = {i['sec_code']: i['sec_name'] for i in get_my_instruments()}
     for o in open_trades:
         o['current_price'] = price_map.get(o['security_code'], 0)
+        if o.get('source') == 'quik' and o['security_code'] in name_map:
+            o['security_name'] = name_map[o['security_code']]
 
     # Средняя комиссия брокера + биржи (0.0685% от сделки)
     TRADE_FEE_RATE = 0.000685

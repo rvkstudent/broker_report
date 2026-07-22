@@ -218,6 +218,10 @@ def init_db():
         cur.execute("ALTER TABLE quik_trade ADD COLUMN source TEXT NOT NULL DEFAULT 'quik'")
     if 'side' not in qk_cols:
         cur.execute("ALTER TABLE quik_trade ADD COLUMN side TEXT DEFAULT ''")
+    if 'flags' not in qk_cols:
+        cur.execute("ALTER TABLE quik_trade ADD COLUMN flags INTEGER DEFAULT 0")
+    if 'operation' not in qk_cols:
+        cur.execute("ALTER TABLE quik_trade ADD COLUMN operation TEXT DEFAULT ''")
     cur.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS idx_quik_trade_source_num
         ON quik_trade(source, trade_num)
@@ -287,6 +291,7 @@ def get_open_trades(report_id=None, date_from=None, date_to=None):
     """
     Buys that have NOT been closed by a sell within this period.
     Returns unmatched buy lots, merged by (security_code, buy_date, buy_price).
+    Also includes QUIK OnTrade buys that are not closed by QUIK sells.
     """
     _, unmatched = _match_trades_lifo(report_id, date_from, date_to)
 
@@ -300,7 +305,60 @@ def get_open_trades(report_id=None, date_from=None, date_to=None):
             merged[-1]['fees'] = round(merged[-1]['fees'] + u['fees'], 2)
         else:
             merged.append(dict(u))
+
+    # Добавляем открытые позиции из QUIK OnTrade
+    quik_open = _get_quik_open_trades()
+    for q in quik_open:
+        # Проверяем, нет ли уже такой бумаги в merged (чтобы не дублировать)
+        existing = [m for m in merged if m['security_code'] == q['security_code']]
+        if not existing:
+            merged.append(q)
+        else:
+            # Если бумага уже есть — объединяем (добавляем к последней группе)
+            merged.append(q)
+
     return merged
+
+
+def _get_quik_open_trades():
+    """
+    Get unmatched buy trades from QUIK OnTrade.
+    Calculates net position per security (total_bought - total_sold).
+    If net > 0, returns one aggregated lot.
+    """
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT sec_code, class_code,
+               SUM(CASE WHEN side='buy' THEN qty ELSE 0 END) AS total_buy,
+               SUM(CASE WHEN side='sell' THEN qty ELSE 0 END) AS total_sell,
+               SUM(CASE WHEN side='buy' THEN value ELSE 0 END) AS buy_value
+        FROM quik_trade
+        WHERE side IN ('buy', 'sell')
+        GROUP BY sec_code, class_code
+        HAVING total_buy > total_sell
+        ORDER BY sec_code
+    """).fetchall()
+    conn.close()
+
+    result = []
+    for r in rows:
+        net_qty = r['total_buy'] - r['total_sell']
+        if net_qty <= 0:
+            continue
+        avg_price = round(r['buy_value'] / r['total_buy'], 2) if r['total_buy'] > 0 else 0
+        total_cost = round(net_qty * avg_price, 2)
+        result.append({
+            'security_code': r['sec_code'],
+            'security_name': r['sec_code'],  # будет заменено в app.py
+            'qty': net_qty,
+            'buy_date': '',
+            'buy_price': avg_price,
+            'total_cost': total_cost,
+            'fees': 0.0,
+            'source': 'quik',
+        })
+
+    return result
 
 
 def get_instrument_summary(report_id=None, date_from=None, date_to=None):
@@ -375,6 +433,15 @@ def _match_trades_lifo(report_id=None, date_from=None, date_to=None):
         WHERE {where_sql}
         ORDER BY trade_date, trade_time, id
     """, params).fetchall()
+
+    # Добавляем QUIK OnTrade сделки в LIFO матчинг
+    quik_rows = conn.execute("""
+        SELECT sec_code, price, qty, value, side, trade_num,
+               trade_date, trade_time
+        FROM quik_trade
+        WHERE side IN ('buy', 'sell') AND qty > 0
+        ORDER BY trade_date, trade_time, id
+    """).fetchall()
     conn.close()
 
     # Deduplicate by deal_number (same trade appears in overlapping reports)
@@ -386,6 +453,30 @@ def _match_trades_lifo(report_id=None, date_from=None, date_to=None):
             continue
         seen_deals.add(key)
         trades.append(t)
+
+    # Добавляем QUIK OnTrade сделки в LIFO матчинг
+    for q in quik_rows:
+        # Пропускаем, если такая сделка уже есть из отчёта (по trade_num)
+        dup_key = (q['sec_code'], str(q['trade_num']))
+        if dup_key in seen_deals:
+            continue
+        seen_deals.add(dup_key)
+
+        # Нормализуем в формат, совместимый с trade
+        faux = {
+            'id': None,
+            'security_code': q['sec_code'],
+            'security_name': q['sec_code'],
+            'side': 'Покупка' if q['side'] == 'buy' else 'Продажа',
+            'quantity': q['qty'],
+            'amount': q['value'],
+            'broker_fee': 0.0,
+            'exchange_fee': 0.0,
+            'trade_date': q['trade_date'] or '',
+            'trade_time': q['trade_time'] or '',
+            'deal_number': str(q['trade_num']),
+        }
+        trades.append(faux)
 
     from collections import defaultdict
     by_sec = defaultdict(list)
@@ -645,21 +736,58 @@ def save_quik_trades(trades: list):
                 trade_date = m.group(1)
                 trade_time = m.group(2)
 
+        # Fallback: если datetime не передан, берём trade_date/trade_time напрямую из JSON
+        if not trade_date:
+            trade_date = t.get('trade_date')
+        if not trade_time:
+            trade_time = t.get('trade_time')
+
+        # Определяем сторону сделки: приоритет — operation (OnTrade),
+        #   затем flags (OnAllTrade), затем явное side из JSON.
+        #   OnTrade: operation='B' (buy) / 'S' (sell)
+        #   OnAllTrade: flags & 0x02 (bid) → buy, flags & 0x01 (offer) → sell
+        flags = t.get('flags', 0) or 0
+        operation = t.get('operation', '') or ''
+        side = t.get('side', '')
+        if operation == 'B':
+            side = 'buy'
+        elif operation == 'S':
+            side = 'sell'
+        elif not side and flags:
+            if flags & 0x02:
+                side = 'buy'
+            elif flags & 0x01:
+                side = 'sell'
+
+        # Некоторые QUIK-источники присылают qty=0 при ненулевом value.
+        # Восстанавливаем qty = value / price, если price > 0.
+        price = t['price']
+        qty = t['qty']
+        if qty == 0 and price > 0 and t.get('value', 0) > 0:
+            qty = int(round(t['value'] / price))
+        t_val = t.get('value', 0) or 0
+
         cur.execute("""
-            INSERT OR IGNORE INTO quik_trade
+            INSERT INTO quik_trade
                 (trade_num, sec_code, class_code, price, qty, value,
                  accruedint, yield, settlecode,
                  reporate, repovalue, repo2value, repoterm, period,
-                 trade_date, trade_time, source, side)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'quik', ?)
+                 trade_date, trade_time, source, side, flags, operation)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'quik', ?, ?, ?)
+            ON CONFLICT(source, trade_num) DO UPDATE SET
+                side=COALESCE(NULLIF(quik_trade.side, ''), excluded.side),
+                flags=COALESCE(NULLIF(quik_trade.flags, 0), excluded.flags),
+                operation=COALESCE(NULLIF(quik_trade.operation, ''), excluded.operation),
+                price=excluded.price, qty=excluded.qty, value=excluded.value,
+                trade_date=excluded.trade_date, trade_time=excluded.trade_time
         """, (
             t.get('trade_num'), t.get('sec_code'), t.get('class_code', ''),
-            t['price'], t['qty'], t.get('value', 0),
+            price, qty, t_val,
             t.get('accruedint', 0), t.get('yield', 0), t.get('settlecode', ''),
             t.get('repolate', 0), t.get('repovalue', 0), t.get('repo2value', 0),
             t.get('repoterm', 0), t.get('period', 0),
             trade_date, trade_time,
-            t.get('side', '')
+            side, flags, operation
         ))
     conn.commit()
     conn.close()
@@ -691,9 +819,9 @@ def get_my_instruments():
 
 
 def get_quik_positions():
-    """Aggregate QUIK positions: net qty per sec_code.
+    """Aggregate QUIK positions from OnTrade data.
        side='buy' → +qty, side='sell' → -qty.
-       Trades without side (legacy) → treated as buy.
+       Legacy records without side are excluded (can't determine direction).
     """
     conn = get_connection()
     rows = conn.execute("""
@@ -701,6 +829,7 @@ def get_quik_positions():
                SUM(CASE WHEN side='sell' THEN -qty ELSE qty END) AS net_qty,
                SUM(CASE WHEN side='sell' THEN 0 ELSE value END) AS buy_value
         FROM quik_trade
+        WHERE side IN ('buy', 'sell')
         GROUP BY sec_code, class_code
         HAVING net_qty > 0
         ORDER BY sec_code

@@ -23,6 +23,10 @@ lua_modules/
 reports/*.HTML
 reports/*.html
 
+# SQLite WAL files
+*.db-shm
+*.db-wal
+
 # OS
 Thumbs.db
 .DS_Store

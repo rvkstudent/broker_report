@@ -218,7 +218,11 @@
                             {% set gross_pl = (cur - o.buy_price) * o.qty %}
                             {% set net_pl = gross_pl - buy_fee - sell_fee %}
                             {% set pl_pct = (net_pl / o.total_cost * 100) if o.total_cost > 0 else 0 %}
-                            <tr class="{{ 'bg-profit-pos' if net_pl >= 0 else 'bg-profit-neg' }}">
+                            <tr class="{{ 'bg-profit-pos' if net_pl >= 0 else 'bg-profit-neg' }}"
+                                data-code="{{ o.security_code }}"
+                                data-qty="{{ o.qty }}"
+                                data-buy-price="{{ o.buy_price }}"
+                                data-total-cost="{{ o.total_cost }}">
                                 <td><small><img class="tkr-logo" src="/api/logo/{{ o.security_code }}" alt="" loading="lazy" onerror="this.style.display='none'" /></small> <small>{{ o.security_name }} ({{ o.security_code }})</small></td>
                                 <td class="text-end">{{ o.qty }}</td>
                                 <td><small>{{ o.buy_date }}</small></td>
@@ -515,19 +519,13 @@ async function refreshOpenTrades() {
         let tb = document.querySelector('#openTradesTable tbody');
         if (!tb) return;
         for (let row of tb.rows) {
-            let secCell = row.cells[0];
-            if (!secCell) continue;
-            // Extract sec_code from cell text (e.g. "MTSS (MTSS)" -> "MTSS")
-            let txt = secCell.textContent || '';
-            let m = txt.match(/\(([^)]+)\)/);
-            let code = m ? m[1] : txt.trim().split(' ')[0];
+            // Используем data-атрибуты (без проблем с форматированием чисел)
+            let code = row.dataset.code;
+            let qty = parseFloat(row.dataset.qty) || 0;
+            let buyPrice = parseFloat(row.dataset.buyPrice) || 0;
+            let totalCost = parseFloat(row.dataset.totalCost) || 0;
             let curPrice = pmap[code];
             if (curPrice == null) continue;
-
-            // qty = col 1, buy_price = col 3, total_cost = col 4
-            let qty = parseFloat(row.cells[1].textContent.replace(/\s/g,'')) || 0;
-            let buyPrice = parseFloat(row.cells[3].textContent.replace(/\s/g,'').replace(',','.')) || 0;
-            let totalCost = parseFloat(row.cells[4].textContent.replace(/\s/g,'').replace(',','.')) || 0;
 
             // Update current price cell (col 5)
             row.cells[5].innerHTML = fmtPrice(curPrice);
