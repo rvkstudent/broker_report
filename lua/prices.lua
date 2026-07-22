@@ -120,28 +120,47 @@ local function send_instrument_params()
 
     local batch = {}
     for _, sec_code in ipairs(INSTRUMENTS) do
-        -- Пробуем class_code из FILTER_CLASS_CODES
+        local found = false
         for _, cc in ipairs(FILTER_CLASS_CODES) do
-            local lotsize_param = getParamEx(cc, sec_code, "LOTSIZE")
-            if lotsize_param and lotsize_param.param_value then
-                local lotsize = tonumber(lotsize_param.param_value) or 1
-                local minstep_param = getParamEx(cc, sec_code, "SEC_SCALE")
-                local min_step = 0.01
-                if minstep_param and minstep_param.param_value then
-                    local scale = tonumber(minstep_param.param_value) or 2
-                    min_step = 1 / (10 ^ scale)
-                end
-                local shortname_param = getParamEx(cc, sec_code, "SHORTNAME")
-                local fullname_param = getParamEx(cc, sec_code, "SEC_NAME")
+            local si = getSecurityInfo(cc, sec_code)
+            if si and si.lot_size then
+                local lotsize = math.max(tonumber(si.lot_size) or 1, 1)
+                local min_step = tonumber(si.min_price_step) or 0.01
+                if min_step <= 0 then min_step = 0.01 end
                 table.insert(batch, {
                     sec_code = sec_code,
                     class_code = cc,
                     lotsize = lotsize,
                     min_step = min_step,
-                    short_name = (shortname_param and shortname_param.param_value) or "",
-                    full_name = (fullname_param and fullname_param.param_value) or "",
+                    short_name = tostring(si.short_name or ""),
+                    full_name = tostring(si.full_name or ""),
                 })
-                break  -- нашли class_code, переходим к следующему инструменту
+                found = true
+                break
+            end
+        end
+        if not found then
+            -- fallback: getParamEx для class_codes
+            for _, cc in ipairs(FILTER_CLASS_CODES) do
+                local lp = getParamEx(cc, sec_code, "LOTSIZE")
+                if lp and lp.param_value and tonumber(lp.param_value) and tonumber(lp.param_value) > 0 then
+                    local lotsize = math.max(tonumber(lp.param_value) or 1, 1)
+                    local ms = getParamEx(cc, sec_code, "SEC_SCALE")
+                    local min_step = 0.01
+                    if ms and ms.param_value then
+                        local scale = tonumber(ms.param_value) or 2
+                        if scale > 0 then min_step = 1 / (10 ^ scale) end
+                    end
+                    table.insert(batch, {
+                        sec_code = sec_code,
+                        class_code = cc,
+                        lotsize = lotsize,
+                        min_step = min_step,
+                        short_name = "",
+                        full_name = "",
+                    })
+                    break
+                end
             end
         end
     end
