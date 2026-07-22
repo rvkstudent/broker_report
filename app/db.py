@@ -855,8 +855,8 @@ def save_instruments_batch(instruments: list):
             ON CONFLICT(sec_code, class_code) DO UPDATE SET
                 lotsize = COALESCE(NULLIF(excluded.lotsize, 0), instrument.lotsize),
                 min_step = COALESCE(NULLIF(excluded.min_step, 0), instrument.min_step),
-                short_name = excluded.short_name,
-                full_name = excluded.full_name,
+                short_name = COALESCE(NULLIF(excluded.short_name, ''), instrument.short_name),
+                full_name = COALESCE(NULLIF(excluded.full_name, ''), instrument.full_name),
                 updated_at = datetime('now', 'localtime')
         """, (
             inst['sec_code'], inst.get('class_code', ''),
