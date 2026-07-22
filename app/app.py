@@ -10,7 +10,7 @@ from app.db import (init_db, get_reports_list, get_report_by_id,
                      get_trade_profit, get_trade_lots, get_open_trades,
                      get_instrument_summary, get_repo_total,
                      save_price, save_prices_batch, get_current_prices,
-                     get_my_instruments, save_quik_trades,
+                     get_my_instruments, save_quik_trades, save_instruments_batch,
                      get_recent_quik_trades, get_quik_positions)
 from app.parser import parse_report
 
@@ -250,8 +250,18 @@ def api_trade():
 
 # ── Instruments API ───────────────────────────────────────────
 
-@flask_app.route('/api/instruments', methods=['GET'])
+@flask_app.route('/api/instruments', methods=['GET', 'POST'])
 def api_instruments():
+    if request.method == 'POST':
+        """Save instrument reference data (lotsize, min_step, etc.) from QUIK."""
+        data = request.get_json(silent=True)
+        if not data or 'instruments' not in data or not isinstance(data['instruments'], list):
+            return jsonify({'error': 'Invalid JSON, expected {"instruments": [...]}'}), 400
+        if not data['instruments']:
+            return jsonify({'error': 'Empty instruments list'}), 400
+        save_instruments_batch(data['instruments'])
+        return jsonify({'status': 'ok', 'count': len(data['instruments'])}), 200
+
     """Get list of user's instruments (from trade history)."""
     instruments = get_my_instruments()
     return jsonify(instruments), 200

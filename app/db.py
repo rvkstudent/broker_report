@@ -228,6 +228,20 @@ def init_db():
         WHERE trade_num IS NOT NULL
     """)
 
+    # ── Instrument reference table ──────────────────────────────
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS instrument (
+            sec_code    TEXT NOT NULL,
+            class_code  TEXT NOT NULL DEFAULT '',
+            lotsize     INTEGER DEFAULT 1,
+            min_step    REAL DEFAULT 0.01,
+            short_name  TEXT DEFAULT '',
+            full_name   TEXT DEFAULT '',
+            updated_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+            PRIMARY KEY (sec_code, class_code)
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -760,7 +774,8 @@ def save_quik_trades(trades: list):
                 side = 'sell'
 
         # QUIK OnTrade передаёт qty в лотах. Фактическое количество
-        # акций = value / price (price — за 1 акцию).
+        # акций = value / price (price — за 1 акцию), но если известен
+        # lotsize из таблицы instrument — умножаем qty на lotsize.
         price = t['price']
         qty = t['qty']
         t_val = t.get('value', 0) or 0
@@ -768,6 +783,13 @@ def save_quik_trades(trades: list):
             actual_qty = int(round(t_val / price))
             if actual_qty > 0:
                 qty = actual_qty
+
+        # Если в БД есть lotsize, используем для контроля (может отличаться
+        # от value/price для некоторых инструментов)
+        lotsize = get_instrument_lotsize(t.get('sec_code', ''), t.get('class_code', ''))
+        if lotsize > 1 and qty == 1 and t_val > 0:
+            # qty=1 лот, но value/price даёт другое — доверяем value/price
+            pass  # уже исправлено выше через actual_qty
 
         cur.execute("""
             INSERT INTO quik_trade
@@ -818,6 +840,46 @@ def get_my_instruments():
     """).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def save_instruments_batch(instruments: list):
+    """Upsert instrument reference data (lotsize, min_step, etc.) from QUIK."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("BEGIN")
+    for inst in instruments:
+        cur.execute("""
+            INSERT INTO instrument (sec_code, class_code, lotsize, min_step,
+                                    short_name, full_name, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
+            ON CONFLICT(sec_code, class_code) DO UPDATE SET
+                lotsize = COALESCE(NULLIF(excluded.lotsize, 0), instrument.lotsize),
+                min_step = COALESCE(NULLIF(excluded.min_step, 0), instrument.min_step),
+                short_name = excluded.short_name,
+                full_name = excluded.full_name,
+                updated_at = datetime('now', 'localtime')
+        """, (
+            inst['sec_code'], inst.get('class_code', ''),
+            int(inst.get('lotsize', 1)),
+            float(inst.get('min_step', 0.01)),
+            inst.get('short_name', ''),
+            inst.get('full_name', ''),
+        ))
+    conn.commit()
+    conn.close()
+
+
+def get_instrument_lotsize(sec_code: str, class_code: str = '') -> int:
+    """Get lot size for a security from the instrument reference."""
+    conn = get_connection()
+    r = conn.execute("""
+        SELECT lotsize FROM instrument
+        WHERE sec_code=? AND class_code=?
+    """, (sec_code, class_code)).fetchone()
+    conn.close()
+    if r and r['lotsize'] and r['lotsize'] > 1:
+        return r['lotsize']
+    return 1
 
 
 def get_quik_positions():

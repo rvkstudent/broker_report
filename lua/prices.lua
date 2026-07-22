@@ -111,6 +111,68 @@ local function fetch_instruments()
     return true
 end
 
+-- Отправка параметров инструментов (lotsize, min_step) из QUIK в БД
+local function send_instrument_params()
+    if #INSTRUMENTS == 0 then
+        log_info("send_instrument_params: no instruments to process")
+        return
+    end
+
+    local batch = {}
+    for _, sec_code in ipairs(INSTRUMENTS) do
+        -- Пробуем class_code из FILTER_CLASS_CODES
+        for _, cc in ipairs(FILTER_CLASS_CODES) do
+            local lotsize_param = getParamEx(cc, sec_code, "LOTSIZE")
+            if lotsize_param and lotsize_param.param_value then
+                local lotsize = tonumber(lotsize_param.param_value) or 1
+                local minstep_param = getParamEx(cc, sec_code, "SEC_SCALE")
+                local min_step = 0.01
+                if minstep_param and minstep_param.param_value then
+                    local scale = tonumber(minstep_param.param_value) or 2
+                    min_step = 1 / (10 ^ scale)
+                end
+                local shortname_param = getParamEx(cc, sec_code, "SHORTNAME")
+                local fullname_param = getParamEx(cc, sec_code, "SEC_NAME")
+                table.insert(batch, {
+                    sec_code = sec_code,
+                    class_code = cc,
+                    lotsize = lotsize,
+                    min_step = min_step,
+                    short_name = (shortname_param and shortname_param.param_value) or "",
+                    full_name = (fullname_param and fullname_param.param_value) or "",
+                })
+                break  -- нашли class_code, переходим к следующему инструменту
+            end
+        end
+    end
+
+    if #batch == 0 then
+        log_info("send_instrument_params: no params fetched")
+        return
+    end
+
+    local body = json.encode({ instruments = batch })
+    local resp = {}
+    local ok, res, code = pcall(function()
+        return http.request{
+            url = API_INSTRUMENTS,
+            method = "POST",
+            headers = {
+                ["Content-Type"] = "application/json",
+                ["Content-Length"] = tostring(#body)
+            },
+            source = ltn12.source.string(body),
+            sink = ltn12.sink.table(resp)
+        }
+    end)
+    if not ok then
+        log_error("send_instrument_params HTTP error: " .. tostring(res))
+    else
+        local resp_body = table.concat(resp)
+        log_info(string.format("Sent %d instrument params, response: %s", #batch, resp_body))
+    end
+end
+
 -- Отправка пачки цен на API
 local function send_prices()
     if not next(price_cache) then
@@ -363,6 +425,13 @@ function OnTrade(trade)
         side = "buy"
     end
 
+    -- Размер лота из QUIK
+    local lotsize = 1
+    local lp = getParamEx(class_code, sec_code, "LOTSIZE")
+    if lp and lp.param_value then
+        lotsize = tonumber(lp.param_value) or 1
+    end
+
     -- Сохраняем сделку для отправки в БД
     local dt = normalize_trade_datetime(trade.datetime)
     table.insert(trade_cache, {
@@ -381,7 +450,8 @@ function OnTrade(trade)
         repoterm = tonumber(trade.repoterm) or 0,
         period = tonumber(trade.period) or 0,
         datetime = dt,
-        side = side
+        side = side,
+        lotsize = lotsize,
     })
 
     -- Если очередь сделок слишком большая — сбрасываем старые (срезом, а не циклом)
@@ -465,6 +535,7 @@ function main()
 
     -- Загружаем список инструментов с API при старте
     pcall(fetch_instruments)
+    pcall(send_instrument_params)
     if #INSTRUMENTS == 0 then
         log_info("No instruments from API, fallback to class filter: "
             .. table.concat(FILTER_CLASS_CODES, ", "))
@@ -487,6 +558,7 @@ function main()
         -- Периодическое обновление списка инструментов
         if now - last_refresh >= REFRESH_INSTRUMENTS then
             pcall(fetch_instruments)
+            pcall(send_instrument_params)
             last_refresh = now
             if #INSTRUMENTS > 0 then
                 log_info("Instruments refreshed: " .. #INSTRUMENTS .. " items")
