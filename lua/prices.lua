@@ -356,10 +356,11 @@ function OnTrade(trade)
         time = os.time()
     }
 
-    -- Определяем сторону сделки: flags & 1 == 0 → покупка, flags & 1 == 1 → продажа
-    local side = "buy"
+    -- Определяем сторону сделки: flags & 1 == 1 → покупка (наша заявка),
+    -- flags & 1 == 0 → продажа (контрагент)
+    local side = "sell"
     if trade.flags and (trade.flags & 1) == 1 then
-        side = "sell"
+        side = "buy"
     end
 
     -- Сохраняем сделку для отправки в БД
