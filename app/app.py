@@ -13,6 +13,7 @@ from app.db import (init_db, get_reports_list, get_report_by_id,
                      get_my_instruments, save_quik_trades, save_instruments_batch,
                      get_recent_quik_trades, get_quik_positions)
 from app.parser import parse_report
+from app.replication import push as push_to_cloud
 
 flask_app = Flask(__name__, template_folder='templates')
 flask_app.secret_key = 'broker-report-secret-key'
@@ -23,23 +24,31 @@ _imported_files = set()  # track already-imported filenames
 
 
 def _auto_import():
-    """Import HTML files that haven't been imported yet."""
+    """Import HTML/XLSX files that haven't been imported yet."""
     imported = 0
     seen = set()
-    for fp in sorted(glob.glob(os.path.join(REPORTS_DIR, '*.[Hh][Tt][Mm][Ll]'))):
-        if fp.lower() in seen:
-            continue
-        seen.add(fp.lower())
-        fname = os.path.basename(fp)
-        if fname in _imported_files:
-            continue
-        try:
-            rid = parse_report(fp)
-            print(f'  [auto] ✓ {fname} (id={rid})')
-            _imported_files.add(fname)
-            imported += 1
-        except Exception:
-            pass
+    patterns = [
+        os.path.join(REPORTS_DIR, '*.[Hh][Tt][Mm][Ll]'),
+        os.path.join(REPORTS_DIR, '*.[Xx][Ll][Ss][Xx]'),
+        os.path.join(REPORTS_DIR, '*.[Xx][Ll][Ss]'),
+    ]
+    for pattern in patterns:
+        for fp in sorted(glob.glob(pattern)):
+            if fp.lower() in seen:
+                continue
+            seen.add(fp.lower())
+            fname = os.path.basename(fp)
+            if fname in _imported_files:
+                continue
+            try:
+                rid = parse_report(fp)
+                print(f'  [auto] ✓ {fname} (id={rid})')
+                _imported_files.add(fname)
+                imported += 1
+            except Exception as e:
+                print(f'  [auto] ✗ {fname}: {e}')
+    if imported:
+        push_to_cloud()
     return imported
 
 
@@ -51,6 +60,7 @@ def _watch_folder(interval=60):
             cnt = _auto_import()
             if cnt:
                 print(f'  [auto] Загружено новых отчётов: {cnt}')
+                push_to_cloud()
         except Exception:
             pass
 
@@ -65,6 +75,7 @@ def start_watcher(interval=60):
 def index():
     date_from = request.args.get('date_from', '')
     date_to = request.args.get('date_to', '')
+    broker = request.args.get('broker', 'all')
 
     # Convert HTML date input (YYYY-MM-DD) to DD.MM.YYYY for DB
     def to_dmy(iso):
@@ -79,11 +90,11 @@ def index():
     dt_dmy = to_dmy(date_to)
 
     reports = get_reports_list()
-    profit = get_trade_profit(None, df_dmy, dt_dmy)
-    lots = get_trade_lots(None, df_dmy, dt_dmy)
-    open_trades = get_open_trades(None, df_dmy, dt_dmy)
-    instruments = get_instrument_summary(None, df_dmy, dt_dmy)
-    repo_total = get_repo_total(None, df_dmy, dt_dmy)
+    profit = get_trade_profit(None, df_dmy, dt_dmy, broker)
+    lots = get_trade_lots(None, df_dmy, dt_dmy, broker)
+    open_trades = get_open_trades(None, df_dmy, dt_dmy, broker)
+    instruments = get_instrument_summary(None, df_dmy, dt_dmy, broker)
+    repo_total = get_repo_total(None, df_dmy, dt_dmy, broker)
 
     quik_trades = get_recent_quik_trades(20)
     prices = get_current_prices()
@@ -134,7 +145,8 @@ def index():
                            quik_positions=quik_pos,
                            quik_connected=quik_connected,
                            date_from=df_dmy, date_to=dt_dmy,
-                           date_from_iso=date_from, date_to_iso=date_to)
+                           date_from_iso=date_from, date_to_iso=date_to,
+                           broker=broker)
 
 
 @flask_app.route('/upload', methods=['POST'])
@@ -148,23 +160,28 @@ def upload():
             try:
                 rid = parse_report(filepath)
                 flash(f'Отчёт {os.path.basename(filepath)} загружен (id={rid})', 'success')
+                push_to_cloud()
             except Exception as e:
                 flash(f'Ошибка: {e}', 'danger')
             return redirect(url_for('index'))
-        # Scan for HTML files in the current directory
+        # Scan for HTML/XLSX files in the current directory
         found = False
-        for fp in glob.glob(os.path.join(REPORTS_DIR, '*.html')):
-            try:
-                rid = parse_report(fp)
-                flash(f'Загружен: {os.path.basename(fp)} (id={rid})', 'success')
-                found = True
-            except Exception as e:
-                flash(f'Ошибка {os.path.basename(fp)}: {e}', 'danger')
+        for ext in ('*.html', '*.htm', '*.xlsx', '*.xls'):
+            for fp in glob.glob(os.path.join(REPORTS_DIR, ext)):
+                try:
+                    rid = parse_report(fp)
+                    flash(f'Загружен: {os.path.basename(fp)} (id={rid})', 'success')
+                    found = True
+                except Exception as e:
+                    flash(f'Ошибка {os.path.basename(fp)}: {e}', 'danger')
+        if found:
+            push_to_cloud()
         if not found:
-            flash('HTML-файлы не найдены', 'warning')
+            flash('Файлы отчётов не найдены', 'warning')
         return redirect(url_for('index'))
 
     # Handle uploaded files
+    uploaded = 0
     for f in files:
         if f.filename:
             save_path = os.path.join(REPORTS_DIR, f.filename)
@@ -172,8 +189,11 @@ def upload():
             try:
                 rid = parse_report(save_path)
                 flash(f'Загружен: {f.filename} (id={rid})', 'success')
+                uploaded += 1
             except Exception as e:
                 flash(f'Ошибка {f.filename}: {e}', 'danger')
+    if uploaded:
+        push_to_cloud()
     return redirect(url_for('index'))
 
 
@@ -182,6 +202,7 @@ def report_view(report_id):
     if request.method == 'POST':
         delete_report(report_id)
         flash('Отчёт удалён', 'info')
+        push_to_cloud()
         return redirect(url_for('index'))
 
     r = get_report_by_id(report_id)

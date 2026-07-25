@@ -4,6 +4,8 @@ import sys
 
 from app.db import init_db
 from app.app import flask_app, start_watcher, _auto_import
+from app.replication import init_replication
+from app.replication import push as push_to_cloud
 
 
 if __name__ == '__main__':
@@ -13,6 +15,9 @@ if __name__ == '__main__':
     print()
 
     init_db()
+
+    # Инициализация репликации в Firebase (pull при старте + фоновый sync)
+    init_replication()
 
     if len(sys.argv) > 1:
         # Import specific files
@@ -31,6 +36,8 @@ if __name__ == '__main__':
         print('  Загрузка отчётов...')
         cnt = _auto_import()
         print(f'  Загружено: {cnt} отчётов')
+        if cnt:
+            push_to_cloud()
 
     # Start background watcher (checks for new files every 60s)
     start_watcher(interval=60)

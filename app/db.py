@@ -18,7 +18,7 @@ def _norm_date(d: str) -> str:
     return d
 
 
-def _date_where(alias='trade', date_from=None, date_to=None) -> str:
+def _date_where(alias='trade', date_from=None, date_to=None):
     """Build SQL WHERE snippet for date filtering on trade_date."""
     clauses = []
     params = []
@@ -28,6 +28,20 @@ def _date_where(alias='trade', date_from=None, date_to=None) -> str:
     if date_to:
         clauses.append(f"substr({alias}.trade_date,7,4)||substr({alias}.trade_date,4,2)||substr({alias}.trade_date,1,2) <= ?")
         params.append(_norm_date(date_to))
+    return clauses, params
+
+
+def _source_where(alias='trade', broker=None):
+    """Build SQL WHERE snippet for broker source filtering.
+    broker='all' or None → no filter (both Sber and VTB).
+    broker='sber' → only source='sber'.
+    broker='vtb' → only source='vtb'.
+    """
+    clauses = []
+    params = []
+    if broker and broker != 'all':
+        clauses.append(f"{alias}.source=?")
+        params.append(broker)
     return clauses, params
 
 
@@ -185,23 +199,32 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_quik_trade_time ON quik_trade(created_at);
     """)
 
+    # ── Migration: add broker column to quik_trade ──
+    qk_cols = [r[1] for r in cur.execute("PRAGMA table_info(quik_trade)").fetchall()]
+    if 'broker' not in qk_cols:
+        cur.execute("ALTER TABLE quik_trade ADD COLUMN broker TEXT DEFAULT ''")
+
     # ── Migrations: add source column + unique indexes if missing ──
-    for table, idx_name in [('trade', 'idx_trade_source_deal'), ('repo', 'idx_repo_source_deal')]:
+    for table in ('trade', 'repo', 'cash_flow', 'portfolio'):
         cols = [r[1] for r in cur.execute(f"PRAGMA table_info({table})").fetchall()]
         if 'source' not in cols:
-            cur.execute(f"ALTER TABLE {table} ADD COLUMN source TEXT NOT NULL DEFAULT 'report'")
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN source TEXT NOT NULL DEFAULT 'sber'")
 
-    # Deduplicate rows with same deal_number before creating unique index
+    # Migrate existing rows with old default 'report' → 'sber'
+    for table in ('trade', 'repo', 'cash_flow', 'portfolio'):
+        cur.execute(f"UPDATE {table} SET source='sber' WHERE source='report'")
+
+    # Deduplicate rows with same (source, deal_number) before creating unique index
     for table in ('trade', 'repo'):
         cur.execute(f"""
             DELETE FROM {table} WHERE id IN (
                 SELECT t2.id FROM {table} t2
                 INNER JOIN (
-                    SELECT MIN(id) AS keep_id, deal_number FROM {table}
+                    SELECT MIN(id) AS keep_id, source, deal_number FROM {table}
                     WHERE deal_number IS NOT NULL AND deal_number != ''
-                    GROUP BY deal_number
+                    GROUP BY source, deal_number
                     HAVING COUNT(*) > 1
-                ) dup ON t2.deal_number = dup.deal_number
+                ) dup ON t2.deal_number = dup.deal_number AND t2.source = dup.source
                 WHERE t2.id != dup.keep_id
             )
         """)
@@ -228,6 +251,18 @@ def init_db():
         WHERE trade_num IS NOT NULL
     """)
 
+    # Migration: fix empty side for QUIK trades that have flags
+    # flags & 0x02 → buy, flags & 0x01 → sell
+    cur.execute("""
+        UPDATE quik_trade
+        SET side = CASE
+            WHEN (flags & 2) = 2 THEN 'buy'
+            WHEN (flags & 1) = 1 THEN 'sell'
+            ELSE side
+        END
+        WHERE side IS NULL OR side = ''
+    """)
+
     # ── Instrument reference table ──────────────────────────────
     cur.execute("""
         CREATE TABLE IF NOT EXISTS instrument (
@@ -248,13 +283,13 @@ def init_db():
 
 # ── Analytical queries ──────────────────────────────────────────
 
-def get_trade_profit(report_id=None, date_from=None, date_to=None):
+def get_trade_profit(report_id=None, date_from=None, date_to=None, broker=None):
     """
     Return per-security realized P&L using LIFO chronological matching.
     Only trades where both buy AND sell happened within this period.
     Opening positions are NOT included.
     """
-    lots, _ = _match_trades_lifo(report_id, date_from, date_to)
+    lots, _ = _match_trades_lifo(report_id, date_from, date_to, broker)
 
     from collections import defaultdict
     by_sec = defaultdict(lambda: {
@@ -292,22 +327,22 @@ def get_trade_profit(report_id=None, date_from=None, date_to=None):
     return results
 
 
-def get_trade_lots(report_id=None, date_from=None, date_to=None):
+def get_trade_lots(report_id=None, date_from=None, date_to=None, broker=None):
     """
     Return individual matched buy→sell lots in chronological order.
     Each lot shows: buy_date, sell_date, qty, buy_price, sell_price, profit, fees.
     """
-    lots, _ = _match_trades_lifo(report_id, date_from, date_to)
+    lots, _ = _match_trades_lifo(report_id, date_from, date_to, broker)
     return lots
 
 
-def get_open_trades(report_id=None, date_from=None, date_to=None):
+def get_open_trades(report_id=None, date_from=None, date_to=None, broker=None):
     """
     Buys that have NOT been closed by a sell within this period.
     Returns unmatched buy lots, merged by (security_code, buy_date, buy_price).
     Also includes QUIK OnTrade buys that are not closed by QUIK sells.
     """
-    _, unmatched = _match_trades_lifo(report_id, date_from, date_to)
+    _, unmatched = _match_trades_lifo(report_id, date_from, date_to, broker)
 
     # Merge consecutive lots with same code, date, and price
     merged = []
@@ -348,6 +383,7 @@ def _get_quik_open_trades():
                SUM(CASE WHEN side='buy' THEN value ELSE 0 END) AS buy_value
         FROM quik_trade
         WHERE side IN ('buy', 'sell')
+          AND (repovalue IS NULL OR repovalue = 0)  -- исключаем РЕПО
         GROUP BY sec_code, class_code
         HAVING total_buy > total_sell
         ORDER BY sec_code
@@ -375,13 +411,13 @@ def _get_quik_open_trades():
     return result
 
 
-def get_instrument_summary(report_id=None, date_from=None, date_to=None):
+def get_instrument_summary(report_id=None, date_from=None, date_to=None, broker=None):
     """
     Aggregate summary per instrument from OPEN (unmatched) buy positions.
     Shows total qty, average price, total cost per security.
     """
     from collections import defaultdict
-    _, unmatched = _match_trades_lifo(report_id, date_from, date_to)
+    _, unmatched = _match_trades_lifo(report_id, date_from, date_to, broker)
 
     by_sec = defaultdict(lambda: {'qty': 0, 'cost': 0.0, 'name': ''})
     for u in unmatched:
@@ -402,10 +438,13 @@ def get_instrument_summary(report_id=None, date_from=None, date_to=None):
     return result
 
 
-def get_repo_total(report_id=None, date_from=None, date_to=None):
+def get_repo_total(report_id=None, date_from=None, date_to=None, broker=None):
     """Get total repo costs (interest + fees)."""
     conn = get_connection()
     where_clauses, params = _date_where('repo', date_from, date_to)
+    src_clauses, src_params = _source_where('repo', broker)
+    where_clauses.extend(src_clauses)
+    params.extend(src_params)
     if report_id is not None:
         where_clauses.append("repo.report_id=?")
         params.append(report_id)
@@ -425,73 +464,17 @@ def get_repo_total(report_id=None, date_from=None, date_to=None):
     }
 
 
-def _match_trades_lifo(report_id=None, date_from=None, date_to=None):
+def _run_lifo(trades, name_map):
+    """Run LIFO matching on a list of trades for a single broker.
+
+    Args:
+        trades: list of dicts with keys (security_code, security_name, side,
+                quantity, amount, broker_fee, exchange_fee, trade_date,
+                trade_time, deal_number, source)
+        name_map: dict {security_code: security_name}
+
+    Returns: (matched_lots, unmatched_buys)
     """
-    Core LIFO matching engine.
-    Processes ALL trades in chronological order.
-    Deduplicates by deal_number across reports.
-    Each sell matches against the MOST RECENT buy (LIFO).
-    Returns (matched_lots, unmatched_buys).
-    """
-    conn = get_connection()
-    where_clauses, params = _date_where('trade', date_from, date_to)
-    if report_id is not None:
-        where_clauses.append("trade.report_id=?")
-        params.append(report_id)
-    where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
-
-    trades_raw = conn.execute(f"""
-        SELECT id, security_code, security_name, side, quantity, amount,
-               broker_fee, exchange_fee, trade_date, trade_time, deal_number
-        FROM trade
-        WHERE {where_sql}
-        ORDER BY trade_date, trade_time, id
-    """, params).fetchall()
-
-    # Добавляем QUIK OnTrade сделки в LIFO матчинг
-    quik_rows = conn.execute("""
-        SELECT sec_code, price, qty, value, side, trade_num,
-               trade_date, trade_time
-        FROM quik_trade
-        WHERE side IN ('buy', 'sell') AND qty > 0
-        ORDER BY trade_date, trade_time, id
-    """).fetchall()
-    conn.close()
-
-    # Deduplicate by deal_number (same trade appears in overlapping reports)
-    seen_deals = set()
-    trades = []
-    for t in trades_raw:
-        key = (t['security_code'] or t['security_name'], t['deal_number'])
-        if key in seen_deals:
-            continue
-        seen_deals.add(key)
-        trades.append(t)
-
-    # Добавляем QUIK OnTrade сделки в LIFO матчинг
-    for q in quik_rows:
-        # Пропускаем, если такая сделка уже есть из отчёта (по trade_num)
-        dup_key = (q['sec_code'], str(q['trade_num']))
-        if dup_key in seen_deals:
-            continue
-        seen_deals.add(dup_key)
-
-        # Нормализуем в формат, совместимый с trade
-        faux = {
-            'id': None,
-            'security_code': q['sec_code'],
-            'security_name': q['sec_code'],
-            'side': 'Покупка' if q['side'] == 'buy' else 'Продажа',
-            'quantity': q['qty'],
-            'amount': q['value'],
-            'broker_fee': 0.0,
-            'exchange_fee': 0.0,
-            'trade_date': q['trade_date'] or '',
-            'trade_time': q['trade_time'] or '',
-            'deal_number': str(q['trade_num']),
-        }
-        trades.append(faux)
-
     from collections import defaultdict
     by_sec = defaultdict(list)
     for t in trades:
@@ -502,10 +485,8 @@ def _match_trades_lifo(report_id=None, date_from=None, date_to=None):
     all_unmatched = []
 
     for code, txns in by_sec.items():
-        name = txns[0]['security_name']
-
-        # Process ALL transactions in CHRONOLOGICAL order
-        buy_queue = []  # each: [remaining_qty, unit_cost, buy_row, fee_total]
+        name = name_map.get(code, txns[0]['security_name'])
+        buy_queue = []
 
         for t in txns:
             if t['side'] == 'Покупка' and t['quantity'] > 0:
@@ -521,7 +502,6 @@ def _match_trades_lifo(report_id=None, date_from=None, date_to=None):
                 sell_unit_price = t['amount'] / t['quantity']
                 sell_fee = t['broker_fee'] + t['exchange_fee']
 
-                # LIFO: consume from the END of the queue (most recent buy)
                 while remaining > 0 and buy_queue:
                     available = buy_queue[-1][0]
                     cost_per = buy_queue[-1][1]
@@ -534,6 +514,7 @@ def _match_trades_lifo(report_id=None, date_from=None, date_to=None):
                     profit = sell_amount - buy_amount
                     fee_proportion = buy_fee * (used / buy_row['quantity']) if buy_row['quantity'] > 0 else 0
 
+                    lot_source = buy_row['source'] if buy_row['source'] else t['source']
                     all_lots.append({
                         'security_code': code,
                         'security_name': name,
@@ -547,6 +528,7 @@ def _match_trades_lifo(report_id=None, date_from=None, date_to=None):
                         'sell_amount': round(sell_amount, 2),
                         'sell_fee': round(sell_fee * (used / t['quantity']), 2) if t['quantity'] > 0 else 0,
                         'profit': round(profit, 2),
+                        'source': lot_source,
                     })
 
                     buy_queue[-1][0] -= used
@@ -554,7 +536,6 @@ def _match_trades_lifo(report_id=None, date_from=None, date_to=None):
                         buy_queue.pop()
                     remaining -= used
 
-        # Remaining in buy queue = unmatched (open) buys
         for lot in buy_queue:
             qty = lot[0]
             if qty <= 0:
@@ -568,8 +549,131 @@ def _match_trades_lifo(report_id=None, date_from=None, date_to=None):
                 'buy_price': round(lot[1], 2),
                 'total_cost': round(qty * lot[1], 2),
                 'fees': round(lot[3], 2),
+                'source': b['source'] if b['source'] else '',
             })
 
+    return all_lots, all_unmatched
+
+
+def _fetch_quik_trades(conn, seen_deals_all, name_map, broker_filter=None):
+    """Fetch QUIK OnTrade trades (non-REPO) and return as list of trade dicts.
+
+    Args:
+        broker_filter: if set ('sber'/'vtb'), return QUIK trades tagged with
+                       that broker OR untagged (broker=''). This handles the
+                       common case where QUIK trades haven't been tagged yet.
+                       If None, return all QUIK trades (for 'all' view).
+    """
+    query = """
+        SELECT sec_code, price, qty, value, side, trade_num,
+               trade_date, trade_time, repovalue, broker
+        FROM quik_trade
+        WHERE side IN ('buy', 'sell')
+          AND qty > 0
+          AND (repovalue IS NULL OR repovalue = 0)
+    """
+    params = []
+    if broker_filter:
+        query += " AND (broker=? OR broker='')"
+        params.append(broker_filter)
+    query += " ORDER BY trade_date, trade_time, id"
+
+    quik_rows = conn.execute(query, params).fetchall()
+
+    result = []
+    for q in quik_rows:
+        dup_key = (q['sec_code'], str(q['trade_num']))
+        if dup_key in seen_deals_all:
+            continue
+        seen_deals_all.add(dup_key)
+        faux = {
+            'id': None,
+            'security_code': q['sec_code'],
+            'security_name': q['sec_code'],
+            'side': 'Покупка' if q['side'] == 'buy' else 'Продажа',
+            'quantity': q['qty'],
+            'amount': q['value'],
+            'broker_fee': 0.0,
+            'exchange_fee': 0.0,
+            'trade_date': q['trade_date'] or '',
+            'trade_time': q['trade_time'] or '',
+            'deal_number': str(q['trade_num']),
+            'source': 'quik',
+        }
+        result.append(faux)
+        code = q['sec_code']
+        if code not in name_map:
+            name_map[code] = q['sec_code']
+    return result
+
+
+def _match_trades_lifo(report_id=None, date_from=None, date_to=None, broker=None):
+    """
+    Core LIFO matching engine.
+
+    QUIK trades are ALWAYS included (they represent real-time terminal trades).
+    When broker='all' or None, runs LIFO matching SEPARATELY for each broker
+    (sber, vtb) + QUIK, then combines results.
+    When broker='sber' or 'vtb', runs LIFO for that broker + QUIK combined.
+
+    Returns (matched_lots, unmatched_buys).
+    """
+    conn = get_connection()
+
+    # Determine which report sources to process
+    if broker and broker != 'all':
+        sources = [broker]
+    else:
+        sources = ['sber', 'vtb']
+
+    all_lots = []
+    all_unmatched = []
+    seen_deals_all = set()
+    name_map = {}
+
+    # Fetch QUIK trades tagged with the selected broker (if any)
+    # QUIK trades without broker tag are included as separate source
+    quik_filter = broker if (broker and broker != 'all') else None
+    quik_tagged = _fetch_quik_trades(conn, seen_deals_all, name_map, quik_filter)
+
+    for src in sources:
+        where_clauses, params = _date_where('trade', date_from, date_to)
+        where_clauses.append("trade.source=?")
+        params.append(src)
+        if report_id is not None:
+            where_clauses.append("trade.report_id=?")
+            params.append(report_id)
+        where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+
+        trades_raw = conn.execute(f"""
+            SELECT id, security_code, security_name, side, quantity, amount,
+                   broker_fee, exchange_fee, trade_date, trade_time, deal_number, source
+            FROM trade
+            WHERE {where_sql}
+            ORDER BY substr(trade_date,7,4)||substr(trade_date,4,2)||substr(trade_date,1,2), trade_time, id
+        """, params).fetchall()
+
+        # Deduplicate within this source
+        trades = []
+        for t in trades_raw:
+            key = (t['security_code'] or t['security_name'], t['deal_number'])
+            if key in seen_deals_all:
+                continue
+            seen_deals_all.add(key)
+            trades.append(t)
+            code = t['security_code'] or t['security_name']
+            if code not in name_map:
+                name_map[code] = t['security_name']
+
+        # Include QUIK trades tagged for this broker (real-time terminal trades)
+        all_trades = trades + quik_tagged
+
+        # Run LIFO matching for this source + QUIK independently
+        lots, unmatched = _run_lifo(all_trades, name_map)
+        all_lots.extend(lots)
+        all_unmatched.extend(unmatched)
+
+    conn.close()
     return all_lots, all_unmatched
 
 
@@ -662,7 +766,17 @@ def get_reports_list():
         FROM report ORDER BY created_at DESC
     """).fetchall()
     conn.close()
-    return rows
+    # Add source info based on file extension
+    result = []
+    for r in rows:
+        d = dict(r)
+        fn = d['filename'].lower()
+        if fn.endswith('.xlsx') or fn.endswith('.xls'):
+            d['source'] = 'vtb'
+        else:
+            d['source'] = 'sber'
+        result.append(d)
+    return result
 
 
 def get_report_by_id(report_id):
@@ -685,9 +799,21 @@ def delete_report(report_id):
 
 # ── Current prices ────────────────────────────────────────────
 
+def _is_bond_class(class_code: str) -> bool:
+    """Detect if a class_code represents bonds (price in % of nominal)."""
+    return class_code in ('TQOB', 'TQCB', 'TQOD') or class_code.startswith('TQO')
+
+
 def save_price(sec_code: str, price: float, qty: int = 0, value: float = 0, class_code: str = ''):
-    """Upsert current price for a security."""
+    """Upsert current price for a security.
+
+    For bonds (class_code TQOB/TQCB), QUIK sends price as % of nominal.
+    We convert to ruble price = value / qty for correct P&L calculation.
+    """
     conn = get_connection()
+    # Convert bond % price to ruble price
+    if _is_bond_class(class_code) and qty > 0 and value > 0:
+        price = round(value / qty, 2)
     conn.execute("""
         INSERT INTO current_price (sec_code, class_code, price, qty, value, timestamp)
         VALUES (?, ?, ?, ?, ?, datetime('now', 'localtime'))
@@ -705,11 +831,18 @@ def save_prices_batch(prices: list):
     """Upsert multiple prices in a single transaction.
 
     Each item: dict with keys sec_code, price, [qty, value, class_code]
+    For bonds (TQOB/TQCB), converts % price to ruble price = value / qty.
     """
     conn = get_connection()
     cur = conn.cursor()
     cur.execute("BEGIN")
     for p in prices:
+        price = p['price']
+        class_code = p.get('class_code', '')
+        qty = p.get('qty', 0)
+        value = p.get('value', 0)
+        if _is_bond_class(class_code) and qty > 0 and value > 0:
+            price = round(value / qty, 2)
         cur.execute("""
             INSERT INTO current_price (sec_code, class_code, price, qty, value, timestamp)
             VALUES (?, ?, ?, ?, ?, datetime('now', 'localtime'))
@@ -718,7 +851,7 @@ def save_prices_batch(prices: list):
                 qty = excluded.qty,
                 value = excluded.value,
                 timestamp = datetime('now', 'localtime')
-        """, (p['sec_code'], p.get('class_code', ''), p['price'], p.get('qty', 0), p.get('value', 0)))
+        """, (p['sec_code'], class_code, price, qty, value))
     conn.commit()
     conn.close()
 
@@ -791,19 +924,21 @@ def save_quik_trades(trades: list):
             # qty=1 лот, но value/price даёт другое — доверяем value/price
             pass  # уже исправлено выше через actual_qty
 
+        broker = t.get('broker', '') or ''
         cur.execute("""
             INSERT INTO quik_trade
                 (trade_num, sec_code, class_code, price, qty, value,
                  accruedint, yield, settlecode,
                  reporate, repovalue, repo2value, repoterm, period,
-                 trade_date, trade_time, source, side, flags, operation)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'quik', ?, ?, ?)
+                 trade_date, trade_time, source, side, flags, operation, broker)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'quik', ?, ?, ?, ?)
             ON CONFLICT(source, trade_num) DO UPDATE SET
                 side=COALESCE(NULLIF(quik_trade.side, ''), excluded.side),
                 flags=COALESCE(NULLIF(quik_trade.flags, 0), excluded.flags),
                 operation=COALESCE(NULLIF(quik_trade.operation, ''), excluded.operation),
                 price=excluded.price, qty=excluded.qty, value=excluded.value,
-                trade_date=excluded.trade_date, trade_time=excluded.trade_time
+                trade_date=excluded.trade_date, trade_time=excluded.trade_time,
+                broker=COALESCE(NULLIF(quik_trade.broker, ''), excluded.broker)
         """, (
             t.get('trade_num'), t.get('sec_code'), t.get('class_code', ''),
             price, qty, t_val,
@@ -811,18 +946,23 @@ def save_quik_trades(trades: list):
             t.get('repolate', 0), t.get('repovalue', 0), t.get('repo2value', 0),
             t.get('repoterm', 0), t.get('period', 0),
             trade_date, trade_time,
-            side, flags, operation
+            side, flags, operation, broker
         ))
     conn.commit()
     conn.close()
 
 
 def get_current_prices():
-    """Get all current instrument prices."""
+    """Get latest price per instrument (deduplicated by sec_code)."""
     conn = get_connection()
     rows = conn.execute("""
         SELECT sec_code, class_code, price, qty, value, timestamp
-        FROM current_price
+        FROM (
+            SELECT *,
+                   ROW_NUMBER() OVER (PARTITION BY sec_code ORDER BY timestamp DESC) AS rn
+            FROM current_price
+        ) ranked
+        WHERE rn = 1
         ORDER BY sec_code
     """).fetchall()
     conn.close()
@@ -894,6 +1034,7 @@ def get_quik_positions():
                SUM(CASE WHEN side='sell' THEN 0 ELSE value END) AS buy_value
         FROM quik_trade
         WHERE side IN ('buy', 'sell')
+          AND (repovalue IS NULL OR repovalue = 0)  -- исключаем РЕПО
         GROUP BY sec_code, class_code
         HAVING net_qty > 0
         ORDER BY sec_code

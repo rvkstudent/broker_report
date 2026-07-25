@@ -23,7 +23,7 @@
                 <div class="modal-body">
                     <div class="mb-3">
                         <label class="form-label">Выберите HTML-файлы</label>
-                        <input type="file" name="files" class="form-control" multiple accept=".html,.htm">
+                        <input type="file" name="files" class="form-control" multiple accept=".html,.htm,.xlsx,.xls">
                     </div>
                     <hr>
                     <div class="mb-3">
@@ -52,6 +52,7 @@
             <thead class="table-light">
                 <tr>
                     <th>Файл</th>
+                    <th>Брокер</th>
                     <th>Договор</th>
                     <th>Инвестор</th>
                     <th>Период</th>
@@ -63,6 +64,13 @@
             {% for r in reports %}
                 <tr>
                     <td><a href="{{ url_for('report_view', report_id=r.id) }}">{{ r.filename }}</a></td>
+                    <td>
+                        {% if r.source == 'vtb' %}
+                            <span class="badge bg-warning text-dark">ВТБ</span>
+                        {% else %}
+                            <span class="badge bg-info text-dark">Сбер</span>
+                        {% endif %}
+                    </td>
                     <td>{{ r.contract }}</td>
                     <td class="small">{{ r.investor }}</td>
                     <td class="small">{{ r.period_start }} — {{ r.period_end }}</td>

@@ -31,6 +31,7 @@ local SEND_INTERVAL = 1        -- секунд между отправками �
 local SEND_TRADES_INTERVAL = 3 -- секунд между отправками сделок
 local REFRESH_INSTRUMENTS = 300 -- секунд между обновлением списка инструментов (5 мин)
 local MAX_TRADE_BATCH = 100    -- макс сделок за одну отправку
+local BROKER_NAME = "sber"    -- название брокера для тега сделок: "sber" или "vtb"
 local LOG_FILE = os.getenv("TEMP") and (os.getenv("TEMP") .. "\\brokerreport_prices.log") or nil
 
 -- Список инструментов для отслеживания (sec_code, class_code).
@@ -389,15 +390,6 @@ function OnTrade(trade)
     local class_code = trade.class_code or ""
 
     should_track_count = should_track_count + 1
-    -- Логируем каждую сделку (для отладки), можно закомментировать при высокой частоте
-    local side_label = (side == "buy") and "BUY" or "SELL"
-    if should_track_count <= 10 or should_track_count % 10 == 0 then
-        log_info(string.format("MY TRADE #%d (%d) %s: %s/%s price=%.4f qty=%d value=%.2f flags=%d",
-            tonumber(trade.trade_num) or 0, should_track_count, side_label,
-            sec_code, class_code,
-            tonumber(trade.price) or 0, tonumber(trade.qty or trade.quantity) or 0,
-            tonumber(trade.value) or 0, tonumber(trade.flags) or -1))
-    end
 
     -- Сохраняем цену (только последнюю)
     local price = tonumber(trade.price) or 0
@@ -411,11 +403,21 @@ function OnTrade(trade)
         time = os.time()
     }
 
-    -- Определяем сторону сделки: flags & 1 == 1 → покупка (наша заявка),
-    -- flags & 1 == 0 → продажа (контрагент)
+    -- Определяем сторону сделки: flags нечётный → покупка (наша заявка),
+    -- flags чётный → продажа (контрагент)
+    -- В Lua 5.1 нет оператора &, используем % 2 (нечётное = бит 0 установлен)
     local side = "sell"
-    if trade.flags and (trade.flags & 1) == 1 then
+    if trade.flags and trade.flags % 2 == 1 then
         side = "buy"
+    end
+
+    -- Логируем каждую сделку (для отладки), можно закомментировать при высокой частоте
+    local side_label = (side == "buy") and "BUY" or "SELL"
+    if should_track_count <= 10 or should_track_count % 10 == 0 then
+        log_info(string.format("MY TRADE #%d (%d) %s: %s/%s price=%.4f qty=%d value=%.2f flags=%d",
+            tonumber(trade.trade_num) or 0, should_track_count, side_label,
+            sec_code, class_code,
+            price, qty, value, tonumber(trade.flags) or -1))
     end
 
     -- Размер лота из QUIK
@@ -445,6 +447,7 @@ function OnTrade(trade)
         datetime = dt,
         side = side,
         lotsize = lotsize,
+        broker = BROKER_NAME,
     })
 
     -- Если очередь сделок слишком большая — сбрасываем старые (срезом, а не циклом)
@@ -482,6 +485,19 @@ local function load_existing_trades()
             if #INSTRUMENTS > 0 and not should_track(sec_code, class_code) then
                 -- не логируем каждый пропуск, только счётчик
             else
+                -- Определяем сторону сделки: flags нечётный → покупка
+                local trade_side = "sell"
+                if trade.flags and trade.flags % 2 == 1 then
+                    trade_side = "buy"
+                end
+
+                -- Размер лота из QUIK
+                local trade_lotsize = 1
+                local lp = getParamEx(class_code, sec_code, "LOTSIZE")
+                if lp and lp.param_value then
+                    trade_lotsize = tonumber(lp.param_value) or 1
+                end
+
                 local dt = normalize_trade_datetime(trade.datetime)
                 table.insert(trade_cache, {
                     trade_num = tonumber(trade.trade_num) or 0,
@@ -498,7 +514,10 @@ local function load_existing_trades()
                     repo2value = tonumber(trade.repo2value) or 0,
                     repoterm = tonumber(trade.repoterm) or 0,
                     period = tonumber(trade.period) or 0,
-                    datetime = dt
+                    datetime = dt,
+                    side = trade_side,
+                    lotsize = trade_lotsize,
+                    broker = BROKER_NAME,
                 })
                 loaded = loaded + 1
 
@@ -583,8 +602,9 @@ function main()
         -- Heartbeat раз в 10 секунд (показывает что main() жив)
         if now - last_heartbeat >= 10 then
             local mem_kb = collectgarbage("count")
-            log_info(string.format("HEARTBEAT: all_trades=%d tracked=%d price_cache=%d trade_queue=%d instruments=%d mem=%.0fKB",
-                all_trades_count, should_track_count, tonumber(#price_cache) or 0, #trade_cache, #INSTRUMENTS, mem_kb))
+            local pc_count = 0; for _ in pairs(price_cache) do pc_count = pc_count + 1 end
+    log_info(string.format("HEARTBEAT: all_trades=%d tracked=%d price_cache=%d trade_queue=%d instruments=%d mem=%.0fKB",
+                all_trades_count, should_track_count, pc_count, #trade_cache, #INSTRUMENTS, mem_kb))
             last_heartbeat = now
         end
 
@@ -592,8 +612,9 @@ function main()
         if now - last_log_time >= 60 then
             collectgarbage("collect")
             local mem_kb = collectgarbage("count")
-            log_info(string.format("Stats: all_trades=%d, cached_prices=%d, trade_queue=%d, tracked=%d, mem=%.0fKB",
-                all_trades_count, tonumber(#price_cache) or 0, #trade_cache, #INSTRUMENTS, mem_kb))
+            local pc_count = 0; for _ in pairs(price_cache) do pc_count = pc_count + 1 end
+    log_info(string.format("Stats: all_trades=%d, cached_prices=%d, trade_queue=%d, tracked=%d, mem=%.0fKB",
+                all_trades_count, pc_count, #trade_cache, #INSTRUMENTS, mem_kb))
             last_log_time = now
         end
 

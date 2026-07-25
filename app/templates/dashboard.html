@@ -17,10 +17,15 @@
         <h4><i class="bi bi-speedometer2"></i> Сводная аналитика</h4>
         <p class="text-muted small mb-0">
             Данные из всех загруженных отчётов
+            {% if broker and broker != 'all' %}
+                · брокер: <strong>{{ {'sber': 'Сбер', 'vtb': 'ВТБ'}.get(broker, broker) }}</strong>
+            {% endif %}
             {% if date_from or date_to %}
-                · фильтр:
+                · даты:
                 {% if date_from %}с {{ date_from }}{% endif %}
                 {% if date_to %}по {{ date_to }}{% endif %}
+            {% endif %}
+            {% if date_from or date_to or (broker and broker != 'all') %}
                 <a href="/" class="btn btn-sm btn-outline-secondary ms-2">✕ сбросить</a>
             {% endif %}
         </p>
@@ -36,7 +41,7 @@
 </div>
 
 <!-- Filter panel -->
-<div class="collapse {% if date_from or date_to %}show{% endif %}" id="filterPanel">
+<div class="collapse {% if date_from or date_to or (broker and broker != 'all') %}show{% endif %}" id="filterPanel">
     <div class="card card-body mb-3 py-2">
         <form method="get" class="row g-2 align-items-end">
             <div class="col-auto">
@@ -50,8 +55,21 @@
                        value="{{ date_to_iso or '' }}">
             </div>
             <div class="col-auto">
+                <label class="form-label small">Брокер</label>
+                <select name="broker" class="form-select form-select-sm">
+                    <option value="all" {% if broker == 'all' %}selected{% endif %}>Оба</option>
+                    <option value="sber" {% if broker == 'sber' %}selected{% endif %}>Сбер</option>
+                    <option value="vtb" {% if broker == 'vtb' %}selected{% endif %}>ВТБ</option>
+                </select>
+            </div>
+            <div class="col-auto">
                 <button class="btn btn-sm btn-primary"><i class="bi bi-search"></i> Применить</button>
             </div>
+            {% if date_from or date_to or (broker and broker != 'all') %}
+            <div class="col-auto">
+                <a href="/" class="btn btn-sm btn-outline-secondary">✕ сбросить</a>
+            </div>
+            {% endif %}
         </form>
     </div>
 </div>
@@ -64,7 +82,7 @@
                 <div class="modal-header"><h5 class="modal-title">Загрузка отчёта</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
                 <div class="modal-body">
-                    <input type="file" name="files" class="form-control" multiple accept=".html,.htm">
+                    <input type="file" name="files" class="form-control" multiple accept=".html,.htm,.xlsx,.xls">
                     <div class="text-muted small mt-2">
                         <i class="bi bi-info-circle"></i>
                         Новые файлы из папки проекта подхватываются автоматически раз в минуту.
@@ -211,44 +229,89 @@
                         </thead>
                         <tbody>
                         {% set ticker_colors = {'AFKS':'#2563eb','SBER':'#059669','MOEX':'#7c3aed','MTSS':'#ea580c','RAGR':'#0891b2','LQDT':'#d97706','GAZP':'#1d4ed8','RU000A10C3M0':'#be123c'} %}
-                        {% for o in open_trades %}
-                            {% set cur = o.get('current_price', 0) %}
-                            {% set buy_fee = o.total_cost * trade_fee_rate %}
-                            {% set sell_fee = cur * o.qty * trade_fee_rate %}
-                            {% set gross_pl = (cur - o.buy_price) * o.qty %}
-                            {% set net_pl = gross_pl - buy_fee - sell_fee %}
-                            {% set pl_pct = (net_pl / o.total_cost * 100) if o.total_cost > 0 else 0 %}
-                            <tr class="{{ 'bg-profit-pos' if net_pl >= 0 else 'bg-profit-neg' }}"
-                                data-code="{{ o.security_code }}"
-                                data-qty="{{ o.qty }}"
-                                data-buy-price="{{ o.buy_price }}"
-                                data-total-cost="{{ o.total_cost }}">
-                                <td><small><img class="tkr-logo" src="/api/logo/{{ o.security_code }}" alt="" loading="lazy" onerror="this.style.display='none'" /></small> <small>{{ o.security_name }} ({{ o.security_code }})</small></td>
-                                <td class="text-end">{{ o.qty }}</td>
-                                <td><small>{{ o.buy_date }}</small></td>
-                                <td class="text-end">{{ '{:,.2f}'.format(o.buy_price) }}</td>
-                                <td class="text-end">{{ '{:,.2f}'.format(o.total_cost) }}</td>
-                                <td class="text-end fw-bold">{{ '{:,.4f}'.format(cur) if cur < 10 else '{:,.2f}'.format(cur) }}</td>
-                                <td class="text-end {{ 'profit-positive' if net_pl >= 0 else 'profit-negative' }}">
-                                    <span class="pl-cell">{% if net_pl >= 0 %}<span class="arrow-up">&#9650;</span>{% else %}<span class="arrow-down">&#9660;</span>{% endif %}
-                                    {{ '{:+,.2f}'.format(net_pl) }}</span>
+                        {% for code, group in open_trades | groupby('security_code') %}
+                            {% set group_list = group | list %}
+                            {% set sub_qty = group_list | sum(attribute='qty') %}
+                            {% set sub_cost = group_list | sum(attribute='total_cost') %}
+                            {% set sub_gross = namespace(val=0) %}
+                            {% set sub_fees = namespace(val=0) %}
+                            {% for o in group_list %}
+                                {% set cur = o.get('current_price', 0) %}
+                                {% set sub_gross.val = sub_gross.val + (cur - o.buy_price) * o.qty %}
+                                {% set sub_fees.val = sub_fees.val + o.total_cost * trade_fee_rate + cur * o.qty * trade_fee_rate %}
+                            {% endfor %}
+                            {% set sub_net = sub_gross.val - sub_fees.val %}
+                            {% set sub_pct = (sub_net / sub_cost * 100) if sub_cost > 0 else 0 %}
+                            {# ── Individual lots for this instrument ── #}
+                            {% for o in group_list %}
+                                {% set cur = o.get('current_price', 0) %}
+                                {% set buy_fee = o.total_cost * trade_fee_rate %}
+                                {% set sell_fee = cur * o.qty * trade_fee_rate %}
+                                {% set gross_pl = (cur - o.buy_price) * o.qty %}
+                                {% set net_pl = gross_pl - buy_fee - sell_fee %}
+                                {% set pl_pct = (net_pl / o.total_cost * 100) if o.total_cost > 0 else 0 %}
+                                <tr class="{{ 'bg-profit-pos' if net_pl >= 0 else 'bg-profit-neg' }}"
+                                    data-code="{{ o.security_code }}"
+                                    data-qty="{{ o.qty }}"
+                                    data-buy-price="{{ o.buy_price }}"
+                                    data-total-cost="{{ o.total_cost }}">
+                                    <td><small><img class="tkr-logo" src="/api/logo/{{ o.security_code }}" alt="" loading="lazy" onerror="this.style.display='none'" /></small> <small>{{ o.security_name }} ({{ o.security_code }})</small></td>
+                                    <td class="text-end">{{ o.qty }}</td>
+                                    <td><small>{{ o.buy_date }}</small></td>
+                                    <td class="text-end">{{ '{:,.2f}'.format(o.buy_price) }}</td>
+                                    <td class="text-end">{{ '{:,.2f}'.format(o.total_cost) }}</td>
+                                    <td class="text-end fw-bold">{{ '{:,.4f}'.format(cur) if cur < 10 else '{:,.2f}'.format(cur) }}</td>
+                                    <td class="text-end {{ 'profit-positive' if net_pl >= 0 else 'profit-negative' }}">
+                                        <span class="pl-cell">{% if net_pl >= 0 %}<span class="arrow-up">&#9650;</span>{% else %}<span class="arrow-down">&#9660;</span>{% endif %}
+                                        {{ '{:+,.2f}'.format(net_pl) }}</span>
+                                    </td>
+                                    <td class="text-end {{ 'profit-positive' if net_pl >= 0 else 'profit-negative' }}">
+                                        {{ '{:+,.2f}'.format(pl_pct) }}%
+                                    </td>
+                                    </tr>
+                            {% endfor %}
+                            {# ── Subtotal row for this instrument ── #}
+                            <tr class="table-secondary fw-bold" style="border-top:2px solid #dee2e6">
+                                <td><small>Σ {{ group_list[0].security_name }} ({{ code }})</small></td>
+                                <td class="text-end">{{ sub_qty }}</td>
+                                <td></td>
+                                <td></td>
+                                <td class="text-end">{{ '{:,.2f}'.format(sub_cost) }}</td>
+                                <td></td>
+                                <td class="text-end {{ 'profit-positive' if sub_net >= 0 else 'profit-negative' }}">
+                                    {{ '{:+,.2f}'.format(sub_net) }}
                                 </td>
-                                <td class="text-end {{ 'profit-positive' if net_pl >= 0 else 'profit-negative' }}">
-                                    {{ '{:+,.2f}'.format(pl_pct) }}%
+                                <td class="text-end {{ 'profit-positive' if sub_net >= 0 else 'profit-negative' }}">
+                                    {{ '{:+,.2f}'.format(sub_pct) }}%
                                 </td>
                             </tr>
                         {% endfor %}
                         </tbody>
                         <tfoot class="table-light fw-bold">
-                            <tr>
-                                <td>ИТОГО</td>
-                                <td class="text-end">{{ open_trades | sum(attribute='qty') }}</td>
+                            {% set total_qty = open_trades | sum(attribute='qty') %}
+                            {% set total_cost = open_trades | sum(attribute='total_cost') %}
+                            {% set total_gross = namespace(val=0) %}
+                            {% set total_fees = namespace(val=0) %}
+                            {% for o in open_trades %}
+                                {% set cur = o.get('current_price', 0) %}
+                                {% set total_gross.val = total_gross.val + (cur - o.buy_price) * o.qty %}
+                                {% set total_fees.val = total_fees.val + o.total_cost * trade_fee_rate + cur * o.qty * trade_fee_rate %}
+                            {% endfor %}
+                            {% set total_net = total_gross.val - total_fees.val %}
+                            {% set total_pct = (total_net / total_cost * 100) if total_cost > 0 else 0 %}
+                            <tr class="table-dark">
+                                <td>ИТОГО ПОРТФЕЛЬ</td>
+                                <td class="text-end">{{ total_qty }}</td>
                                 <td></td>
                                 <td></td>
-                                <td class="text-end">{{ '{:,.2f}'.format(open_trades | sum(attribute='total_cost')) }}</td>
+                                <td class="text-end">{{ '{:,.2f}'.format(total_cost) }}</td>
                                 <td></td>
-                                <td></td>
-                                <td></td>
+                                <td class="text-end {{ 'profit-positive' if total_net >= 0 else 'profit-negative' }}">
+                                    {{ '{:+,.2f}'.format(total_net) }}
+                                </td>
+                                <td class="text-end {{ 'profit-positive' if total_net >= 0 else 'profit-negative' }}">
+                                    {{ '{:+,.2f}'.format(total_pct) }}%
+                                </td>
                             </tr>
                         </tfoot>
                     </table>
@@ -550,6 +613,78 @@ async function refreshOpenTrades() {
 
             // Update row bg
             row.className = isPos ? 'bg-profit-pos' : 'bg-profit-neg';
+        }
+
+        // ── Recalculate subtotal (Σ) rows ──
+        let groups = {};
+        for (let row of tb.rows) {
+            let code = row.dataset.code;
+            if (!code) continue;
+            if (!groups[code]) groups[code] = [];
+            let qty = parseFloat(row.dataset.qty) || 0;
+            let buyPrice = parseFloat(row.dataset.buyPrice) || 0;
+            let totalCost = parseFloat(row.dataset.totalCost) || 0;
+            let curPrice = pmap[code] || 0;
+            let buyFee = totalCost * TRADE_FEE_RATE;
+            let sellFee = curPrice * qty * TRADE_FEE_RATE;
+            let grossPl = (curPrice - buyPrice) * qty;
+            let netPl = grossPl - buyFee - sellFee;
+            groups[code].push({ qty, totalCost, netPl });
+        }
+
+        // Find and update subtotal rows (in tbody)
+        let subtotalRows = tb.querySelectorAll('tr.table-secondary.fw-bold');
+        for (let srow of subtotalRows) {
+            // Extract code from the first cell: "Σ Name (CODE)"
+            let codeMatch = srow.cells[0].textContent.match(/\((\w+)\)/);
+            if (!codeMatch) continue;
+            let code = codeMatch[1];
+            let items = groups[code];
+            if (!items) continue;
+
+            let subNet = items.reduce((s, i) => s + i.netPl, 0);
+            let subCost = items.reduce((s, i) => s + i.totalCost, 0);
+            let subPct = subCost > 0 ? (subNet / subCost * 100) : 0;
+
+            let isPos = subNet >= 0;
+            let cls = isPos ? 'profit-positive' : 'profit-negative';
+
+            // P&L cell (col 6)
+            srow.cells[6].innerHTML = '<span class="pl-cell">' + (isPos ? '<span class="arrow-up">&#9650;</span>' : '<span class="arrow-down">&#9660;</span>') + ' ' +
+                subNet.toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2, signDisplay:'always'}) + '</span>';
+            srow.cells[6].className = 'text-end ' + cls;
+
+            // % cell (col 7)
+            srow.cells[7].innerHTML = subPct.toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2, signDisplay:'always'}) + '%';
+            srow.cells[7].className = 'text-end ' + cls;
+        }
+
+        // ── Recalculate total (ИТОГО ПОРТФЕЛЬ) row ──
+        let tfoot = tb.closest('table').querySelector('tfoot');
+        if (tfoot) {
+            let totalNet = 0, totalCost = 0;
+            for (let code in groups) {
+                for (let item of groups[code]) {
+                    totalNet += item.netPl;
+                    totalCost += item.totalCost;
+                }
+            }
+            let totalPct = totalCost > 0 ? (totalNet / totalCost * 100) : 0;
+            let totalRow = tfoot.querySelector('tr.table-dark');
+            if (totalRow) {
+                let isPos = totalNet >= 0;
+                let cls = isPos ? 'profit-positive' : 'profit-negative';
+                // P&L cell (col 6)
+                totalRow.cells[6].innerHTML = (isPos ? '<span class="arrow-up">&#9650;</span>' : '<span class="arrow-down">&#9660;</span>') + ' ' +
+                    totalNet.toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2, signDisplay:'always'});
+                totalRow.cells[6].className = 'text-end ' + cls;
+                // % cell (col 7)
+                totalRow.cells[7].innerHTML = totalPct.toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2, signDisplay:'always'}) + '%';
+                totalRow.cells[7].className = 'text-end ' + cls;
+
+                // Also update total cost cell (col 4)
+                totalRow.cells[4].innerHTML = totalCost.toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2});
+            }
         }
     } catch(e) {}
 }

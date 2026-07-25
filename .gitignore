@@ -23,9 +23,18 @@ lua_modules/
 reports/*.HTML
 reports/*.html
 
+# SQLite (создаётся автоматически)
+app/broker.db
+
+# Firebase service account key (НЕ добавлять в Git!)
+app/firebase-key.json
+
 # SQLite WAL files
 *.db-shm
 *.db-wal
+
+# Sync state (локальный timestamp репликации)
+.broker_sync_state
 
 # OS
 Thumbs.db

@@ -1,8 +1,10 @@
-"""Parse broker HTML reports and insert data into SQLite."""
+"""Parse broker reports (HTML for Sber, XLSX for VTB) and insert data into SQLite."""
 
+import os
 import re
 from bs4 import BeautifulSoup
 from app.db import get_connection, init_db
+from app.parser_vtb import parse_vtb_report
 
 
 def parse_float(s):
@@ -36,9 +38,15 @@ def extract_text(cell):
 
 
 def parse_report(filepath):
-    """Main entry: parse an HTML broker report and persist to DB."""
+    """Main entry: parse a broker report (HTML for Sber, XLSX for VTB) and persist to DB."""
     init_db()
 
+    # Detect file type by extension
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext in ('.xlsx', '.xls'):
+        return parse_vtb_report(filepath)
+
+    # HTML parser (Sber format)
     with open(filepath, 'r', encoding='utf-8') as f:
         html = f.read()
 
@@ -199,11 +207,11 @@ def _parse_trades(soup, cur, report_id):
         cur.execute("""
             INSERT OR IGNORE INTO trade(report_id, trade_date, settle_date, trade_time,
                 security_name, security_code, currency, side, quantity, price,
-                amount, nkd, broker_fee, exchange_fee, deal_number, comment, status)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                amount, nkd, broker_fee, exchange_fee, deal_number, comment, status, source)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (report_id, trade_date, settle_date, trade_time,
               sec_name, sec_code, currency, side, qty, price,
-              amount, nkd, broker_fee, exchange_fee, deal_number, comment, status))
+              amount, nkd, broker_fee, exchange_fee, deal_number, comment, status, 'sber'))
 
 
 def _parse_repo(soup, cur, report_id):
@@ -267,12 +275,12 @@ def _parse_repo(soup, cur, report_id):
                 security_code, currency, side, quantity, price_part1, nkd_part1,
                 amount_part1, date_part1, repo_rate, repo_interest, price_part2,
                 nkd_part2, amount_part2, date_part2, broker_fee, exchange_fee,
-                deal_number, status)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                deal_number, status, source)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (report_id, trade_date, trade_time, sec_name, sec_code, currency,
               side, qty, price1, nkd1, amount1, date1, repo_rate, repo_interest,
               price2, nkd2, amount2, date2, broker_fee, exchange_fee,
-              deal_number, status))
+              deal_number, status, 'sber'))
 
 
 def _parse_cash_flow(soup, cur, report_id):
@@ -309,9 +317,9 @@ def _parse_cash_flow(soup, cur, report_id):
             continue
 
         cur.execute("""
-            INSERT INTO cash_flow(report_id, date, description, currency, credit, debit)
-            VALUES (?,?,?,?,?,?)
-        """, (report_id, date, desc, currency, credit, debit))
+            INSERT INTO cash_flow(report_id, date, description, currency, credit, debit, source)
+            VALUES (?,?,?,?,?,?,?)
+        """, (report_id, date, desc, currency, credit, debit, 'sber'))
 
 
 def _parse_financial_result(soup, cur, report_id):
