@@ -433,24 +433,6 @@ def index():
     # Набор кодов инструментов, у которых есть открытая позиция
     open_codes = set(i['security_code'] for i in instruments) if instruments else set()
 
-    # Карта прогнозного P&L по открытым позициям на инструмент
-    TRADE_FEE_RATE = 0.000685
-    forecast_map = {}
-    if open_trades:
-        for o in open_trades:
-            code = o['security_code']
-            cur = o.get('current_price', 0)
-            gross = (cur - o['buy_price']) * o['qty']
-            buy_fee = o['total_cost'] * TRADE_FEE_RATE
-            sell_fee = cur * o['qty'] * TRADE_FEE_RATE
-            net = gross - buy_fee - sell_fee
-            forecast_map[code] = forecast_map.get(code, 0) + net
-
-    # Добавляем прогноз в каждый элемент profit и вычисляем итоговый P&L
-    for p in profit:
-        code = p['security_code']
-        p['forecast_pl'] = round(forecast_map.get(code, 0), 2)
-        p['total_pl'] = round(p['net_profit'] + p['forecast_pl'], 2)
     repo_total = get_repo_total(None, df_dmy, dt_dmy, broker)
 
     quik_trades = get_recent_quik_trades(20)
@@ -480,6 +462,25 @@ def index():
         o['current_price'] = price_map.get(o['security_code'], 0)
         if o.get('source') == 'quik' and o['security_code'] in name_map:
             o['security_name'] = name_map[o['security_code']]
+
+    # Карта прогнозного P&L по открытым позициям на инструмент (уже с current_price!)
+    TRADE_FEE_RATE = 0.000685
+    forecast_map = {}
+    if open_trades:
+        for o in open_trades:
+            code = o['security_code']
+            cur = o.get('current_price', 0)
+            gross = (cur - o['buy_price']) * o['qty']
+            buy_fee = o['total_cost'] * TRADE_FEE_RATE
+            sell_fee = cur * o['qty'] * TRADE_FEE_RATE
+            net = gross - buy_fee - sell_fee
+            forecast_map[code] = forecast_map.get(code, 0) + net
+
+    # Добавляем прогноз в каждый элемент profit и вычисляем итоговый P&L
+    for p in profit:
+        code = p['security_code']
+        p['forecast_pl'] = round(forecast_map.get(code, 0), 2)
+        p['total_pl'] = round(p['net_profit'] + p['forecast_pl'], 2)
 
     # Цвета для значков тикеров (на основе class_code)
     TICKER_COLORS = {

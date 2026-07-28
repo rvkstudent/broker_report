@@ -542,7 +542,6 @@ function toggleOpenOnly() {
         tfoot.style.display = 'none';
         // Пересчитать по видимым строкам
         let buyQty = 0, sellQty = 0, gross = 0, fees = 0, net = 0, forecast = 0, totalPl = 0;
-        tbody.querySelectorAll('tr[style*="display: none"]').forEach(tr => tr.removeAttribute('style'));
         tbody.querySelectorAll('tr').forEach(tr => {
             if (tr.style.display === 'none') return;
             const cells = tr.querySelectorAll('td');
