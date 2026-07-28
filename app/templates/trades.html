@@ -1,0 +1,224 @@
+{% extends "base.html" %}
+{% block title %}Сделки — BrokerReport{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h4 class="mb-0"><i class="bi bi-list-columns-reverse"></i> Все сделки</h4>
+    <span class="text-muted small">Всего: <strong>{{ total }}</strong></span>
+</div>
+
+{# ── Фильтры ── #}
+<div class="card mb-3">
+    <div class="card-body py-3">
+        <form method="GET" class="row g-2 align-items-end">
+            <div class="col-md-3">
+                <label class="form-label small mb-1">Инструмент</label>
+                <input type="text" class="form-control form-control-sm" name="sec_code"
+                       value="{{ sec_code }}" placeholder="Код или название" list="sec-codes">
+                <datalist id="sec-codes">
+                    {% for c in sec_codes %}
+                    <option value="{{ c }}">
+                    {% endfor %}
+                </datalist>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small mb-1">С</label>
+                <input type="date" class="form-control form-control-sm" name="date_from"
+                       value="{{ date_from }}">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small mb-1">По</label>
+                <input type="date" class="form-control form-control-sm" name="date_to"
+                       value="{{ date_to }}">
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small mb-1">Источник</label>
+                <select class="form-select form-select-sm" name="source">
+                    <option value="">Все</option>
+                    <option value="sber" {% if source == 'sber' %}selected{% endif %}>Сбер</option>
+                    <option value="vtb" {% if source == 'vtb' %}selected{% endif %}>ВТБ</option>
+                </select>
+            </div>
+            <div class="col-md-1">
+                <label class="form-label small mb-1">На стр.</label>
+                <select class="form-select form-select-sm" name="per_page" onchange="this.form.submit()">
+                    <option value="25" {% if per_page == 25 %}selected{% endif %}>25</option>
+                    <option value="50" {% if per_page == 50 %}selected{% endif %}>50</option>
+                    <option value="100" {% if per_page == 100 %}selected{% endif %}>100</option>
+                    <option value="200" {% if per_page == 200 %}selected{% endif %}>200</option>
+                </select>
+            </div>
+            <div class="col-md-2 d-flex gap-1">
+                <button type="submit" class="btn btn-primary btn-sm w-100">
+                    <i class="bi bi-search"></i> Найти
+                </button>
+                <a href="/trades" class="btn btn-outline-secondary btn-sm">
+                    <i class="bi bi-x-lg"></i>
+                </a>
+            </div>
+        </form>
+    </div>
+</div>
+
+{# ── Таблица сделок ── #}
+<div class="card">
+    <div class="card-body p-0">
+        {% if trades %}
+        <div class="table-responsive">
+            <table class="table table-hover table-sm mb-0" style="font-size: 0.85rem;">
+                <thead class="table-light">
+                    <tr>
+                        <th>
+                            <a href="/trades?sort={% if sort == 'date' %}date_desc{% else %}date{% endif %}&amp;sec_code={{ sec_code }}&amp;date_from={{ date_from }}&amp;date_to={{ date_to }}&amp;source={{ source }}&amp;per_page={{ per_page }}"
+                               class="text-decoration-none text-reset">
+                                Дата
+                                {% if sort == 'date' %}<i class="bi bi-caret-up-fill small"></i>{% endif %}
+                                {% if sort == 'date_desc' %}<i class="bi bi-caret-down-fill small"></i>{% endif %}
+                            </a>
+                        </th>
+                        <th>Время</th>
+                        <th>
+                            <a href="/trades?sort={% if sort == 'code' %}code_desc{% else %}code{% endif %}&amp;sec_code={{ sec_code }}&amp;date_from={{ date_from }}&amp;date_to={{ date_to }}&amp;source={{ source }}&amp;per_page={{ per_page }}"
+                               class="text-decoration-none text-reset">
+                                Инструмент
+                                {% if sort == 'code' %}<i class="bi bi-caret-up-fill small"></i>{% endif %}
+                                {% if sort == 'code_desc' %}<i class="bi bi-caret-down-fill small"></i>{% endif %}
+                            </a>
+                        </th>
+                        <th>Сторона</th>
+                        <th class="text-end">Кол-во</th>
+                        <th class="text-end">Цена</th>
+                        <th class="text-end">
+                            <a href="/trades?sort={% if sort == 'amount' %}amount_asc{% else %}amount{% endif %}&amp;sec_code={{ sec_code }}&amp;date_from={{ date_from }}&amp;date_to={{ date_to }}&amp;source={{ source }}&amp;per_page={{ per_page }}"
+                               class="text-decoration-none text-reset">
+                                Сумма
+                                {% if sort == 'amount' %}<i class="bi bi-caret-down-fill small"></i>{% endif %}
+                                {% if sort == 'amount_asc' %}<i class="bi bi-caret-up-fill small"></i>{% endif %}
+                            </a>
+                        </th>
+                        <th class="text-end">НКД</th>
+                        <th class="text-end">Комиссия</th>
+                        <th>Источник</th>
+                        <th>Счёт</th>
+                        <th>№ сделки</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for t in trades %}
+                    <tr class="{{ 'table-warning' if t.source_type == 'quik' }}">
+                        <td class="text-nowrap">{{ t.trade_date }}</td>
+                        <td class="text-nowrap small">{{ t.trade_time or '—' }}</td>
+                        <td>
+                            <span class="tkr">
+                                <span class="tkr-dot" style="background: {{ ticker_color(t.security_code) }}"></span>
+                                <span class="font-monospace">{{ t.security_code or '—' }}</span>
+                            </span>
+                            <br><small class="text-muted">{{ t.security_name[:30] if t.security_name and t.security_name != t.security_code else '' }}</small>
+                        </td>
+                        <td>
+                            {% if t.side == 'Покупка' %}
+                            <span class="badge bg-success bg-opacity-10 text-success">Покупка</span>
+                            {% elif t.side == 'Продажа' %}
+                            <span class="badge bg-danger bg-opacity-10 text-danger">Продажа</span>
+                            {% else %}
+                            <span class="badge bg-secondary">{{ t.side }}</span>
+                            {% endif %}
+                        </td>
+                        <td class="text-end font-monospace">{{ t.quantity }}</td>
+                        <td class="text-end font-monospace">{{ t.price|money if t.price else '—' }}</td>
+                        <td class="text-end font-monospace">{{ t.amount|money }}</td>
+                        <td class="text-end font-monospace">{{ t.nkd|money if t.nkd else '—' }}</td>
+                        <td class="text-end font-monospace">{{ (t.broker_fee + t.exchange_fee)|money if (t.broker_fee or t.exchange_fee) else '—' }}</td>
+                        <td>
+                            {% if t.source_type == 'quik' %}
+                            <span class="badge bg-info text-dark">QUIK</span>
+                            {% elif t.broker == 'vtb' %}
+                            <span class="badge bg-warning text-dark">ВТБ</span>
+                            {% else %}
+                            <span class="badge bg-dark">Сбер</span>
+                            {% endif %}
+                            {% if t.report_filename %}
+                            <br><small class="text-muted" title="{{ t.report_filename }}">{{ t.report_filename[:20] }}{% if t.report_filename|length > 20 %}…{% endif %}</small>
+                            {% endif %}
+                        </td>
+                        <td class="small font-monospace">
+                            {% if t.source_type == 'quik' and t.account %}
+                            <span class="badge bg-secondary bg-opacity-10 text-secondary" title="Счёт QUIK">{{ t.account }}</span>
+                            {% else %}
+                            <span class="text-muted">—</span>
+                            {% endif %}
+                        </td>
+                        <td class="small text-muted font-monospace">{{ t.deal_number or '—' }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="p-4 text-center text-muted">
+            <i class="bi bi-inbox fs-2 d-block mb-2"></i>
+            <p class="mb-0">Сделки не найдены</p>
+            <small>Попробуйте изменить параметры фильтра</small>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+{# ── Пагинация ── #}
+{% if total_pages > 1 %}
+<nav class="mt-3">
+    <ul class="pagination pagination-sm justify-content-center flex-wrap">
+        <li class="page-item {{ 'disabled' if page <= 1 }}">
+            <a class="page-link" href="/trades?page={{ page - 1 }}&amp;sec_code={{ sec_code }}&amp;date_from={{ date_from }}&amp;date_to={{ date_to }}&amp;source={{ source }}&amp;sort={{ sort }}&amp;per_page={{ per_page }}">←</a>
+        </li>
+
+        {% set start_page = [page - 2, 1]|max %}
+        {% set end_page = [start_page + 4, total_pages]|min %}
+        {% if end_page - start_page < 4 %}
+            {% set start_page = [end_page - 4, 1]|max %}
+        {% endif %}
+
+        {% if start_page > 1 %}
+        <li class="page-item">
+            <a class="page-link" href="/trades?page=1&amp;sec_code={{ sec_code }}&amp;date_from={{ date_from }}&amp;date_to={{ date_to }}&amp;source={{ source }}&amp;sort={{ sort }}&amp;per_page={{ per_page }}">1</a>
+        </li>
+        {% if start_page > 2 %}<li class="page-item disabled"><span class="page-link">…</span></li>{% endif %}
+        {% endif %}
+
+        {% for p in range(start_page, end_page + 1) %}
+        <li class="page-item {{ 'active' if p == page }}">
+            <a class="page-link" href="/trades?page={{ p }}&amp;sec_code={{ sec_code }}&amp;date_from={{ date_from }}&amp;date_to={{ date_to }}&amp;source={{ source }}&amp;sort={{ sort }}&amp;per_page={{ per_page }}">{{ p }}</a>
+        </li>
+        {% endfor %}
+
+        {% if end_page < total_pages %}
+        {% if end_page < total_pages - 1 %}<li class="page-item disabled"><span class="page-link">…</span></li>{% endif %}
+        <li class="page-item">
+            <a class="page-link" href="/trades?page={{ total_pages }}&amp;sec_code={{ sec_code }}&amp;date_from={{ date_from }}&amp;date_to={{ date_to }}&amp;source={{ source }}&amp;sort={{ sort }}&amp;per_page={{ per_page }}">{{ total_pages }}</a>
+        </li>
+        {% endif %}
+
+        <li class="page-item {{ 'disabled' if page >= total_pages }}">
+            <a class="page-link" href="/trades?page={{ page + 1 }}&amp;sec_code={{ sec_code }}&amp;date_from={{ date_from }}&amp;date_to={{ date_to }}&amp;source={{ source }}&amp;sort={{ sort }}&amp;per_page={{ per_page }}">→</a>
+        </li>
+    </ul>
+</nav>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Сохраняем скролл при переходе по страницам
+document.querySelectorAll('.pagination a').forEach(function(a) {
+    a.addEventListener('click', function() {
+        sessionStorage.setItem('trades_scroll', window.scrollY);
+    });
+});
+window.addEventListener('load', function() {
+    var saved = sessionStorage.getItem('trades_scroll');
+    if (saved) {
+        window.scrollTo(0, parseInt(saved));
+        sessionStorage.removeItem('trades_scroll');
+    }
+});
+</script>
+{% endblock %}

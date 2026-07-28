@@ -1,0 +1,50 @@
+version: "3.9"
+
+services:
+  broker-report:
+    build: .
+    container_name: broker-report
+    hostname: broker-report
+    restart: unless-stopped
+    ports:
+      # Проброс порта: внешний:5000 (внутренний)
+      - "5000:5000"
+    volumes:
+      # Папка с HTML-отчётами (на хосте)
+      - ./reports:/app/reports
+      # SQLite БД сохраняется между перезапусками
+      - db_data:/app/app
+      # Логи (опционально)
+      - ./logs:/app/logs
+    environment:
+      # ─── Режим запуска ─────────────────────────────
+      - FLASK_HOST=0.0.0.0
+      - FLASK_PORT=5000
+      - FLASK_DEBUG=false
+
+      # ─── Авторизация устройств ──────────────────────
+      # В Docker авторизация ВКЛЮЧЕНА (DISABLE_DEVICE_AUTH=false)
+      # Для локальной разработки просто не задавайте эту переменную
+      - DISABLE_DEVICE_AUTH=false
+
+      # ─── Административный доступ ───────────────────
+      # Токен для первого входа в панель управления устройствами.
+      # Смените на свой уникальный токен!
+      - ADMIN_TOKEN=admin123
+
+      # ─── Firebase (опционально) ────────────────────
+      # Если нужна репликация — раскомментируйте:
+      # - FIREBASE_KEY=/app/app/firebase-key.json
+
+      # ─── Таймзона ──────────────────────────────────
+      - TZ=Europe/Moscow
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  db_data:
+    # SQLite будет храниться внутри Docker volume
+    # Данные сохраняются при пересоздании контейнера

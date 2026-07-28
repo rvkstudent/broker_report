@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+
+# Environments
+.env
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+
+# Lua modules (не нужны в Docker)
+lua_modules/
+lua/
+
+# SQLite (создаётся автоматически)
+app/broker.db
+app/.broker_sync_state
+
+# Firebase key (копируется отдельно при необходимости)
+app/firebase-key.json
+
+# Локальные тестовые файлы
+*.tmp
+xlsx_full_analysis.txt
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose.yml

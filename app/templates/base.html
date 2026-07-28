@@ -35,6 +35,33 @@
             <a class="navbar-brand" href="/">
                 <i class="bi bi-graph-up-arrow"></i> BrokerReport
             </a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav ms-auto">
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.path == '/' %}active{% endif %}" href="/">
+                            <i class="bi bi-speedometer2"></i> Дашборд
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.path == '/trades' %}active{% endif %}" href="/trades">
+                            <i class="bi bi-list-columns-reverse"></i> Сделки
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.path == '/admin' %}active{% endif %}" href="/admin">
+                            <i class="bi bi-shield-lock"></i> Админ
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.path == '/nalog' %}active{% endif %}" href="/nalog">
+                            <i class="bi bi-file-earmark-text"></i> Налоги
+                        </a>
+                    </li>
+                </ul>
+            </div>
         </div>
     </nav>
 

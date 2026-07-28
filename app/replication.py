@@ -1,21 +1,55 @@
 """
 Cloud replication for broker.db via Firebase Realtime Database.
 
-Синхронизирует SQLite-базу с Firebase Realtime Database:
-- При запуске: скачивает последнюю версию из облака (если есть)
-- После изменений: загружает обновлённую БД в облако
-- Конфликты: Last-Write-Wins (по времени последней записи)
+АРХИТЕКТУРА (Firebase = source of truth, таблицы как в SQLite)
+────────────────────────────────────────────────────────────
+Firebase хранит ТОЧНО такие же таблицы, как локальный SQLite.
+Каждая запись — отдельный узел в Firebase под своей таблицей.
+
+  Firebase RTDB structure:
+    broker_db/
+        report/
+            {filename}: { ... }           # key = filename (UNIQUE в SQLite)
+        trade/
+            {source}${deal_number}: {...} # key = source$deal_number (unique index)
+        repo/
+            {source}${deal_number}: {...}
+        cash_flow/
+            {id}: { ... }
+        portfolio/
+            {report_id}__{sec_name}: {...}
+        financial_result/
+            {report_id}: { ... }
+        quik_trade/
+            {source}${trade_num}: { ... }
+        current_price/
+            {sec_code}__{class_code}: {...}
+        instrument/
+            {sec_code}__{class_code}: {...}
+        _meta/
+            hostname: PC-1
+            updated: ISO-8601
+
+Правила синхронизации:
+- Push: читает ВСЕ строки из локального SQLite, пишет их в Firebase
+         под соответствующими таблицами. Использует update(), который
+         НЕ удаляет данные от других инстансов — только добавляет/обновляет.
+- Pull: читает ВСЕ строки из Firebase, INSERT OR IGNORE в локальный SQLite.
+         Таким образом облачные данные накапливаются, локальные не теряются.
 
 Настройки в файле app/firebase_config.py.
 Ключ сервисного аккаунта Firebase: app/firebase-key.json
 """
 
 import os
+import re
+import socket
 import time
-import base64
 import threading
 import logging
 import sqlite3
+import contextlib
+from urllib.parse import urlparse
 from datetime import datetime, timezone
 
 from app import firebase_config
@@ -29,13 +63,207 @@ SYNC_STATE_PATH = os.path.join(os.path.dirname(__file__), '.broker_sync_state')
 _firebase_initialized = False
 _firebase_lock = threading.Lock()
 
-# Ссылка на узел в RTDB (кешируется после инициализации)
-_rtdb_ref = None
+# Ссылка на корневой узел БД в RTDB
+_rtdb_root = None
+
+# Хостнейм для идентификации источника данных
+_HOSTNAME = os.environ.get('HOSTNAME') or os.environ.get('COMPUTERNAME') or 'unknown'
+
+# Кеш: один раз проверяем доступность прокси при старте
+_proxy_usable_cache = None
+
+
+# ── Список таблиц для синхронизации: (имя_таблицы, функция_ключа, SQL_запрос) ──
+
+def _fb_key(s: str) -> str:
+    """Очистить строку для использования в качестве ключа Firebase RTDB.
+
+    Запрещённые символы: . $ # [ ] /
+    """
+    return re.sub(r'[\.$#\[\]/]', '_', s)
+
+
+_TABLES = [
+    ('report',       lambda r: _fb_key(str(r['filename'])),
+     'SELECT * FROM report'),
+    ('trade',        lambda r: _fb_key(
+        f"quik_{r['deal_number']}" if r.get('source') == 'quik' and r.get('deal_number')
+        else (r.get('deal_number','') or str(r['id']))
+    ),
+     'SELECT * FROM trade ORDER BY id'),
+    ('repo',         lambda r: _fb_key(f"{r['source']}_{r.get('deal_number','') or r['id']}"),
+     'SELECT * FROM repo'),
+    ('cash_flow',    lambda r: _fb_key(str(r['id'])),
+     'SELECT * FROM cash_flow'),
+    ('portfolio',    lambda r: _fb_key(f"{r['report_id']}_{r['security_name']}"),
+     'SELECT * FROM portfolio'),
+    ('financial_result', lambda r: _fb_key(str(r['report_id'])),
+     'SELECT * FROM financial_result'),
+    ('quik_trade',   lambda r: _fb_key(f"{r['source']}_{r.get('trade_num','') or r['id']}"),
+     'SELECT * FROM quik_trade'),
+    ('current_price', lambda r: _fb_key(f"{r['sec_code']}_{r.get('class_code','')}"),
+     'SELECT * FROM current_price'),
+    ('instrument',   lambda r: _fb_key(f"{r['sec_code']}_{r.get('class_code','')}"),
+     'SELECT * FROM instrument'),
+]
+
+
+def _detect_proxy_url() -> str | None:
+    """Определить URL прокси из настроек системы.
+
+    Порядок поиска:
+    1. Системные настройки Windows (реестр Internet Settings) —
+       проверяем ProxyEnable. Если прокси отключён в системе — возвращаем None,
+       игнорируя «висящие» переменные окружения.
+    2. Переменные окружения HTTPS_PROXY / HTTP_PROXY (если реестр нечитаем
+       или система не Windows).
+
+    Returns:
+        URL прокси (например 'http://proxy:8080') или None.
+    """
+    # 1. Системные настройки Windows — самый авторитетный источник
+    if os.name == 'nt':
+        try:
+            import winreg
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r'Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+            ) as key:
+                enabled, _ = winreg.QueryValueEx(key, 'ProxyEnable')
+                if not enabled:
+                    logger.debug('Windows proxy is DISABLED in registry')
+                    return None  # прокси выключен — игнорируем env vars
+                # Прокси включён — читаем адрес из реестра
+                server, _ = winreg.QueryValueEx(key, 'ProxyServer')
+                if not server:
+                    return None
+                if '=' in server:
+                    for part in server.split(';'):
+                        part = part.strip()
+                        if part.startswith('https='):
+                            proxy_url = f'http://{part[6:]}'
+                            logger.debug(f'Proxy from registry (https): {proxy_url}')
+                            return proxy_url
+                    first = server.split(';')[0].strip()
+                    if '=' in first:
+                        proxy_url = f'http://{first.split("=", 1)[1]}'
+                    else:
+                        proxy_url = f'http://{first}'
+                    logger.debug(f'Proxy from registry: {proxy_url}')
+                    return proxy_url
+                proxy_url = f'http://{server}'
+                logger.debug(f'Proxy from registry: {proxy_url}')
+                return proxy_url
+        except Exception:
+            pass  # fallback к env vars
+
+    # 2. Переменные окружения (если не смогли прочитать реестр)
+    for key in ('HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy'):
+        val = os.environ.get(key)
+        if val:
+            logger.debug(f'Proxy from env {key}={val}')
+            return val
+
+    return None
+
+
+def _is_windows_proxy_disabled() -> bool:
+    """Проверить, отключён ли прокси в настройках Windows.
+
+    Если пользователь явно выключил прокси в «Параметры → Сеть → Прокси»,
+    реестр выставляет ProxyEnable=0. При этом переменные окружения
+    HTTP_PROXY/HTTPS_PROXY могут всё ещё висеть (они не очищаются
+    автоматически). Нужно принудительно очистить их для requests.
+    """
+    if os.name != 'nt':
+        return False
+    try:
+        import winreg
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r'Software\Microsoft\Windows\CurrentVersion\Internet Settings'
+        ) as key:
+            enabled, _ = winreg.QueryValueEx(key, 'ProxyEnable')
+            return not enabled
+    except Exception:
+        return False
+
+
+def _proxy_is_usable(proxy_url: str | None = None) -> bool:
+    """Проверить, доступен ли прокси-сервер (TCP-connect).
+
+    Args:
+        proxy_url: URL прокси. Если None — определяется автоматически.
+
+    Returns:
+        True если прокси не задан или доступен, False если недоступен.
+    """
+    global _proxy_usable_cache
+    if _proxy_usable_cache is not None:
+        return _proxy_usable_cache
+
+    if proxy_url is None:
+        proxy_url = _detect_proxy_url()
+
+    if not proxy_url:
+        _proxy_usable_cache = True  # нет прокси — считаем доступным
+        return True
+
+    try:
+        parsed = urlparse(proxy_url)
+        host = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+
+        sock = socket.create_connection((host, port), timeout=2)
+        sock.close()
+        logger.info(f'Proxy {proxy_url} is reachable')
+        _proxy_usable_cache = True
+        return True
+    except (OSError, socket.timeout) as e:
+        logger.warning(f'Proxy {proxy_url} is unreachable ({e}), will bypass')
+        _proxy_usable_cache = False
+        return False
+
+
+@contextlib.contextmanager
+def _proxy_scope():
+    """Адаптивный контекстный менеджер прокси.
+
+    Очищает HTTP_PROXY/HTTPS_PROXY из окружения, если прокси:
+    - отключён в настройках Windows (ProxyEnable=0) — переменные env vars
+      могли остаться, но requests будет их использовать, вызывая ошибки;
+    - настроен, но TCP-недоступен (таймаут).
+
+    После выхода из блока переменные окружения восстанавливаются.
+    """
+    clear_vars = []
+
+    # Определяем URL прокси
+    proxy_url = _detect_proxy_url()
+    win_proxy_off = _is_windows_proxy_disabled()
+
+    if win_proxy_off or (proxy_url and not _proxy_is_usable(proxy_url)):
+        # Прокси отключён в Windows или настроен но недоступен —
+        # очищаем переменные, чтобы requests не подхватил мёртвый прокси
+        for key in ('HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy'):
+            val = os.environ.pop(key, None)
+            if val is not None:
+                clear_vars.append((key, val))
+        if win_proxy_off:
+            logger.debug('Windows proxy is OFF — env vars cleared for Firebase scope')
+        else:
+            logger.debug('Proxy unreachable — env vars cleared for Firebase scope')
+
+    try:
+        yield
+    finally:
+        for key, val in clear_vars:
+            os.environ[key] = val
 
 
 def _init_firebase():
     """Инициализировать Firebase Admin SDK (однократно)."""
-    global _firebase_initialized, _rtdb_ref
+    global _firebase_initialized, _rtdb_root
     if _firebase_initialized:
         return
 
@@ -59,14 +287,15 @@ def _init_firebase():
             )
             raise
 
-        cred = credentials.Certificate(firebase_config.SERVICE_ACCOUNT_PATH)
-        database_url = firebase_config.get_database_url()
+        with _proxy_scope():
+            cred = credentials.Certificate(firebase_config.SERVICE_ACCOUNT_PATH)
+            database_url = firebase_config.get_database_url()
 
-        firebase_admin.initialize_app(cred, {
-            'databaseURL': database_url,
-        })
+            firebase_admin.initialize_app(cred, {
+                'databaseURL': database_url,
+            })
 
-        _rtdb_ref = db.reference(firebase_config.DB_PATH_IN_RTDB)
+            _rtdb_root = db.reference(firebase_config.DB_PATH_IN_RTDB)
         _firebase_initialized = True
         logger.info(f'Firebase initialized (RTDB: {database_url})')
 
@@ -103,61 +332,105 @@ def _write_local_state(ts: str):
         logger.warning(f'Failed to write sync state: {e}')
 
 
-def _cloud_is_newer(cloud_updated: str | None) -> bool:
-    """Сравнить updated в облаке с локальным состоянием.
+def _read_table(table_name: str, key_fn, sql: str) -> dict:
+    """Прочитать таблицу из локального SQLite и вернуть как dict {key: row_dict}.
 
-    Возвращает True, если облачная версия новее локальной (нужен pull).
-    Если локального состояния нет — считаем облако новее (первая синхронизация).
+    Каждый ключ формируется key_fn(row), значения — вся строка как словарь.
     """
-    if not cloud_updated:
-        return False
-    local_ts = _read_local_state()
-    if not local_ts:
-        return True  # первой синхронизации нет — тянем из облака
-    return cloud_updated > local_ts
+    import sqlite3 as _sqlite3
+    conn = _sqlite3.connect(DB_PATH)
+    conn.row_factory = _sqlite3.Row
+    try:
+        rows = conn.execute(sql).fetchall()
+        result = {}
+        for r in rows:
+            rd = dict(r)
+            # Убираем бинарные/несериализуемые поля
+            for k, v in list(rd.items()):
+                if isinstance(v, bytes):
+                    rd[k] = base64.b64encode(v).decode()
+                elif isinstance(v, (datetime,)):
+                    rd[k] = v.isoformat()
+            key = key_fn(rd)
+            result[key] = rd
+        return result
+    finally:
+        conn.close()
 
 
-def _local_is_newer(cloud_updated: str | None) -> bool:
-    """Сравнить локальный файл с updated в облаке.
+def _write_table_firebase(table_name: str, data: dict):
+    """Записать таблицу в Firebase под broker_db/{table_name}.
 
-    Возвращает True, если локальная БД новее облачной (нужен push).
-    Учитывает:
-    - timestamp последней синхронизации (.broker_sync_state)
-    - время модификации самого файла broker.db (mtime)
-
-    Если облака нет — считаем локальное новее.
-    Если локального состояния нет — проверяем по mtime файла.
+    Использует update(), который добавляет/обновляет записи,
+    НО НЕ удаляет существующие от других инстансов.
     """
-    if not os.path.exists(DB_PATH):
-        return False
+    ref = _rtdb_root.child(table_name)
+    # Отправляем пачками по 500 записей (лимит RTDB)
+    items = list(data.items())
+    for i in range(0, len(items), 500):
+        chunk = dict(items[i:i + 500])
+        ref.update(chunk)
 
-    # Время изменения файла БД (когда в последний раз меняли данные)
-    file_mtime = datetime.fromtimestamp(
-        os.path.getmtime(DB_PATH), tz=timezone.utc
-    ).isoformat()
 
-    local_ts = _read_local_state()
+def _push_table(table_name: str, key_fn, sql: str):
+    """Прочитать таблицу из SQLite и записать в Firebase (append)."""
+    data = _read_table(table_name, key_fn, sql)
+    if not data:
+        logger.debug(f'Table {table_name}: no rows to push')
+        return
+    _write_table_firebase(table_name, data)
+    logger.debug(f'Pushed {len(data)} rows to Firebase/{table_name}')
 
-    if not local_ts:
-        # Нет истории синхронизации — ориентируемся на mtime файла
-        if not cloud_updated:
-            return True  # облака нет — пушим
-        return file_mtime > cloud_updated  # файл новее облака?
 
-    if not cloud_updated:
-        return True  # облака нет — пушим локальное
+def _pull_table(table_name: str, insert_sql: str, insert_params_template: tuple):
+    """Прочитать таблицу из Firebase и влить в локальный SQLite.
 
-    # Если файл менялся ПОСЛЕ последнего push'а — локально новее
-    if file_mtime > local_ts:
-        return True
+    insert_sql — INSERT OR IGNORE с параметрами.
+    insert_params_template — кортеж с именами колонок для подстановки.
+    """
+    import sqlite3 as _sqlite3
+    ref = _rtdb_root.child(table_name)
+    cloud_data = ref.get()
+    if not cloud_data:
+        return 0
 
-    return local_ts > cloud_updated
+    conn = _sqlite3.connect(DB_PATH)
+    try:
+        cur = conn.cursor()
+        count = 0
+        for key, row in cloud_data.items():
+            if not isinstance(row, dict):
+                continue
+            # Восстанавливаем bytes из base64
+            params = []
+            for col in insert_params_template:
+                val = row.get(col)
+                if isinstance(val, str) and len(val) > 100 and val.startswith(('A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '+', '/')):
+                    # Примерная проверка на base64 — если похоже, пробуем декодировать
+                    try:
+                        decoded = base64.b64decode(val, validate=True)
+                        params.append(decoded)
+                    except Exception:
+                        params.append(val)
+                else:
+                    params.append(val)
+            try:
+                cur.execute(insert_sql, params)
+                if cur.rowcount > 0:
+                    count += 1
+            except Exception as e:
+                logger.debug(f'Pull {table_name}/{key}: {e}')
+        conn.commit()
+        return count
+    finally:
+        conn.close()
 
 
 def push():
-    """Загрузить broker.db в Firebase Realtime Database (base64).
+    """Загрузить все локальные таблицы в Firebase (append, без удаления).
 
-    Пушит, только если локальная БД новее облачной версии или облака нет.
+    Каждая таблица пишется под свой узел broker_db/{table}.
+    Используется update(), поэтому данные от других инстансов не затираются.
     """
     if not firebase_config.is_enabled():
         return False
@@ -167,77 +440,115 @@ def push():
         return False
 
     try:
-        _init_firebase()
+        with _proxy_scope():
+            _init_firebase()
 
-        # Проверим, есть ли в облаке более свежая версия
-        cloud = _rtdb_ref.get()
-        cloud_updated = cloud.get('updated') if cloud else None
+            _checkpoint_db()
 
-        if cloud_updated and not _local_is_newer(cloud_updated):
-            logger.info(f'Push skipped: local version is older than cloud ({cloud_updated})')
-            return False
+            for table_name, key_fn, sql in _TABLES:
+                _push_table(table_name, key_fn, sql)
 
-        _checkpoint_db()
+            # Обновляем мета-информацию
+            now = datetime.now(timezone.utc).isoformat()
+            _rtdb_root.child('_meta').update({
+                'hostname': _HOSTNAME,
+                'updated': now,
+            })
 
-        with open(DB_PATH, 'rb') as f:
-            encoded = base64.b64encode(f.read()).decode('utf-8')
-
-        now = datetime.now(timezone.utc).isoformat()
-
-        _rtdb_ref.set({
-            'data': encoded,
-            'size': os.path.getsize(DB_PATH),
-            'updated': now,
-        })
-
-        # Сохраняем timestamp удачного push'а
         _write_local_state(now)
 
-        logger.info(f'Pushed broker.db to Firebase RTDB ({os.path.getsize(DB_PATH)} bytes)')
+        logger.info('Pushed all tables to Firebase RTDB')
         return True
     except Exception as e:
         logger.error(f'Push to Firebase RTDB failed: {e}')
         return False
 
 
-def pull():
-    """Скачать broker.db из Firebase Realtime Database (если существует).
+def push_async():
+    """Запустить push() в фоновом потоке — не блокирует старт."""
+    def _push_worker():
+        try:
+            push()
+        except Exception as e:
+            logger.error(f'Async push failed: {e}')
+    th = threading.Thread(target=_push_worker, daemon=True)
+    th.start()
+    return th
 
-    Тянет, только если облачная версия новее локальной.
+
+def pull():
+    """Загрузить все таблицы из Firebase и влить в локальный SQLite.
+
+    Использует INSERT OR IGNORE — существующие строки не перезаписываются,
+    новые добавляются. Данные из облака накапливаются, локальные не теряются.
     """
     if not firebase_config.is_enabled():
         return False
 
     try:
-        _init_firebase()
+        with _proxy_scope():
+            _init_firebase()
 
-        snapshot = _rtdb_ref.get()
+            meta = _rtdb_root.child('_meta').get()
+            cloud_updated = (meta or {}).get('updated', '')
+            if not cloud_updated:
+                logger.info('Firebase RTDB is empty, nothing to pull')
+                return True
 
-        if snapshot is None or 'data' not in snapshot:
-            logger.info('No database in Firebase RTDB yet, starting fresh')
-            return True
+            local_ts = _read_local_state()
 
-        cloud_updated = snapshot.get('updated')
-        if not _cloud_is_newer(cloud_updated):
-            logger.info(f'Pull skipped: local version is fresher than cloud ({cloud_updated})')
-            return True
+            # Если локальная версия свежее — не тянем
+            if local_ts and local_ts >= cloud_updated:
+                logger.info(f'Pull skipped: local is fresher than cloud ({cloud_updated})')
+                return True
 
-        decoded = base64.b64decode(snapshot['data'])
+            total = 0
+            # Определяем колонки для INSERT для каждой таблицы
+            col_map = {
+                'report': ('filename', 'contract', 'investor', 'period_start', 'period_end', 'created_at'),
+                'trade': ('report_id', 'trade_date', 'settle_date', 'trade_time', 'security_name',
+                          'security_code', 'class_code', 'currency', 'side', 'quantity', 'price',
+                          'amount', 'nkd', 'broker_fee', 'exchange_fee', 'deal_number',
+                          'comment', 'status', 'source', 'broker', 'account',
+                          'flags', 'operation', 'operation_type'),
+                'repo': ('report_id', 'trade_date', 'trade_time', 'security_name', 'security_code',
+                         'currency', 'side', 'quantity', 'price_part1', 'nkd_part1', 'amount_part1',
+                         'date_part1', 'repo_rate', 'repo_interest', 'price_part2', 'nkd_part2',
+                         'amount_part2', 'date_part2', 'broker_fee', 'exchange_fee', 'deal_number',
+                         'status', 'source'),
+                'cash_flow': ('report_id', 'date', 'description', 'currency', 'credit', 'debit'),
+                'portfolio': ('report_id', 'security_name', 'isin', 'currency', 'qty_start',
+                              'price_start', 'value_start', 'qty_end', 'price_end', 'value_end',
+                              'qty_change', 'value_change'),
+                'financial_result': ('report_id', 'income_code', 'income_amount', 'expense_code',
+                                     'expense_amount', 'taxable_amount', 'tax_rate', 'tax_calculated',
+                                     'tax_withheld', 'tax_due'),
+                'quik_trade': ('trade_num', 'sec_code', 'class_code', 'price', 'qty', 'value',
+                               'accruedint', 'yield', 'settlecode', 'reporate', 'repovalue',
+                               'repo2value', 'repoterm', 'period', 'trade_date', 'trade_time',
+                               'source', 'side', 'flags', 'operation',
+                               'broker', 'account', 'operation_type'),
+                'current_price': ('sec_code', 'class_code', 'price', 'qty', 'value', 'timestamp'),
+                'instrument': ('sec_code', 'class_code', 'lotsize', 'min_step', 'short_name',
+                              'full_name', 'updated_at'),
+            }
 
-        # Атомарная замена через временный файл
-        tmp_path = DB_PATH + '.tmp'
-        with open(tmp_path, 'wb') as f:
-            f.write(decoded)
+            for table_name, _, _ in _TABLES:
+                cols = col_map.get(table_name)
+                if not cols:
+                    continue
+                placeholders = ','.join(['?' for _ in cols])
+                cols_str = ','.join(cols)
+                insert_sql = f'INSERT OR IGNORE INTO {table_name}({cols_str}) VALUES({placeholders})'
+                cnt = _pull_table(table_name, insert_sql, cols)
+                total += cnt
+                if cnt:
+                    logger.debug(f'Pulled {cnt} new rows into {table_name}')
 
-        if os.path.exists(DB_PATH):
-            os.remove(DB_PATH)
-        os.rename(tmp_path, DB_PATH)
-
-        # Сохраняем timestamp удачного pull'а
-        if cloud_updated:
+        if total:
             _write_local_state(cloud_updated)
 
-        logger.info(f'Pulled broker.db from Firebase RTDB ({len(decoded)} bytes)')
+        logger.info(f'Pulled {total} new rows from Firebase RTDB')
         return True
     except Exception as e:
         logger.error(f'Pull from Firebase RTDB failed: {e}')
@@ -245,7 +556,11 @@ def pull():
 
 
 def sync():
-    """Двунаправленная синхронизация: pull затем push."""
+    """Двунаправленная синхронизация: pull затем push.
+
+    Сначала вливаем данные из облака в локальную БД (pull),
+    потом отправляем свои данные в облако (push).
+    """
     if not firebase_config.is_enabled():
         return False
     pull()
@@ -281,12 +596,15 @@ def start_background_sync(interval=None):
 
 
 def init_replication():
-    """Инициализировать репликацию: pull при запуске + фоновый sync.
+    """Инициализировать репликацию: sync при запуске + фоновый sync.
 
-    Определяет направление синхронизации при старте:
-    - Если облако новее → pull (скачиваем на этот хост)
-    - Если локально новее → push (загружаем в облако)
-    - Если одинаковое или нет данных → первая запись в облако
+    При старте:
+    1. Pull — загружает последний snapshot из Firebase в локальную БД
+       (если облачная версия новее локальной).
+    2. Push — создаёт новый snapshot в Firebase с текущими локальными
+       данными (append, предыдущие snapshot'ы сохраняются).
+
+    Firebase = источник истины, всё идёт append-only, ничего не удаляется.
 
     Вызывать после init_db() в run.py.
 
@@ -300,35 +618,15 @@ def init_replication():
         )
         return False
 
-    try:
-        _init_firebase()
-    except Exception as e:
-        logger.warning(f'Firebase init failed, replication unavailable: {e}')
-        return False
+    # Pull: тянем последнюю версию из облака (синхронно — нужно для расчётов)
+    # Push: отправляем свои данные асинхронно — не блокирует старт
+    pull()
+    push_async()
 
-    # Определяем направление синхронизации при старте
-    cloud = _rtdb_ref.get()
-    cloud_updated = cloud.get('updated') if cloud else None
-    local_ts = _read_local_state()
+    # Фоновая синхронизация каждые 5 минут
+    start_background_sync(interval=300)
 
-    if not cloud_updated and not local_ts:
-        # Ничего нет нигде — просто пушим
-        logger.info('First start: pushing local DB to cloud')
-        push()
-    elif cloud_updated and not local_ts:
-        # В облаке есть, локально нет — тянем
-        logger.info(f'First sync on this host: pulling from cloud ({cloud_updated})')
-        pull()
-    elif _cloud_is_newer(cloud_updated):
-        logger.info(f'Cloud is newer ({cloud_updated}) → pulling')
-        pull()
-    elif _local_is_newer(cloud_updated):
-        logger.info(f'Local is newer → pushing')
-        push()
-    else:
-        logger.info('Local and cloud are in sync')
-        # На всякий случай — перепроверим, что облачные данные корректны
-        push()
+    return True
 
     # Фоновая синхронизация каждые 5 минут
     start_background_sync(interval=300)

@@ -93,6 +93,22 @@ _VTB_TICKER_MAP = {
     'Атомэнп06 USD': 'RU000A10C3M0',
     'Атомэнп06': 'RU000A10C3M0',
     'iДЭНИКОЛБ1': 'RU000A100M47',
+    # Маппинг рег.номер → тикер
+    'Аэрофлот': 'AFLT',
+    'ЛУКОЙЛ а.о.': 'LKOH',
+    'ЛСР ао': 'LSRG',
+    'Магнит ао': 'MGNT',
+    'SGZH Сегежа': 'SGZH',
+    'Татнфт 3ао': 'TATN',
+    'Татнфт 3ап': 'TATNP',
+    'НЛМК ао': 'NLMK',
+    'Россети': 'FEES',
+    'Совкомфлот': 'FLOT',
+    'Сбербанк ао': 'SBER',
+    'ЯНДЕКС': 'YNDX',
+    # Маппинг кодов ОФЗ (из VTB → единый формат)
+    '26241RMFS': 'SU26241RMFS8',
+    '26243RMFS': 'SU26243RMFS4',
 }
 
 
@@ -120,65 +136,75 @@ def parse_vtb_report(filepath):
     max_row, max_col = df.shape
 
     conn = get_connection()
-    cur = conn.cursor()
+    try:
+        cur = conn.cursor()
 
-    # ── Extract header info ──────────────────────────────────
-    filename = filepath.split('\\')[-1]
-    contract = ''
-    investor = ''
-    period_start = ''
-    period_end = ''
+        # ── Extract header info ──────────────────────────────────
+        filename = filepath.split('\\')[-1]
+        contract = ''
+        investor = ''
+        period_start = ''
+        period_end = ''
 
-    title = str(df.iloc[0, 3] or '')
-    m = re.search(r'за период с\s+(\S+)\s+по\s+(\S+)', title)
-    if m:
-        period_start = _fmt_date(m.group(1))
-        period_end = _fmt_date(m.group(2))
+        title = str(df.iloc[0, 3] or '')
+        m = re.search(r'за период с\s+(\S+)\s+по\s+(\S+)', title)
+        if m:
+            period_start = _fmt_date(m.group(1))
+            period_end = _fmt_date(m.group(2))
 
-    for r in range(min(15, max_row)):
-        v1 = str(df.iloc[r, 1] or '').strip()
-        v2 = str(df.iloc[r, 8] or '').strip() if max_col >= 9 else ''
-        if 'Клиент' in v1 and v2:
-            investor = v2
-        if 'Соглашения' in v1 and v2:
-            contract = v2
+        for r in range(min(15, max_row)):
+            v1 = str(df.iloc[r, 1] or '').strip()
+            v2 = str(df.iloc[r, 8] or '').strip() if max_col >= 9 else ''
+            if 'Клиент' in v1 and v2:
+                investor = v2
+            if 'Соглашения' in v1 and v2:
+                contract = v2
 
-    cur.execute("SELECT id FROM report WHERE filename=?", (filename,))
-    existing = cur.fetchone()
-    if existing:
-        report_id = existing['id']
-        for tbl in ('trade', 'repo', 'cash_flow', 'portfolio', 'financial_result'):
-            cur.execute(f"DELETE FROM {tbl} WHERE report_id=?", (report_id,))
-        cur.execute("""UPDATE report SET contract=?, investor=?, period_start=?, period_end=?
-                       WHERE id=?""", (contract, investor, period_start, period_end, report_id))
-    else:
-        cur.execute("""
-            INSERT INTO report(filename, contract, investor, period_start, period_end)
-            VALUES (?, ?, ?, ?, ?)
-        """, (filename, contract, investor, period_start, period_end))
         cur.execute("SELECT id FROM report WHERE filename=?", (filename,))
-        report_id = cur.fetchone()['id']
+        existing = cur.fetchone()
+        if existing:
+            report_id = existing['id']
+            for tbl in ('trade', 'repo', 'cash_flow', 'portfolio', 'financial_result'):
+                cur.execute(f"DELETE FROM {tbl} WHERE report_id=?", (report_id,))
+            cur.execute("""UPDATE report SET contract=?, investor=?, period_start=?, period_end=?
+                           WHERE id=?""", (contract, investor, period_start, period_end, report_id))
+        else:
+            cur.execute("""
+                INSERT INTO report(filename, contract, investor, period_start, period_end)
+                VALUES (?, ?, ?, ?, ?)
+            """, (filename, contract, investor, period_start, period_end))
+            cur.execute("SELECT id FROM report WHERE filename=?", (filename,))
+            report_id = cur.fetchone()['id']
 
-    # Pre-scan sections using column B (index 1)
-    col_b = df.iloc[:, 1].astype(str).str.strip().tolist() if max_col >= 2 else []
-    sections = _find_sections_pd(col_b)
+        # Pre-scan sections using column B (index 1)
+        # NOTE: astype(str) on object columns does NOT convert NaN — they stay float
+        if max_col >= 2:
+            col_b = [str(v).strip() if not isinstance(v, str) else v.strip()
+                     for v in df.iloc[:, 1].tolist()]
+        else:
+            col_b = []
+        sections = _find_sections_pd(col_b)
 
-    # ── Parse cash flow ──────────────────────────────────────
-    _parse_vtb_cash_flow(df, cur, report_id, sections, max_row, max_col)
+        # ── Parse cash flow ──────────────────────────────────────
+        _parse_vtb_cash_flow(df, cur, report_id, sections, max_row, max_col)
 
-    # ── Parse trades ─────────────────────────────────────────
-    for sec_title in ['Заключенные в отчетном периоде сделки с ценными бумагами',
-                      'Завершенные в отчетном периоде сделки с ценными бумагами',
-                      'Незавершенные в отчетном периоде сделки с ценными бумагами']:
-        _parse_vtb_trade_section(df, cur, report_id, sec_title, sections, max_row, max_col)
+        # ── Parse trades ─────────────────────────────────────────
+        for sec_title in ['Заключенные в отчетном периоде сделки с ценными бумагами',
+                          'Завершенные в отчетном периоде сделки с ценными бумагами',
+                          'Незавершенные в отчетном периоде сделки с ценными бумагами']:
+            _parse_vtb_trade_section(df, cur, report_id, sec_title, sections, max_row, max_col)
 
-    # ── Parse REPO ───────────────────────────────────────────
-    for sec_title in ['Заключенные в отчетном периоде сделки по переносу открытой позиции Клиента',
-                      'Завершенные в отчетном периоде сделки по переносу открытой позиции Клиента']:
-        _parse_vtb_repo_section(df, cur, report_id, sec_title, sections, max_row, max_col)
+        # ── Parse REPO ───────────────────────────────────────────
+        for sec_title in ['Заключенные в отчетном периоде сделки по переносу открытой позиции Клиента',
+                          'Завершенные в отчетном периоде сделки по переносу открытой позиции Клиента']:
+            _parse_vtb_repo_section(df, cur, report_id, sec_title, sections, max_row, max_col)
 
-    conn.commit()
-    conn.close()
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
     return report_id
 
 
@@ -305,6 +331,13 @@ def _parse_vtb_trade_section(df, cur, report_id, section_title, sections, max_ro
         settle_date_str = _fmt_date(settle_date) or trade_date_str
         currency_str = str(settle_currency or '').strip() or 'RUR'
         deal_num_str = str(deal_number or deal_number2 or '').strip()
+        # Пропускаем внутренние переводы/трансферы (не биржевые сделки)
+        if deal_num_str.startswith(('SR', 'BR')):
+            continue
+        # Нормализуем номер сделки: отбрасываем префикс B/S (тип сделки),
+        # чтобы совпадал с номерами из my_trades.xlsx (без префикса)
+        if len(deal_num_str) > 1 and deal_num_str[0] in ('B', 'S') and deal_num_str[1:].isdigit():
+            deal_num_str = deal_num_str[1:]
         comment_str = str(comment or '').strip()
         venue_str = str(venue or '').strip()
 

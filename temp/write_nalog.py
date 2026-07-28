@@ -1,0 +1,184 @@
+"""Write new nalog.html template."""
+content = r'''{% extends "base.html" %}
+{% block title %}Налоговые отчёты — BrokerReport{% endblock %}
+
+{% block content %}
+{% set ys = years|sort %}
+{% set all_inc = year_totals.values()|sum(attribute='income') %}
+
+<h4><i class="bi bi-file-earmark-text"></i> Налоговые отчёты</h4>
+<p class="text-muted small mb-3">из отчётов ВТБ</p>
+
+{% if pivot %}
+<div class="row g-2 mb-3">
+    <div class="col-auto">
+        <div class="card h-100">
+            <div class="card-body py-2 px-3">
+                <div class="small text-muted">Инструментов</div>
+                <div class="fs-5 fw-bold">{{ pivot|length }}</div>
+            </div>
+        </div>
+    </div>
+    {% for y in ys %}{% set yt = year_totals.get(y, {}) %}
+    <div class="col-auto">
+        <div class="card h-100">
+            <div class="card-body py-2 px-3">
+                <div class="small text-muted">{{ y }} доход</div>
+                <div class="fs-5 fw-bold {% if yt.income >= 0 %}profit-positive{% else %}profit-negative{% endif %}">{{ "{:,.2f}".format(yt.income) }}</div>
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+    <div class="col-auto">
+        <div class="card h-100">
+            <div class="card-body py-2 px-3">
+                <div class="small text-muted">Всего доход</div>
+                <div class="fs-5 fw-bold {% if all_inc >= 0 %}profit-positive{% else %}profit-negative{% endif %}">{{ "{:,.2f}".format(all_inc) }}</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header"><i class="bi bi-calculator"></i> Налоговая сводка</div>
+    <div class="card-body p-0">
+        <table class="table table-sm table-hover mb-0">
+            <thead><tr>
+                <th style="min-width:180px;">Показатель</th>
+                {% for y in ys %}<th class="text-center">{{ y }}</th>{% endfor %}
+                <th class="text-center">Всего</th>
+            </tr></thead>
+            <tbody>
+            {% set tax_rows = [
+                ('broker_income','Доход (брокер)'),
+                ('broker_taxable','Налогооблагаемая база'),
+                ('broker_tax_calc','Начислено налога'),
+                ('broker_tax_paid','Уплачено налога'),
+                ('broker_tax_due','Налог к уплате'),
+            ] %}
+            {% for key, label in tax_rows %}
+            <tr>
+                <td class="text-muted">{{ label }}</td>
+                {% for y in ys %}{% set td = tax_summary.get(y, {}) %}
+                <td class="text-end {% if key in ('broker_tax_calc','broker_tax_paid') and td.get(key,0) > 0 %}profit-positive{% elif key == 'broker_tax_due' and td.get(key,0) > 0 %}profit-negative{% endif %}">{{ "{:,.2f}".format(td.get(key,0)) }}</td>
+                {% endfor %}
+                {% set tot = tax_summary.values()|sum(attribute=key) %}
+                <td class="text-end {% if key in ('broker_tax_calc','broker_tax_paid') and tot > 0 %}profit-positive{% elif key == 'broker_tax_due' and tot > 0 %}profit-negative{% endif %}">{{ "{:,.2f}".format(tot) }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="card mt-3">
+    <div class="card-header"><i class="bi bi-pie-chart"></i> Группы инструментов</div>
+    <div class="card-body p-0">
+        <table class="table table-sm table-hover mb-0">
+            <thead><tr>
+                <th style="min-width:180px;">Группа</th>
+                {% for y in ys %}<th class="text-center">{{ y }}</th>{% endfor %}
+                <th class="text-center">Всего</th>
+            </tr></thead>
+            <tbody>
+            {% for grp in ('ОФЗ','Прочие','Всего') %}
+            <tr class="{% if grp == 'Всего' %}table-active fw-bold{% endif %}">
+                <td>{{ grp }}</td>
+                {% for y in ys %}{% set gd = groups.get(grp,{}).get(y,{}) %}
+                <td class="text-end {% if gd.get('total_income',0) > 0 %}profit-positive{% elif gd.get('total_income',0) < 0 %}profit-negative{% endif %}">{{ "{:,.2f}".format(gd.get('total_income',0)) }}</td>
+                {% endfor %}
+                {% set ti = groups.get(grp,{}).values()|sum(attribute='total_income') %}
+                <td class="text-end {% if ti > 0 %}profit-positive{% elif ti < 0 %}profit-negative{% endif %}">{{ "{:,.2f}".format(ti) }}</td>
+            </tr>
+            {% if grp != 'Всего' %}
+            <tr>
+                <td class="text-muted ps-4"><small>прибыль</small></td>
+                {% for y in ys %}{% set gd = groups.get(grp,{}).get(y,{}) %}
+                <td class="text-end profit-positive"><small>{{ "{:,.2f}".format(gd.get('total_profit',0)) }}</small></td>
+                {% endfor %}
+                {% set tp = groups.get(grp,{}).values()|sum(attribute='total_profit') %}
+                <td class="text-end profit-positive"><small>{{ "{:,.2f}".format(tp) }}</small></td>
+            </tr>
+            <tr>
+                <td class="text-muted ps-4"><small>убыток</small></td>
+                {% for y in ys %}{% set gd = groups.get(grp,{}).get(y,{}) %}
+                <td class="text-end profit-negative"><small>{{ "{:,.2f}".format(gd.get('total_loss',0)) }}</small></td>
+                {% endfor %}
+                {% set tl = groups.get(grp,{}).values()|sum(attribute='total_loss') %}
+                <td class="text-end profit-negative"><small>{{ "{:,.2f}".format(tl) }}</small></td>
+            </tr>
+            {% endif %}
+            {% endfor %}
+            <tr class="table-light fw-bold">
+                <td>Налогооблагаемая база</td>
+                {% for y in ys %}{% set td = tax_summary.get(y,{}) %}
+                <td class="text-end profit-positive">{{ "{:,.2f}".format(td.get('broker_taxable',0)) }}</td>
+                {% endfor %}
+                {% set tbt = tax_summary.values()|sum(attribute='broker_taxable') %}
+                <td class="text-end profit-positive">{{ "{:,.2f}".format(tbt) }}</td>
+            </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<div class="card mt-3">
+    <div class="card-header"><i class="bi bi-list-ul"></i> Доходы/убытки по инструментам</div>
+    <div class="card-body p-0 table-responsive">
+        <table class="table table-sm table-hover mb-0">
+            <thead><tr>
+                <th style="min-width:200px;">Инструмент</th>
+                {% for y in ys %}<th class="text-center">{{ y }}</th>{% endfor %}
+                <th class="text-center">Всего</th>
+            </tr></thead>
+            <tbody>
+            {% for code, instr in pivot.items() %}
+            <tr class="table-active">
+                <td class="fw-bold">{{ instr.name }} <span class="text-muted fw-normal">{{ instr.code }}</span></td>
+                {% for y in ys %}{% set yd = instr.years.get(y,{}) %}
+                <td class="text-end"><small class="text-muted">Сд:{{ yd.get('deals',0) }}</small>{% if yd.get('income',0) > 0 %} <span class="profit-positive">{% elif yd.get('income',0) < 0 %} <span class="profit-negative">{% endif %}{% if yd.get('income',0) != 0 %}{{ "{:,.2f}".format(yd.get('income',0)) }}</span>{% endif %}</td>
+                {% endfor %}
+                {% set td = instr.years.values()|sum(attribute='deals') %}
+                {% set ti = instr.years.values()|sum(attribute='income') %}
+                <td class="text-end"><small class="text-muted">Сд:{{ td }}</small>{% if ti > 0 %} <span class="profit-positive">{% elif ti < 0 %} <span class="profit-negative">{% endif %}{% if ti != 0 %}{{ "{:,.2f}".format(ti) }}</span>{% endif %}</td>
+            </tr>
+            {% for mk, ml in [('deals','Сделок'),('income','Доход'),('amount','Сумма продаж'),('pos','Прибыльных'),('neg','Убыточных')] %}
+            <tr>
+                <td class="text-muted ps-4">{{ ml }}</td>
+                {% for y in ys %}{% set yd = instr.years.get(y,{}) %}
+                <td class="text-end {% if mk == 'income' and yd.get(mk,0) > 0 %}profit-positive{% elif mk == 'income' and yd.get(mk,0) < 0 %}profit-negative{% endif %}">{% if mk in ('income','amount') %}{{ "{:,.2f}".format(yd.get(mk,0)) }}{% else %}{{ yd.get(mk,0) }}{% endif %}</td>
+                {% endfor %}
+                {% set tot = instr.years.values()|sum(attribute=mk) %}
+                <td class="text-end {% if mk == 'income' and tot > 0 %}profit-positive{% elif mk == 'income' and tot < 0 %}profit-negative{% endif %}">{% if mk in ('income','amount') %}{{ "{:,.2f}".format(tot) }}{% else %}{{ tot }}{% endif %}</td>
+            </tr>
+            {% endfor %}
+            {% endfor %}
+            </tbody>
+            <tfoot>
+            <tr class="table-active fw-bold">
+                <td>Итого</td>
+                {% for y in ys %}{% set yt = year_totals.get(y,{}) %}
+                <td class="text-end {% if yt.income >= 0 %}profit-positive{% else %}profit-negative{% endif %}">{{ "{:,.2f}".format(yt.income) }}</td>
+                {% endfor %}
+                {% set gi = year_totals.values()|sum(attribute='income') %}
+                <td class="text-end {% if gi >= 0 %}profit-positive{% else %}profit-negative{% endif %}">{{ "{:,.2f}".format(gi) }}</td>
+            </tr>
+            </tfoot>
+        </table>
+    </div>
+</div>
+{% else %}
+<div class="text-center text-muted py-5">
+    <i class="bi bi-inbox" style="font-size:3rem;"></i>
+    <p class="mt-2">Нет данных. Добавьте файлы в reports/nalog/</p>
+</div>
+{% endif %}
+{% endblock %}
+'''
+
+import os
+fp = os.path.join('app', 'templates', 'nalog.html')
+with open(fp, 'w', encoding='utf-8') as f:
+    f.write(content)
+print(f'Written to {fp}')
+print(f'Size: {len(content)} bytes')

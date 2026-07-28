@@ -403,21 +403,31 @@ function OnTrade(trade)
         time = os.time()
     }
 
-    -- Определяем сторону сделки: flags нечётный → покупка (наша заявка),
-    -- flags чётный → продажа (контрагент)
+    -- Определяем сторону сделки:
     -- В Lua 5.1 нет оператора &, используем % 2 (нечётное = бит 0 установлен)
+    local raw_flags = tonumber(trade.flags) or 0
     local side = "sell"
-    if trade.flags and trade.flags % 2 == 1 then
+    if raw_flags > 0 and raw_flags % 2 == 1 then
         side = "buy"
+    end
+
+    -- Диагностика: если flags=0, дамп всех полей для анализа
+    if raw_flags == 0 then
+        local fields = {}
+        for k, v in pairs(trade) do
+            table.insert(fields, string.format("%s=%s", tostring(k), tostring(v)))
+        end
+        log_info("FLAGS=0 TRADE: " .. table.concat(fields, ", "))
     end
 
     -- Логируем каждую сделку (для отладки), можно закомментировать при высокой частоте
     local side_label = (side == "buy") and "BUY" or "SELL"
     if should_track_count <= 10 or should_track_count % 10 == 0 then
-        log_info(string.format("MY TRADE #%d (%d) %s: %s/%s price=%.4f qty=%d value=%.2f flags=%d",
+        log_info(string.format("MY TRADE #%d (%d) %s: %s/%s price=%.4f qty=%d value=%.2f flags=%d account=[%s] broker=%s",
             tonumber(trade.trade_num) or 0, should_track_count, side_label,
             sec_code, class_code,
-            price, qty, value, tonumber(trade.flags) or -1))
+            price, qty, value, tonumber(trade.flags) or -1,
+            tostring(trade.account or ""), BROKER_NAME))
     end
 
     -- Размер лота из QUIK
@@ -429,6 +439,11 @@ function OnTrade(trade)
 
     -- Сохраняем сделку для отправки в БД
     local dt = normalize_trade_datetime(trade.datetime)
+    -- Определяем счёт (account): в QUIK OnTrade это поле trade.account
+    local account = tostring(trade.account or "")
+    local settlecode = tostring(trade.settlecode or "")
+    local raw_flags = tonumber(trade.flags) or 0
+    local raw_op_type = tonumber(trade.operation_type) or -1
     table.insert(trade_cache, {
         trade_num = tonumber(trade.trade_num) or 0,
         sec_code = sec_code,
@@ -438,7 +453,8 @@ function OnTrade(trade)
         value = value,
         accruedint = tonumber(trade.accruedint) or 0,
         yield = tonumber(trade.yield) or 0,
-        settlecode = tostring(trade.settlecode or ""),
+        settlecode = settlecode,
+        account = account,        -- номер счёта для определения брокера
         reporate = tonumber(trade.reporate) or 0,
         repovalue = tonumber(trade.repovalue) or 0,
         repo2value = tonumber(trade.repo2value) or 0,
@@ -447,7 +463,9 @@ function OnTrade(trade)
         datetime = dt,
         side = side,
         lotsize = lotsize,
-        broker = BROKER_NAME,
+        broker = BROKER_NAME,      -- fallback: если ACCOUNT_BROKER_MAP не заполнен
+        flags = raw_flags,         -- оригинальные флаги для перепроверки на сервере
+        operation_type = raw_op_type,
     })
 
     -- Если очередь сделок слишком большая — сбрасываем старые (срезом, а не циклом)
@@ -475,9 +493,20 @@ local function load_existing_trades()
 
     log_info("load_existing_trades: found " .. n .. " trades in QUIK, loading...")
     local loaded = 0
+    local debug_done = false
     for i = 0, n - 1 do
         local ok2, trade = pcall(function() return getItem("trades", i) end)
         if ok2 and trade and type(trade) == "table" then
+            -- Отладка: выводим ВСЕ поля первой сделки
+            if not debug_done then
+                local fields = {}
+                for k, v in pairs(trade) do
+                    table.insert(fields, string.format("%s=%s", tostring(k), tostring(v)))
+                end
+                log_info("TRADE FIELDS: " .. table.concat(fields, ", "))
+                debug_done = true
+            end
+
             local sec_code = trade.seccode or trade.sec_code or ""
             local class_code = trade.class_code or ""
 
@@ -485,9 +514,10 @@ local function load_existing_trades()
             if #INSTRUMENTS > 0 and not should_track(sec_code, class_code) then
                 -- не логируем каждый пропуск, только счётчик
             else
-                -- Определяем сторону сделки: flags нечётный → покупка
+                -- Определяем сторону сделки:
+                local trade_raw_flags = tonumber(trade.flags) or 0
                 local trade_side = "sell"
-                if trade.flags and trade.flags % 2 == 1 then
+                if trade_raw_flags > 0 and trade_raw_flags % 2 == 1 then
                     trade_side = "buy"
                 end
 
@@ -499,6 +529,8 @@ local function load_existing_trades()
                 end
 
                 local dt = normalize_trade_datetime(trade.datetime)
+                local account = tostring(trade.account or "")
+                local raw_flags = trade_raw_flags
                 table.insert(trade_cache, {
                     trade_num = tonumber(trade.trade_num) or 0,
                     sec_code = sec_code,
@@ -509,6 +541,7 @@ local function load_existing_trades()
                     accruedint = tonumber(trade.accruedint) or 0,
                     yield = tonumber(trade.yield) or 0,
                     settlecode = tostring(trade.settlecode or ""),
+                    account = account,
                     reporate = tonumber(trade.reporate) or 0,
                     repovalue = tonumber(trade.repovalue) or 0,
                     repo2value = tonumber(trade.repo2value) or 0,
@@ -518,6 +551,7 @@ local function load_existing_trades()
                     side = trade_side,
                     lotsize = trade_lotsize,
                     broker = BROKER_NAME,
+                    flags = raw_flags,
                 })
                 loaded = loaded + 1
 

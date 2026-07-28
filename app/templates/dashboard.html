@@ -448,7 +448,7 @@
                                 <td class="text-end price-cell">{{ '{:,.4f}'.format(t.price) }}</td>
                                 <td class="text-end">{{ t.qty }}</td>
                                 <td class="text-end">{{ '{:,.2f}'.format(t.value) }}</td>
-                                <td><small>{{ t.created_at[11:19] }}</small></td>
+                                <td><small>{{ t.trade_time or '' }}</small></td>
                             </tr>
                         {% endfor %}
                         </tbody>

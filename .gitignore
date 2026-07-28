@@ -29,6 +29,12 @@ app/broker.db
 # Firebase service account key (НЕ добавлять в Git!)
 app/firebase-key.json
 
+# Runtime device authorization (создаётся автоматически)
+app/allowed_devices.json
+
+# Logs
+logs/
+
 # SQLite WAL files
 *.db-shm
 *.db-wal

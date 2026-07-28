@@ -5,6 +5,8 @@ import re
 from bs4 import BeautifulSoup
 from app.db import get_connection, init_db
 from app.parser_vtb import parse_vtb_report
+from app.parser_mytrades import parse_mytrades
+from app.parser_openbroker import parse_openbroker_report
 
 
 def parse_float(s):
@@ -41,10 +43,51 @@ def parse_report(filepath):
     """Main entry: parse a broker report (HTML for Sber, XLSX for VTB) and persist to DB."""
     init_db()
 
-    # Detect file type by extension
+    # ── Skip already-processed reports ───────────────────────
+    # Если файл уже есть в БД и содержит сделки — не обрабатываем повторно.
+    fname = os.path.basename(filepath)
+    conn = get_connection()
+    existing = conn.execute("SELECT id FROM report WHERE filename=?", (fname,)).fetchone()
+    if existing:
+        rid = existing['id']
+        has_data = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM trade WHERE report_id=?", (rid,)
+        ).fetchone()['cnt']
+        if has_data > 0:
+            conn.close()
+            print(f'  [skip] {fname} уже обработан (report_id={rid}, сделок={has_data})')
+            return rid
+        # Если сделок 0 — предыдущий парсинг упал, перезаписываем
+        print(f'  [retry] {fname}: перепарсинг (report_id={rid}, предыдущих сделок=0)')
+    conn.close()
+
+    # Detect file type by extension, name, and content
+    fname_lower = fname.lower()
     ext = os.path.splitext(filepath)[1].lower()
+
     if ext in ('.xlsx', '.xls'):
-        return parse_vtb_report(filepath)
+        # my_trades.xlsx — отдельный формат
+        if fname_lower == 'my_trades.xlsx':
+            return parse_mytrades(filepath)
+
+        # Детектируем брокера по содержимому (первые строки)
+        try:
+            import pandas as pd
+            df_sample = pd.read_excel(filepath, header=None, nrows=10)
+            header_text = ''
+            for r in range(min(5, df_sample.shape[0])):
+                for c in range(min(10, df_sample.shape[1])):
+                    v = str(df_sample.iloc[r, c])[:100] if not pd.isna(df_sample.iloc[r, c]) else ''
+                    if v:
+                        header_text += v + ' '
+
+            if 'Открытие' in header_text or 'БМ-Банк' in header_text:
+                return parse_openbroker_report(filepath)
+
+            # По умолчанию — VTB
+            return parse_vtb_report(filepath)
+        except Exception:
+            return parse_vtb_report(filepath)
 
     # HTML parser (Sber format)
     with open(filepath, 'r', encoding='utf-8') as f:

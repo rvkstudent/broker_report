@@ -1,0 +1,30 @@
+{
+  "sec_code": "SBMM",
+  "yield": 0,
+  "qty": 1,
+  "settlecode": "Y1",
+  "period": 1,
+  "trade_num": 17302436907,
+  "reporate": 0,
+  "account": "L01-00000F00",
+  "price": 19.0365,
+  "accruedint": 0,
+  "lotsize": 1,
+  "class_code": "TQBR",
+  "broker": "sber",
+  "repovalue": 0,
+  "value": 19.04,
+  "flags": 65,
+  "operation_type": -1,
+  "repoterm": 0,
+  "side": "buy",
+  "datetime": {
+    "month": 7,
+    "year": 2026,
+    "sec": 52,
+    "min": 29,
+    "hour": 18,
+    "day": 27
+  },
+  "repo2value": 0
+}

@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block title %}Авторизация устройства{% endblock %}
+{% block content %}
+<div class="row justify-content-center mt-5">
+    <div class="col-md-6 col-lg-5">
+        <div class="card">
+            <div class="card-header bg-primary text-white text-center">
+                <i class="bi bi-shield-lock fs-2"></i>
+                <h5 class="mt-2">Авторизация устройства</h5>
+            </div>
+            <div class="card-body text-center">
+                {% if error %}
+                <div class="alert alert-warning">
+                    <i class="bi bi-clock-history"></i> {{ error }}
+                </div>
+                {% endif %}
+
+                <p class="text-muted">
+                    Для доступа к системе вашему устройству нужно разрешение администратора.
+                </p>
+
+                <hr>
+
+                <p class="mb-1"><strong>Ваш Device ID:</strong></p>
+                <div id="device-id-display" class="mb-3 p-2 bg-light rounded border font-monospace"
+                     style="font-size: 1.2rem; word-break: break-all; user-select: all;">
+                    {% if device_id %}{{ device_id }}{% else %}Генерируем...{% endif %}
+                </div>
+
+                <div class="alert alert-info" id="status-message">
+                    <i class="bi bi-send-check"></i>
+                    <span id="status-text">
+                        {% if device_id %}
+                        Запрос на доступ отправлен администратору.
+                        Ожидайте подтверждения...
+                        {% else %}
+                        Устанавливаем соединение...
+                        {% endif %}
+                    </span>
+                </div>
+
+                <div id="spinner-section" class="mb-3">
+                    <div class="spinner-border text-primary" role="status">
+                        <span class="visually-hidden">Ожидание...</span>
+                    </div>
+                    <div class="mt-1 small text-muted">
+                        Автоматическая проверка каждые 10 секунд
+                    </div>
+                </div>
+
+                <div id="success-section" class="mb-3 d-none">
+                    <div class="alert alert-success">
+                        <i class="bi bi-check-circle fs-4"></i>
+                        <p class="mb-0 mt-1"><strong>Устройство авторизовано!</strong></p>
+                    </div>
+                    <button class="btn btn-success" onclick="checkAccess()">
+                        <i class="bi bi-arrow-right-circle"></i> Перейти к системе
+                    </button>
+                </div>
+
+                <div id="retry-section" class="mb-3 d-none">
+                    <p class="text-muted small">Проверка доступа не удалась.</p>
+                    <button class="btn btn-outline-primary" onclick="checkAccess()">
+                        <i class="bi bi-arrow-repeat"></i> Проверить снова
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+let deviceId = '{{ device_id }}' || localStorage.getItem('broker_device_id');
+
+// Если нет device_id — генерируем
+if (!deviceId) {
+    deviceId = 'dev_' + Array.from({length: 12}, () =>
+        Math.floor(Math.random() * 16).toString(16)).join('');
+    localStorage.setItem('broker_device_id', deviceId);
+    document.getElementById('device-id-display').textContent = deviceId;
+    // Сохраняем в куку и перезагружаем, чтобы сервер запомнил
+    document.cookie = 'device_id=' + deviceId + '; path=/; max-age=31536000';
+    window.location.reload();
+} else {
+    // Уже есть device_id — сохраняем в куку и начинаем опрос
+    localStorage.setItem('broker_device_id', deviceId);
+    document.cookie = 'device_id=' + deviceId + '; path=/; max-age=31536000';
+}
+
+// Автоматическая проверка доступа каждые 10 секунд
+let checkInterval = setInterval(function() {
+    fetch('/?device_id=' + encodeURIComponent(deviceId), {
+        method: 'HEAD'
+    }).then(function(resp) {
+        if (resp.ok) {
+            // Доступ разрешён!
+            clearInterval(checkInterval);
+            document.getElementById('spinner-section').classList.add('d-none');
+            document.getElementById('retry-section').classList.add('d-none');
+            document.getElementById('success-section').classList.remove('d-none');
+            document.getElementById('status-message').classList.remove('alert-info');
+            document.getElementById('status-message').classList.add('alert-success');
+            document.getElementById('status-text').textContent = 'Устройство авторизовано! Перенаправляем...';
+            setTimeout(function() { window.location.reload(); }, 1500);
+        }
+    }).catch(function() {
+        // Ошибка сети — просто ждём дальше
+    });
+}, 10000);
+
+function checkAccess() {
+    document.cookie = 'device_id=' + deviceId + '; path=/; max-age=31536000';
+    window.location.reload();
+}
+</script>
+{% endblock %}

@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}Статус устройства{% endblock %}
+{% block content %}
+<div class="row justify-content-center mt-5">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header text-center">
+                <h5><i class="bi bi-shield-check"></i> Статус устройства</h5>
+            </div>
+            <div class="card-body">
+                {% if not auth_enabled %}
+                <div class="alert alert-info">
+                    <i class="bi bi-info-circle"></i>
+                    Авторизация устройств отключена (режим разработки).
+                </div>
+                {% elif allowed %}
+                <div class="alert alert-success text-center">
+                    <i class="bi bi-check-circle fs-1 d-block mb-2"></i>
+                    <strong>Устройство авторизовано</strong>
+                    <br>
+                    <span class="small text-muted">Device ID: {{ device_id }}</span>
+                </div>
+                {% elif device_id %}
+                <div class="alert alert-warning text-center">
+                    <i class="bi bi-exclamation-triangle fs-1 d-block mb-2"></i>
+                    <strong>Устройство не авторизовано</strong>
+                    <br>
+                    <span class="small text-muted">Device ID: {{ device_id }}</span>
+                    <hr>
+                    <p class="mb-0">Обратитесь к администратору для добавления устройства.</p>
+                </div>
+                {% else %}
+                <div class="alert alert-secondary text-center">
+                    <i class="bi bi-question-circle fs-1 d-block mb-2"></i>
+                    <strong>Device ID не обнаружен</strong>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
