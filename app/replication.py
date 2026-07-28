@@ -87,8 +87,8 @@ _TABLES = [
     ('report',       lambda r: _fb_key(str(r['filename'])),
      'SELECT * FROM report'),
     ('trade',        lambda r: _fb_key(
-        f"quik_{r['deal_number']}" if r.get('source') == 'quik' and r.get('deal_number')
-        else (r.get('deal_number','') or str(r['id']))
+        f"{r.get('source','')}_{r.get('deal_number','')}" if r.get('deal_number')
+        else str(r['id'])
     ),
      'SELECT * FROM trade ORDER BY id'),
     ('repo',         lambda r: _fb_key(f"{r['source']}_{r.get('deal_number','') or r['id']}"),
@@ -105,6 +105,8 @@ _TABLES = [
      'SELECT * FROM current_price'),
     ('instrument',   lambda r: _fb_key(f"{r['sec_code']}_{r.get('class_code','')}"),
      'SELECT * FROM instrument'),
+    ('nalog',        lambda r: _fb_key(f"{r['year']}_{r.get('deal_number','') or r['id']}"),
+     'SELECT * FROM nalog'),
 ]
 
 
@@ -378,8 +380,16 @@ def _push_table(table_name: str, key_fn, sql: str):
     if not data:
         logger.debug(f'Table {table_name}: no rows to push')
         return
-    _write_table_firebase(table_name, data)
-    logger.debug(f'Pushed {len(data)} rows to Firebase/{table_name}')
+    # Для trade таблицы используем set() вместо update() —
+    # перезаписываем весь узел, чтобы удалить дубликаты
+    # с устаревшими ключами (например, S/B-префиксы).
+    if table_name == 'trade':
+        ref = _rtdb_root.child(table_name)
+        ref.set(data)
+        logger.debug(f'Pushed {len(data)} rows to Firebase/{table_name} (overwrite)')
+    else:
+        _write_table_firebase(table_name, data)
+        logger.debug(f'Pushed {len(data)} rows to Firebase/{table_name}')
 
 
 def _pull_table(table_name: str, insert_sql: str, insert_params_template: tuple):
@@ -398,9 +408,26 @@ def _pull_table(table_name: str, insert_sql: str, insert_params_template: tuple)
     try:
         cur = conn.cursor()
         count = 0
+
+        # Для trade: собираем существующие (source, deal_number) для дедупликации
+        existing_trades = set()
+        if table_name == 'trade':
+            for row in conn.execute(
+                "SELECT source, deal_number FROM trade WHERE deal_number IS NOT NULL AND deal_number != ''"
+            ).fetchall():
+                existing_trades.add((row[0] or '', row[1] or ''))
+
         for key, row in cloud_data.items():
             if not isinstance(row, dict):
                 continue
+
+            # Проверка на дубликат по (source, deal_number) для trade
+            if table_name == 'trade':
+                src = str(row.get('source', '') or '')
+                dn = str(row.get('deal_number', '') or '')
+                if dn and (src, dn) in existing_trades:
+                    continue  # уже есть — пропускаем
+
             # Восстанавливаем bytes из base64
             params = []
             for col in insert_params_template:
@@ -418,6 +445,9 @@ def _pull_table(table_name: str, insert_sql: str, insert_params_template: tuple)
                 cur.execute(insert_sql, params)
                 if cur.rowcount > 0:
                     count += 1
+                    # Добавляем в existing, чтобы следующие дубликаты тоже пропустить
+                    if table_name == 'trade' and dn:
+                        existing_trades.add((src, dn))
             except Exception as e:
                 logger.debug(f'Pull {table_name}/{key}: {e}')
         conn.commit()
@@ -531,6 +561,9 @@ def pull():
                 'current_price': ('sec_code', 'class_code', 'price', 'qty', 'value', 'timestamp'),
                 'instrument': ('sec_code', 'class_code', 'lotsize', 'min_step', 'short_name',
                               'full_name', 'updated_at'),
+                'nalog': ('year', 'instrument_name', 'instrument_code', 'side', 'deal_date',
+                          'deal_number', 'fnc_code', 'price', 'quantity', 'amount',
+                          'currency', 'income', 'expense', 'source_file'),
             }
 
             for table_name, _, _ in _TABLES:

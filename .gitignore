@@ -19,9 +19,8 @@ env/
 # Lua modules (dependencies)
 lua_modules/
 
-# Generated reports
-reports/*.HTML
-reports/*.html
+# Generated reports (HTML, XLSX, налоговые выгрузки и пр.)
+reports/
 
 # SQLite (создаётся автоматически)
 app/broker.db
