@@ -429,6 +429,9 @@ def index():
     lots = get_trade_lots(None, df_dmy, dt_dmy, broker)
     open_trades = get_open_trades(None, df_dmy, dt_dmy, broker)
     instruments = get_instrument_summary(None, df_dmy, dt_dmy, broker)
+
+    # Набор кодов инструментов, у которых есть открытая позиция
+    open_codes = set(i['security_code'] for i in instruments) if instruments else set()
     repo_total = get_repo_total(None, df_dmy, dt_dmy, broker)
 
     quik_trades = get_recent_quik_trades(20)
@@ -473,6 +476,7 @@ def index():
                            profit=profit, lots=lots,
                            open_trades=open_trades,
                            instruments=instruments,
+                           open_codes=open_codes,
                            repo_total=repo_total,
                            trade_fee_rate=TRADE_FEE_RATE,
                            quik_trades=quik_trades,

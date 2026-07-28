@@ -62,6 +62,11 @@
                     <option value="vtb" {% if broker == 'vtb' %}selected{% endif %}>ВТБ</option>
                 </select>
             </div>
+            <div class="col-auto form-check d-flex align-items-end mb-1">
+                <input type="checkbox" class="form-check-input me-1" id="showOpenOnly"
+                       onchange="toggleOpenOnly()" checked>
+                <label class="form-check-label small" for="showOpenOnly">Только открытые</label>
+            </div>
             <div class="col-auto">
                 <button class="btn btn-sm btn-primary"><i class="bi bi-search"></i> Применить</button>
             </div>
@@ -107,7 +112,7 @@
     </div>
     <div class="card-body p-0">
         {% if profit %}
-        <table class="table table-sm table-hover mb-0">
+        <table class="table table-sm table-hover mb-0" id="profitTable">
             <thead class="table-light">
                 <tr>
                     <th>Ценная бумага</th>
@@ -120,7 +125,7 @@
             </thead>
             <tbody>
             {% for p in profit %}
-                <tr>
+                <tr data-has-open="{{ 'true' if p.security_code in open_codes else 'false' }}">
                     <td>{{ p.security_name }} <small class="text-muted">({{ p.security_code }})</small></td>
                     <td class="text-end">{{ p.buy_qty }}</td>
                     <td class="text-end">{{ p.sell_qty }}</td>
@@ -182,7 +187,7 @@
                     <tbody>
                     {% for lot in lots %}
                         {% set net = lot.profit - lot.buy_fee - lot.sell_fee %}
-                        <tr>
+                        <tr data-has-open="{{ 'true' if lot.security_code in open_codes else 'false' }}">
                             <td><small>{{ lot.security_code }}</small></td>
                             <td>{{ lot.qty }}</td>
                             <td><small>{{ lot.buy_date }}</small></td>
@@ -500,6 +505,18 @@
 </div>
 
 <script>
+// Фильтр: только открытые позиции
+function toggleOpenOnly() {
+    const checked = document.getElementById('showOpenOnly').checked;
+    document.querySelectorAll('#profitTable tbody tr, #profitDetail table tbody tr').forEach(tr => {
+        if (checked) {
+            tr.style.display = tr.dataset.hasOpen === 'true' ? '' : 'none';
+        } else {
+            tr.style.display = '';
+        }
+    });
+}
+
 // Форматирование цены
 function fmtPrice(p) {
     if (p == null) return '—';
@@ -690,6 +707,7 @@ async function refreshOpenTrades() {
 }
 
 // Запуск
+toggleOpenOnly();  // применить фильтр "только открытые" при загрузке
 refreshQuikStatus();
 refreshQuik();
 refreshPrices();
