@@ -138,7 +138,7 @@
                 </tr>
             {% endfor %}
             </tbody>
-            <tfoot class="table-light fw-bold">
+            <tfoot class="table-light fw-bold" id="profitTfoot">
                 {% set total_gross = profit | sum(attribute='gross_profit') %}
                 {% set total_ftrade = profit | sum(attribute='total_fees') %}
                 {% set total_net = profit | sum(attribute='net_profit') %}
@@ -508,13 +508,51 @@
 // Фильтр: только открытые позиции
 function toggleOpenOnly() {
     const checked = document.getElementById('showOpenOnly').checked;
-    document.querySelectorAll('#profitTable tbody tr, #profitDetail table tbody tr').forEach(tr => {
-        if (checked) {
-            tr.style.display = tr.dataset.hasOpen === 'true' ? '' : 'none';
-        } else {
-            tr.style.display = '';
-        }
+    const tbody = document.querySelector('#profitTable tbody');
+    const tfoot = document.getElementById('profitTfoot');
+    const detailBody = document.querySelector('#profitDetail table tbody');
+
+    // Фильтр строк
+    [tbody, detailBody].forEach(body => {
+        if (!body) return;
+        body.querySelectorAll('tr').forEach(tr => {
+            tr.style.display = (checked && tr.dataset.hasOpen !== 'true') ? 'none' : '';
+        });
     });
+
+    // Итоги: пересчитать по видимым строкам или показать оригинал
+    if (checked) {
+        tfoot.style.display = 'none';
+        // Пересчитать по видимым строкам
+        let buyQty = 0, sellQty = 0, gross = 0, fees = 0, net = 0;
+        tbody.querySelectorAll('tr[style*="display: none"]').forEach(tr => tr.removeAttribute('style'));
+        tbody.querySelectorAll('tr').forEach(tr => {
+            if (tr.style.display === 'none') return;
+            const cells = tr.querySelectorAll('td');
+            if (cells.length < 6) return;
+            buyQty += parseInt(cells[1]?.textContent?.replace(/\s/g,'') || 0);
+            sellQty += parseInt(cells[2]?.textContent?.replace(/\s/g,'') || 0);
+            gross += parseFloat(cells[3]?.textContent?.replace(/\s/g,'')?.replace(',','.') || 0);
+            fees += parseFloat(cells[4]?.textContent?.replace(/\s/g,'')?.replace(',','.') || 0);
+            net += parseFloat(cells[5]?.textContent?.replace(/\s/g,'')?.replace(',','.') || 0);
+        });
+        let el = document.getElementById('profitFilteredTotal');
+        if (!el) {
+            el = document.createElement('div');
+            el.id = 'profitFilteredTotal';
+            el.className = 'p-2 small text-muted border-top text-center';
+            tfoot.parentElement.after(el);
+        }
+        el.innerHTML = `Показаны только открытые позиции: ` +
+            `${buyQty.toLocaleString()} / ${sellQty.toLocaleString()} шт, ` +
+            `прибыль <b>${net >= 0 ? '+' : ''}${net.toFixed(2)}</b> ` +
+            `(валовая ${gross.toFixed(2)}, комиссии ${fees.toFixed(2)})`;
+        el.style.display = '';
+    } else {
+        tfoot.style.display = '';
+        const el = document.getElementById('profitFilteredTotal');
+        if (el) el.style.display = 'none';
+    }
 }
 
 // Форматирование цены
