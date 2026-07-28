@@ -31,6 +31,9 @@ app/firebase-key.json
 # Runtime device authorization (создаётся автоматически)
 app/allowed_devices.json
 
+# Temp debug scripts
+temp/
+
 # Logs
 logs/
 
