@@ -116,11 +116,13 @@
             <thead class="table-light">
                 <tr>
                     <th>Ценная бумага</th>
-                    <th class="text-end">Куплено</th>
-                    <th class="text-end">Продано</th>
-                    <th class="text-end">Валовая прибыль</th>
-                    <th class="text-end">Комиссии (трейд)</th>
-                    <th class="text-end">Чистая прибыль</th>
+                    <th class="text-end">Куп.</th>
+                    <th class="text-end">Прод.</th>
+                    <th class="text-end">Вал.приб.</th>
+                    <th class="text-end">Комис.</th>
+                    <th class="text-end">Чист.приб.</th>
+                    <th class="text-end">Прогноз</th>
+                    <th class="text-end">Итого P&amp;L</th>
                 </tr>
             </thead>
             <tbody>
@@ -135,6 +137,12 @@
                     <td class="text-end {{ 'profit-positive' if p.net_profit >= 0 else 'profit-negative' }} fw-bold">
                         {{ '{:+,.2f}'.format(p.net_profit) }}
                     </td>
+                    <td class="text-end {{ 'profit-positive' if p.forecast_pl >= 0 else 'profit-negative' }}">
+                        {{ '{:+,.2f}'.format(p.forecast_pl) }}
+                    </td>
+                    <td class="text-end {{ 'profit-positive' if p.total_pl >= 0 else 'profit-negative' }} fw-bold">
+                        {{ '{:+,.2f}'.format(p.total_pl) }}
+                    </td>
                 </tr>
             {% endfor %}
             </tbody>
@@ -143,6 +151,8 @@
                 {% set total_ftrade = profit | sum(attribute='total_fees') %}
                 {% set total_net = profit | sum(attribute='net_profit') %}
                 {% set repo_cost = repo_total.total %}
+                {% set total_forecast = profit | sum(attribute='forecast_pl') %}
+                {% set total_totalpl = profit | sum(attribute='total_pl') %}
                 <tr>
                     <td>ПРИБЫЛЬ/УБЫТОК ПО ТРЕЙДАМ</td>
                     <td class="text-end">{{ profit | sum(attribute='buy_qty') }}</td>
@@ -153,19 +163,26 @@
                     <td class="text-end {{ 'profit-positive' if total_net >= 0 else 'profit-negative' }}">
                         {{ '{:+,.2f}'.format(total_net) }}
                     </td>
+                    <td class="text-end {{ 'profit-positive' if total_forecast >= 0 else 'profit-negative' }}">
+                        {{ '{:+,.2f}'.format(total_forecast) }}
+                    </td>
+                    <td class="text-end {{ 'profit-positive' if total_totalpl >= 0 else 'profit-negative' }} fw-bold">
+                        {{ '{:+,.2f}'.format(total_totalpl) }}
+                    </td>
                 </tr>
                 <tr class="text-danger">
-                    <td>РАСХОДЫ НА РЕПО (проценты + комиссии)</td>
-                    <td></td><td></td><td></td>
+                    <td>РАСХОДЫ НА РЕПО</td>
+                    <td></td><td></td><td></td><td></td>
                     <td class="text-end">{{ '{:,.2f}'.format(repo_cost) }}</td>
-                    <td class="text-end">−{{ '{:,.2f}'.format(repo_cost) }}</td>
+                    <td></td><td>−{{ '{:,.2f}'.format(repo_cost) }}</td>
                 </tr>
                 <tr class="table-dark">
                     <td>ИТОГОВЫЙ РЕЗУЛЬТАТ (с учётом РЕПО)</td>
-                    <td></td><td></td><td></td>
+                    <td></td><td></td><td></td><td></td>
                     <td class="text-end text-danger">{{ '{:,.2f}'.format(total_ftrade + repo_cost) }}</td>
-                    <td class="text-end {{ 'profit-positive' if (total_net - repo_cost) >= 0 else 'profit-negative' }}">
-                        {{ '{:+,.2f}'.format(total_net - repo_cost) }}
+                    <td></td>
+                    <td class="text-end {{ 'profit-positive' if (total_totalpl - repo_cost) >= 0 else 'profit-negative' }}">
+                        {{ '{:+,.2f}'.format(total_totalpl - repo_cost) }}
                     </td>
                 </tr>
             </tfoot>
@@ -524,17 +541,19 @@ function toggleOpenOnly() {
     if (checked) {
         tfoot.style.display = 'none';
         // Пересчитать по видимым строкам
-        let buyQty = 0, sellQty = 0, gross = 0, fees = 0, net = 0;
+        let buyQty = 0, sellQty = 0, gross = 0, fees = 0, net = 0, forecast = 0, totalPl = 0;
         tbody.querySelectorAll('tr[style*="display: none"]').forEach(tr => tr.removeAttribute('style'));
         tbody.querySelectorAll('tr').forEach(tr => {
             if (tr.style.display === 'none') return;
             const cells = tr.querySelectorAll('td');
-            if (cells.length < 6) return;
+            if (cells.length < 8) return;
             buyQty += parseInt(cells[1]?.textContent?.replace(/\s/g,'') || 0);
             sellQty += parseInt(cells[2]?.textContent?.replace(/\s/g,'') || 0);
             gross += parseFloat(cells[3]?.textContent?.replace(/\s/g,'')?.replace(',','.') || 0);
             fees += parseFloat(cells[4]?.textContent?.replace(/\s/g,'')?.replace(',','.') || 0);
             net += parseFloat(cells[5]?.textContent?.replace(/\s/g,'')?.replace(',','.') || 0);
+            forecast += parseFloat(cells[6]?.textContent?.replace(/\s/g,'')?.replace(',','.') || 0);
+            totalPl += parseFloat(cells[7]?.textContent?.replace(/\s/g,'')?.replace(',','.') || 0);
         });
         let el = document.getElementById('profitFilteredTotal');
         if (!el) {
@@ -545,8 +564,10 @@ function toggleOpenOnly() {
         }
         el.innerHTML = `Показаны только открытые позиции: ` +
             `${buyQty.toLocaleString()} / ${sellQty.toLocaleString()} шт, ` +
-            `прибыль <b>${net >= 0 ? '+' : ''}${net.toFixed(2)}</b> ` +
-            `(валовая ${gross.toFixed(2)}, комиссии ${fees.toFixed(2)})`;
+            `чист.приб. <b>${net >= 0 ? '+' : ''}${net.toFixed(2)}</b>` +
+            `, прогноз ${forecast >= 0 ? '+' : ''}${forecast.toFixed(2)}` +
+            `, итого P&amp;L <b>${totalPl >= 0 ? '+' : ''}${totalPl.toFixed(2)}</b>` +
+            ` (вал.${gross.toFixed(2)}, ком.${fees.toFixed(2)})`;
         el.style.display = '';
     } else {
         tfoot.style.display = '';
