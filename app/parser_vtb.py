@@ -1,5 +1,6 @@
 """Parse VTB (Bank VTB) broker XLSX reports and insert data into SQLite."""
 
+import os
 import re
 from datetime import datetime
 from app.db import get_connection, init_db
@@ -140,7 +141,7 @@ def parse_vtb_report(filepath):
         cur = conn.cursor()
 
         # ── Extract header info ──────────────────────────────────
-        filename = filepath.split('\\')[-1]
+        filename = os.path.basename(filepath)
         contract = ''
         investor = ''
         period_start = ''

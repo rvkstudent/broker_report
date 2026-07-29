@@ -107,7 +107,7 @@ def parse_report(filepath):
     cur = conn.cursor()
 
     # ── Extract header info ──────────────────────────────────
-    filename = filepath.split('\\')[-1]
+    filename = os.path.basename(filepath)
     contract = ''
     investor = ''
     period_start = ''
