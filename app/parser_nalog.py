@@ -99,10 +99,19 @@ def init_nalog_table():
             depositary_taxable  REAL DEFAULT 0,
             total_income        REAL DEFAULT 0,
             total_taxable       REAL DEFAULT 0,
+            dividend_income     REAL DEFAULT 0,
+            broker_result       REAL DEFAULT 0,
             source_file         TEXT
         )
     """)
     conn.commit()
+    # Добавляем колонки для существующих БД
+    for col in ('dividend_income', 'broker_result'):
+        try:
+            conn.execute(f"ALTER TABLE nalog_tax_summary ADD COLUMN {col} REAL DEFAULT 0")
+            conn.commit()
+        except Exception:
+            pass
     conn.close()
 
 
@@ -171,13 +180,104 @@ def _parse_tax_summary(df, year, filename, cur):
         elif 'ИТОГО налогооблагаемый доход' in cell1 and val is not None:
             total_taxable = val
     
+    # Вычисляем финансовый результат из сводных строк (РЕПО + ЦБ)
+    # Строки 10-11: col12=Доходы, col19=Расходы, col28=Транзактные, col37=Нетранзактные
+    broker_result = 0.0
+    for r in range(max_row):
+        cell1 = str(df.iloc[r, 1]).strip() if not pd.isna(df.iloc[r, 1]) else ''
+        if cell1.startswith('ИТОГО ПО ОПЕРАЦИЯМ РЕПО') or cell1.startswith('ИТОГО ПО ЦЕННЫМ БУМАГАМ'):
+            inc = parse_float(df.iloc[r, 12]) if not pd.isna(df.iloc[r, 12]) else 0
+            exp = parse_float(df.iloc[r, 19]) if not pd.isna(df.iloc[r, 19]) else 0
+            tx = parse_float(df.iloc[r, 28]) if not pd.isna(df.iloc[r, 28]) else 0
+            ntx = parse_float(df.iloc[r, 37]) if not pd.isna(df.iloc[r, 37]) else 0
+            broker_result += inc - exp - tx - ntx
+
     cur.execute("""
         INSERT OR REPLACE INTO nalog_tax_summary
             (year, broker_income, broker_taxable, broker_tax_calc, broker_tax_paid, broker_tax_due,
-             depositary_income, depositary_taxable, total_income, total_taxable, source_file)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             depositary_income, depositary_taxable, total_income, total_taxable, broker_result, source_file)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (year, broker_income, broker_taxable, broker_tax_calc, broker_tax_paid, broker_tax_due,
-          depositary_income, depositary_taxable, total_income, total_taxable, filename))
+          depositary_income, depositary_taxable, total_income, total_taxable, broker_result, filename))
+
+
+def _parse_dividends(df, year, filename, cur):
+    """Извлечь дивиденды/купоны из секции 'Отчет о выплатах по ценным бумагам'.
+
+    Структура секции (проверено на отчётах ВТБ 2024-2026):
+      Header: col1='№ п/п', col2='Депозитарий', col4='Эмитент', col6='Период выплаты',
+              col8='Дата фиксации', col13='Вид цб', col16='Рег № / ISIN',
+              col20='Кол-во цб', col24='Выплата на 1 цб', col30='Начислено', col32='НОБ (руб.)'
+      Data:   col1=номер, col4=эмитент, col6=период, col13=обл./акции,
+              col16=ISIN, col20=кол-во, col24=выплата, col30=начислено
+      Total:  col1='Итого по RUB', col30=сумма
+    """
+    max_row = df.shape[0]
+    in_payments_section = False
+    dividend_total = 0.0
+
+    for r in range(max_row):
+        cell1 = str(df.iloc[r, 1]).strip() if not pd.isna(df.iloc[r, 1]) else ''
+
+        # Начало секции выплат
+        if 'Отчет о выплатах по ценным бумагам' in cell1:
+            in_payments_section = True
+            continue
+
+        if not in_payments_section:
+            continue
+
+        # Конец секции — строка Итого по RUB
+        if 'Итого по RUB' in cell1:
+            val = parse_float(df.iloc[r, 30]) if not pd.isna(df.iloc[r, 30]) else 0
+            if val:
+                dividend_total = val
+            break
+
+        # Пропускаем заголовки
+        if not cell1 or cell1 == '№ п/п':
+            continue
+        # Пропускаем строки счёт депо / банк
+        if cell1.startswith('Счет депо') or cell1.startswith('Банк'):
+            continue
+
+        # Проверяем, что это строка данных (колонка 1 содержит номер)
+        try:
+            int(cell1)
+        except ValueError:
+            continue
+
+        # Читаем данные о выплате
+        issuer = str(df.iloc[r, 4]).strip() if not pd.isna(df.iloc[r, 4]) else ''
+        period = str(df.iloc[r, 6]).strip() if not pd.isna(df.iloc[r, 6]) else ''
+        sec_type = str(df.iloc[r, 13]).strip() if not pd.isna(df.iloc[r, 13]) else ''
+        isin_full = str(df.iloc[r, 16]).strip() if not pd.isna(df.iloc[r, 16]) else ''
+        isin = isin_full.split('/')[0].strip() if '/' in isin_full else isin_full
+        accrued = parse_float(df.iloc[r, 30]) if not pd.isna(df.iloc[r, 30]) else 0
+
+        # Определяем тип: coupon (обл.) или dividend (акции)
+        income_type = 'coupon' if 'обл' in sec_type else 'dividend'
+        instrument_name = f'{issuer} / {period}'
+
+        if accrued == 0:
+            continue
+
+        # Сохраняем в таблицу nalog для отображения в детальной таблице
+        cur.execute("""
+            INSERT INTO nalog
+                (year, instrument_name, instrument_code, side, amount, income, source_file)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (year, instrument_name, isin, income_type, accrued, accrued, filename))
+
+    # Обновляем dividend_income в сводке
+    cur.execute("""
+        UPDATE nalog_tax_summary
+        SET dividend_income = ?
+        WHERE year = ?
+    """, (dividend_total, year))
+
+    if dividend_total:
+        print(f'[nalog] {filename}: дивиденды/купоны={dividend_total:.2f}')
 
 
 def parse_nalog_report(filepath):
@@ -216,6 +316,9 @@ def parse_nalog_report(filepath):
 
     # Парсим сводку по налогам (шапка отчёта)
     _parse_tax_summary(df, year, filename, cur)
+
+    # Парсим дивиденды/купоны из секции "Отчет о выплатах"
+    _parse_dividends(df, year, filename, cur)
 
     # Парсим секции "Финансовый результат"
     # Ищем строки вида "C1=Наименование: ..." 

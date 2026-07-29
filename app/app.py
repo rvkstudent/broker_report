@@ -13,7 +13,7 @@ from app.db import (init_db, get_reports_list, get_report_by_id,
                      save_price, save_prices_batch, get_current_prices,
                      get_my_instruments, save_quik_trades, save_instruments_batch,
                      get_recent_quik_trades, get_quik_positions,
-                     get_trades_list)
+                     get_trades_list, get_cash_flow_summary)
 from app.parser import parse_report
 from app.parser_nalog import (parse_nalog_report, get_nalog_summary,
                                get_nalog_years, get_nalog_instruments,
@@ -68,6 +68,10 @@ def _auto_import():
     """Import HTML/XLSX files from reports/ that haven't been imported yet."""
     imported = 0
     seen = set()
+    from app.db import get_connection
+    conn = get_connection()
+    known = {r['filename'] for r in conn.execute("SELECT filename FROM report").fetchall()}
+    conn.close()
     patterns = [
         os.path.join(REPORTS_DIR, '*.[Hh][Tt][Mm][Ll]'),
         os.path.join(REPORTS_DIR, '*.[Xx][Ll][Ss][Xx]'),
@@ -78,6 +82,8 @@ def _auto_import():
             if fp.lower() in seen:
                 continue
             seen.add(fp.lower())
+            if os.path.basename(fp) in known:
+                continue
             try:
                 rid = parse_report(fp)
                 imported += 1
@@ -365,20 +371,17 @@ def nalog_view():
             'neg': r['negative_deals'],
         }
 
-    # Итоги по году (суммы по всем инструментам)
-    year_totals = {}
-    for r in flat:
-        y = r['year']
-        if y not in year_totals:
-            year_totals[y] = {'deals': 0, 'income': 0.0, 'amount': 0.0, 'pos': 0, 'neg': 0}
-        year_totals[y]['deals'] += r['deals']
-        year_totals[y]['income'] += r['total_income']
-        year_totals[y]['amount'] += r['total_amount']
-        year_totals[y]['pos'] += r['positive_deals']
-        year_totals[y]['neg'] += r['negative_deals']
-
     # Преобразуем список налоговой сводки в dict {year: data}
     tax_dict = {t['year']: t for t in get_nalog_tax_summary_by_year()}
+
+    # Итоги по году — используем broker_result (фин. результат из сводки отчёта)
+    year_totals = {}
+    for y, td in tax_dict.items():
+        year_totals[y] = {
+            'deals': 0,
+            'income': td.get('broker_result', 0),
+            'amount': 0.0, 'pos': 0, 'neg': 0,
+        }
 
     # Группировка ОФЗ / Прочие → {grp: {year: {data}}}
     group_summary = get_nalog_group_summary()
@@ -482,6 +485,9 @@ def index():
         p['forecast_pl'] = round(forecast_map.get(code, 0), 2)
         p['total_pl'] = round(p['net_profit'] + p['forecast_pl'], 2)
 
+    # Движение денежных средств
+    cash_flow = get_cash_flow_summary(None, df_dmy, dt_dmy, broker)
+
     # Цвета для значков тикеров (на основе class_code)
     TICKER_COLORS = {
         'TQBR': '#2563eb', 'TQOB': '#ea580c', 'TQTD': '#7c3aed',
@@ -500,6 +506,7 @@ def index():
                            prices=prices,
                            quik_positions=quik_pos,
                            quik_connected=quik_connected,
+                           cash_flow=cash_flow,
                            date_from=df_dmy, date_to=dt_dmy,
                            date_from_iso=date_from, date_to_iso=date_to,
                            broker=broker)

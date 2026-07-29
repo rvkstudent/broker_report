@@ -46,7 +46,7 @@ def _source_where(alias='trade', broker=None):
 
 
 def get_connection():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -508,6 +508,52 @@ def get_repo_total(report_id=None, date_from=None, date_to=None, broker=None):
         'exchange_fees': round(r['exchange_fees'], 2),
         'total': round(r['interest'] + r['broker_fees'] + r['exchange_fees'], 2),
     }
+
+
+def get_cash_flow_summary(report_id=None, date_from=None, date_to=None, broker=None):
+    """Get cash flow grouped by category (description prefix).
+
+    Категории: Налог, Дивиденд, Купон, Комиссия, Списание, Зачисление, Сделка, Прочее.
+    """
+    conn = get_connection()
+    where_clauses, params = _date_where('cash_flow', date_from, date_to)
+    if report_id is not None:
+        where_clauses.append("cash_flow.report_id=?")
+        params.append(report_id)
+    where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+    rows = conn.execute(f"""
+        SELECT description,
+               COALESCE(SUM(credit),0) AS credits,
+               COALESCE(SUM(debit),0) AS debits
+        FROM cash_flow WHERE {where_sql}
+        GROUP BY description
+        ORDER BY description
+    """, params).fetchall()
+    conn.close()
+
+    # Группируем по категориям
+    CATEGORIES = {
+        'Налог': ['Налог', 'налог'],
+        'Дивиденд': ['Дивиденд', 'дивиденд'],
+        'Купон': ['Купон', 'Выплата купонов'],
+        'Комиссия': ['Комиссия'],
+        'Списание': ['Списание д/с'],
+        'Зачисление': ['Зачисление д/с'],
+        'Сделка': ['Сделка от', 'Сделка '],
+        'Пополнение': ['Пополнение'],
+        'Вывод': ['Вывод', 'Списание'],
+    }
+    result = {}
+    for row in rows:
+        desc = row['description']
+        amount = row['credits'] - row['debits']
+        cat = 'Прочее'
+        for c, keywords in CATEGORIES.items():
+            if any(kw.lower() in desc.lower() for kw in keywords):
+                cat = c
+                break
+        result[cat] = {'amount': round(result.get(cat, {'amount': 0})['amount'] + amount, 2)}
+    return result
 
 
 def _run_lifo(trades, name_map):

@@ -25,6 +25,9 @@ reports/
 # SQLite (создаётся автоматически)
 app/broker.db
 
+# SQLite backup copies
+app/broker (*.db
+
 # Firebase service account key (НЕ добавлять в Git!)
 app/firebase-key.json
 
@@ -43,6 +46,7 @@ logs/
 
 # Sync state (локальный timestamp репликации)
 .broker_sync_state
+.broker_sync_state*
 
 # OS
 Thumbs.db

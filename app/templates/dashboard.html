@@ -230,6 +230,49 @@
     </div>
 </div>
 
+<!-- █████  Cash Flow  █████ -->
+<div class="card mt-3">
+    <div class="card-header bg-white">
+        <i class="bi bi-cash-coin"></i> Движение денежных средств за период
+    </div>
+    <div class="card-body p-0">
+        {% if cash_flow %}
+        <table class="table table-sm table-hover mb-0" style="font-size:13px">
+            <thead class="table-light">
+                <tr>
+                    <th>Категория</th>
+                    <th class="text-end">Сумма</th>
+                </tr>
+            </thead>
+            <tbody>
+            {% for cat, data in cash_flow | dictsort %}
+                <tr>
+                    <td>{{ cat }}</td>
+                    <td class="text-end {{ 'profit-positive' if data.amount >= 0 else 'profit-negative' }}">
+                        {{ '{:+,.2f}'.format(data.amount) }}
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+            <tfoot class="table-light fw-bold">
+                {% set cf_total = ns(val=0) %}
+                {% for cat, data in cash_flow | dictsort %}
+                    {% set cf_total.val = cf_total.val + data.amount %}
+                {% endfor %}
+                <tr>
+                    <td>ИТОГО</td>
+                    <td class="text-end {{ 'profit-positive' if cf_total.val >= 0 else 'profit-negative' }}">
+                        {{ '{:+,.2f}'.format(cf_total.val) }}
+                    </td>
+                </tr>
+            </tfoot>
+        </table>
+        {% else %}
+        <div class="p-3 text-muted text-center">Нет данных за выбранный период.</div>
+        {% endif %}
+    </div>
+</div>
+
 <!-- █████  Open trades (full width)  █████ -->
 <div class="card">
     <div class="card-header bg-white"><i class="bi bi-cart-plus"></i> Открытые трейд-сделки (куплено, нет продажи)</div>
@@ -522,7 +565,11 @@
 </div>
 
 <script>
-// Фильтр: только открытые позиции
+function parseNum(s) {
+    if (!s) return 0;
+    return parseFloat(s.replace(/\s/g,'').replace(/,/g,'')) || 0;
+}
+
 function toggleOpenOnly() {
     const checked = document.getElementById('showOpenOnly').checked;
     const tbody = document.querySelector('#profitTable tbody');
@@ -546,13 +593,13 @@ function toggleOpenOnly() {
             if (tr.style.display === 'none') return;
             const cells = tr.querySelectorAll('td');
             if (cells.length < 8) return;
-            buyQty += parseInt(cells[1]?.textContent?.replace(/\s/g,'') || 0);
-            sellQty += parseInt(cells[2]?.textContent?.replace(/\s/g,'') || 0);
-            gross += parseFloat(cells[3]?.textContent?.replace(/\s/g,'')?.replace(',','.') || 0);
-            fees += parseFloat(cells[4]?.textContent?.replace(/\s/g,'')?.replace(',','.') || 0);
-            net += parseFloat(cells[5]?.textContent?.replace(/\s/g,'')?.replace(',','.') || 0);
-            forecast += parseFloat(cells[6]?.textContent?.replace(/\s/g,'')?.replace(',','.') || 0);
-            totalPl += parseFloat(cells[7]?.textContent?.replace(/\s/g,'')?.replace(',','.') || 0);
+            buyQty += parseInt(parseNum(cells[1]?.textContent));
+            sellQty += parseInt(parseNum(cells[2]?.textContent));
+            gross += parseNum(cells[3]?.textContent);
+            fees += parseNum(cells[4]?.textContent);
+            net += parseNum(cells[5]?.textContent);
+            forecast += parseNum(cells[6]?.textContent);
+            totalPl += parseNum(cells[7]?.textContent);
         });
         let el = document.getElementById('profitFilteredTotal');
         if (!el) {

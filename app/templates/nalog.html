@@ -22,8 +22,8 @@
     <div class="col-auto">
         <div class="card h-100">
             <div class="card-body py-2 px-3">
-                <div class="small text-muted">{{ y }} доход</div>
-                <div class="fs-5 fw-bold {% if yt.income >= 0 %}profit-positive{% else %}profit-negative{% endif %}">{{ "{:,.2f}".format(yt.income) }}</div>
+                <div class="small text-muted">{{ y }} итог</div>
+                <div class="fs-5 fw-bold {% if yt.income >= 0 %}profit-positive{% else %}profit-negative{% endif %}">{{ "{:+,.2f}".format(yt.income) }}</div>
             </div>
         </div>
     </div>
@@ -31,8 +31,8 @@
     <div class="col-auto">
         <div class="card h-100">
             <div class="card-body py-2 px-3">
-                <div class="small text-muted">Всего доход</div>
-                <div class="fs-5 fw-bold {% if all_inc >= 0 %}profit-positive{% else %}profit-negative{% endif %}">{{ "{:,.2f}".format(all_inc) }}</div>
+                <div class="small text-muted">Всего</div>
+                <div class="fs-5 fw-bold {% if all_inc >= 0 %}profit-positive{% else %}profit-negative{% endif %}">{{ "{:+,.2f}".format(all_inc) }}</div>
             </div>
         </div>
     </div>
@@ -48,8 +48,39 @@
                 <th class="text-center">Всего</th>
             </tr></thead>
             <tbody>
+            {% macro td_class(val, pos_cls='profit-positive', neg_cls='profit-negative') %}
+                {%- if val > 0 %}{{ pos_cls }}{% elif val < 0 %}{{ neg_cls }}{% endif -%}
+            {% endmacro %}
+            {# Фин. результат от сделок (без дивидендов) #}
+            <tr>
+                <td class="text-muted">Фин. результат от сделок (без дивидендов)</td>
+                {% for y in ys %}{% set td = tax_summary.get(y, {}) %}
+                {% set trade_pl = td.get('broker_result',0) - td.get('dividend_income',0) %}
+                <td class="text-end {{ td_class(trade_pl) }}">{{ "{:+,.2f}".format(trade_pl) }}</td>
+                {% endfor %}
+                {% set trade_tot = tax_summary.values()|sum(attribute='broker_result') - tax_summary.values()|sum(attribute='dividend_income') %}
+                <td class="text-end {{ td_class(trade_tot) }}">{{ "{:+,.2f}".format(trade_tot) }}</td>
+            </tr>
+            {# Дивиденды/купоны #}
+            <tr>
+                <td class="text-success fw-bold">+ Дивиденды/купоны</td>
+                {% for y in ys %}{% set td = tax_summary.get(y, {}) %}
+                <td class="text-end profit-positive">{{ "{:+,.2f}".format(td.get('dividend_income',0)) }}</td>
+                {% endfor %}
+                {% set div_tot = tax_summary.values()|sum(attribute='dividend_income') %}
+                <td class="text-end profit-positive">{{ "{:+,.2f}".format(div_tot) }}</td>
+            </tr>
+            {# Итого #}
+            <tr class="table-active fw-bold">
+                <td>= Итого фин. результат</td>
+                {% for y in ys %}{% set td = tax_summary.get(y, {}) %}
+                <td class="text-end {{ td_class(td.get('broker_result',0)) }}">{{ "{:+,.2f}".format(td.get('broker_result',0)) }}</td>
+                {% endfor %}
+                {% set br_tot = tax_summary.values()|sum(attribute='broker_result') %}
+                <td class="text-end {{ td_class(br_tot) }}">{{ "{:+,.2f}".format(br_tot) }}</td>
+            </tr>
+            {# Налоги #}
             {% set tax_rows = [
-                ('broker_income','Доход (брокер)'),
                 ('broker_taxable','Налогооблагаемая база'),
                 ('broker_tax_calc','Начислено налога'),
                 ('broker_tax_paid','Уплачено налога'),
@@ -65,6 +96,16 @@
                 <td class="text-end {% if key in ('broker_tax_calc','broker_tax_paid') and tot > 0 %}profit-positive{% elif key == 'broker_tax_due' and tot > 0 %}profit-negative{% endif %}">{{ "{:,.2f}".format(tot) }}</td>
             </tr>
             {% endfor %}
+            {# Чистый результат #}
+            <tr class="table-dark fw-bold">
+                <td>Чистый результат (после налога)</td>
+                {% for y in ys %}{% set td = tax_summary.get(y, {}) %}
+                {% set net = td.get('broker_result',0) - td.get('broker_tax_paid',0) %}
+                <td class="text-end {{ td_class(net) }}">{{ "{:+,.2f}".format(net) }}</td>
+                {% endfor %}
+                {% set net_tot = tax_summary.values()|sum(attribute='broker_result') - tax_summary.values()|sum(attribute='broker_tax_paid') %}
+                <td class="text-end {{ td_class(net_tot) }}">{{ "{:+,.2f}".format(net_tot) }}</td>
+            </tr>
             </tbody>
         </table>
     </div>
@@ -155,12 +196,12 @@
             </tbody>
             <tfoot>
             <tr class="table-active fw-bold">
-                <td>Итого</td>
+                <td>Итого по сделкам</td>
                 {% for y in ys %}{% set yt = year_totals.get(y,{}) %}
-                <td class="text-end {% if yt.income >= 0 %}profit-positive{% else %}profit-negative{% endif %}">{{ "{:,.2f}".format(yt.income) }}</td>
+                <td class="text-end {% if yt.income >= 0 %}profit-positive{% else %}profit-negative{% endif %}">{{ "{:+,.2f}".format(yt.income) }}</td>
                 {% endfor %}
                 {% set gi = year_totals.values()|sum(attribute='income') %}
-                <td class="text-end {% if gi >= 0 %}profit-positive{% else %}profit-negative{% endif %}">{{ "{:,.2f}".format(gi) }}</td>
+                <td class="text-end {% if gi >= 0 %}profit-positive{% else %}profit-negative{% endif %}">{{ "{:+,.2f}".format(gi) }}</td>
             </tr>
             </tfoot>
         </table>
