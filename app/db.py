@@ -1,9 +1,22 @@
 """Database module for broker report analysis."""
 import sqlite3
 import os
+import sys
 from datetime import datetime
 
-DB_PATH = os.path.join(os.path.dirname(__file__), 'broker.db')
+def _get_db_dir() -> str:
+    """Get cross-platform user data directory for BrokerReport."""
+    if sys.platform == 'win32':
+        base = os.environ.get('APPDATA', os.path.expanduser('~'))
+    elif sys.platform == 'darwin':
+        base = os.path.expanduser('~/Library/Application Support')
+    else:
+        base = os.environ.get('XDG_DATA_HOME', os.path.expanduser('~/.local/share'))
+    db_dir = os.path.join(base, 'BrokerReport')
+    os.makedirs(db_dir, exist_ok=True)
+    return db_dir
+
+DB_PATH = os.path.join(_get_db_dir(), 'broker.db')
 
 
 def _norm_date(d: str) -> str:
@@ -18,30 +31,37 @@ def _norm_date(d: str) -> str:
     return d
 
 
-def _date_where(alias='trade', date_from=None, date_to=None):
-    """Build SQL WHERE snippet for date filtering on trade_date."""
+def _date_where(alias='trade', date_from=None, date_to=None, date_col='trade_date'):
+    """Build SQL WHERE snippet for date filtering.
+    date_col — имя колонки с датой (trade_date, date, ...).
+    """
     clauses = []
     params = []
     if date_from:
-        clauses.append(f"substr({alias}.trade_date,7,4)||substr({alias}.trade_date,4,2)||substr({alias}.trade_date,1,2) >= ?")
+        clauses.append(f"substr({alias}.{date_col},7,4)||substr({alias}.{date_col},4,2)||substr({alias}.{date_col},1,2) >= ?")
         params.append(_norm_date(date_from))
     if date_to:
-        clauses.append(f"substr({alias}.trade_date,7,4)||substr({alias}.trade_date,4,2)||substr({alias}.trade_date,1,2) <= ?")
+        clauses.append(f"substr({alias}.{date_col},7,4)||substr({alias}.{date_col},4,2)||substr({alias}.{date_col},1,2) <= ?")
         params.append(_norm_date(date_to))
     return clauses, params
 
 
 def _source_where(alias='trade', broker=None):
     """Build SQL WHERE snippet for broker source filtering.
-    broker='all' or None → no filter (both Sber and VTB).
+    broker='all' or None → no filter.
     broker='sber' → only source='sber'.
     broker='vtb' → only source='vtb'.
+    broker='gazprombank' → source in ('gazprombank', 'gazprombank_v2').
     """
     clauses = []
     params = []
     if broker and broker != 'all':
-        clauses.append(f"{alias}.source=?")
-        params.append(broker)
+        if broker == 'gazprombank':
+            clauses.append(f"{alias}.source IN (?, ?)")
+            params.extend(['gazprombank', 'gazprombank_v2'])
+        else:
+            clauses.append(f"{alias}.source=?")
+            params.append(broker)
     return clauses, params
 
 
@@ -58,19 +78,22 @@ def init_db():
     conn = get_connection()
     cur = conn.cursor()
 
-    cur.executescript("""
-        CREATE TABLE IF NOT EXISTS report (
+    # Каждая таблица создаётся отдельно — если одна упадёт,
+    # остальные останутся
+    ddl = [
+        """CREATE TABLE IF NOT EXISTS report (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             filename        TEXT NOT NULL,
             contract        TEXT,
             investor        TEXT,
             period_start    TEXT,
             period_end      TEXT,
+            source_type     TEXT DEFAULT '',
+            broker          TEXT DEFAULT '',
             created_at      TEXT NOT NULL DEFAULT (datetime('now')),
             UNIQUE(filename)
-        );
-
-        CREATE TABLE IF NOT EXISTS trade (
+        )""",
+        """CREATE TABLE IF NOT EXISTS trade (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             report_id       INTEGER NOT NULL REFERENCES report(id),
             trade_date      TEXT NOT NULL,
@@ -89,9 +112,8 @@ def init_db():
             deal_number     TEXT,
             comment         TEXT,
             status          TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS repo (
+        )""",
+        """CREATE TABLE IF NOT EXISTS repo (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             report_id       INTEGER NOT NULL REFERENCES report(id),
             trade_date      TEXT NOT NULL,
@@ -115,9 +137,8 @@ def init_db():
             exchange_fee    REAL DEFAULT 0,
             deal_number     TEXT,
             status          TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS cash_flow (
+        )""",
+        """CREATE TABLE IF NOT EXISTS cash_flow (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             report_id       INTEGER NOT NULL REFERENCES report(id),
             date            TEXT NOT NULL,
@@ -125,9 +146,8 @@ def init_db():
             currency        TEXT DEFAULT 'RUB',
             credit          REAL DEFAULT 0,
             debit           REAL DEFAULT 0
-        );
-
-        CREATE TABLE IF NOT EXISTS portfolio (
+        )""",
+        """CREATE TABLE IF NOT EXISTS portfolio (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             report_id       INTEGER NOT NULL REFERENCES report(id),
             security_name   TEXT NOT NULL,
@@ -141,9 +161,8 @@ def init_db():
             value_end       REAL,
             qty_change      INTEGER DEFAULT 0,
             value_change    REAL
-        );
-
-        CREATE TABLE IF NOT EXISTS financial_result (
+        )""",
+        """CREATE TABLE IF NOT EXISTS financial_result (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             report_id       INTEGER NOT NULL REFERENCES report(id) UNIQUE,
             income_code     TEXT,
@@ -155,13 +174,11 @@ def init_db():
             tax_calculated  REAL DEFAULT 0,
             tax_withheld    REAL DEFAULT 0,
             tax_due         REAL DEFAULT 0
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_trade_report ON trade(report_id);
-        CREATE INDEX IF NOT EXISTS idx_repo_report ON repo(report_id);
-        CREATE INDEX IF NOT EXISTS idx_cash_report ON cash_flow(report_id);
-
-        CREATE TABLE IF NOT EXISTS current_price (
+        )""",
+        """CREATE INDEX IF NOT EXISTS idx_trade_report ON trade(report_id)""",
+        """CREATE INDEX IF NOT EXISTS idx_repo_report ON repo(report_id)""",
+        """CREATE INDEX IF NOT EXISTS idx_cash_report ON cash_flow(report_id)""",
+        """CREATE TABLE IF NOT EXISTS current_price (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             sec_code        TEXT NOT NULL,
             class_code      TEXT NOT NULL DEFAULT '',
@@ -170,9 +187,8 @@ def init_db():
             value           REAL DEFAULT 0,
             timestamp       TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
             UNIQUE(sec_code, class_code)
-        );
-
-        CREATE TABLE IF NOT EXISTS quik_trade (
+        )""",
+        """CREATE TABLE IF NOT EXISTS quik_trade (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             trade_num       INTEGER,
             sec_code        TEXT NOT NULL,
@@ -193,11 +209,48 @@ def init_db():
             source          TEXT NOT NULL DEFAULT 'quik',
             created_at      TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
             UNIQUE(source, trade_num)
-        );
+        )""",
+        """CREATE INDEX IF NOT EXISTS idx_quik_trade_sec ON quik_trade(sec_code, class_code)""",
+        """CREATE INDEX IF NOT EXISTS idx_quik_trade_time ON quik_trade(created_at)""",
+        """CREATE TABLE IF NOT EXISTS nalog (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            year            TEXT NOT NULL,
+            instrument_name TEXT,
+            instrument_code TEXT,
+            side            TEXT,
+            deal_date       TEXT,
+            deal_number     TEXT,
+            fnc_code        TEXT,
+            price           REAL,
+            quantity        INTEGER,
+            amount          REAL,
+            currency        TEXT DEFAULT 'RUB',
+            income          REAL DEFAULT 0,
+            expense         REAL DEFAULT 0,
+            source_file     TEXT
+        )""",
+        """CREATE TABLE IF NOT EXISTS nalog_tax_summary (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            year            TEXT NOT NULL,
+            broker_income   REAL DEFAULT 0,
+            broker_taxable  REAL DEFAULT 0,
+            broker_tax_calc REAL DEFAULT 0,
+            broker_tax_paid REAL DEFAULT 0,
+            broker_tax_due  REAL DEFAULT 0,
+            depositary_income REAL DEFAULT 0,
+            depositary_taxable REAL DEFAULT 0,
+            total_income    REAL DEFAULT 0,
+            total_taxable   REAL DEFAULT 0,
+            source_file     TEXT
+        )""",
+    ]
+    for d in ddl:
+        try:
+            cur.execute(d)
+        except Exception as e:
+            print(f'  [init_db] warning: {e}')
 
-        CREATE INDEX IF NOT EXISTS idx_quik_trade_sec ON quik_trade(sec_code, class_code);
-        CREATE INDEX IF NOT EXISTS idx_quik_trade_time ON quik_trade(created_at);
-    """)
+    conn.commit()
 
     # ── Migration: add broker column to quik_trade ──
     qk_cols = [r[1] for r in cur.execute("PRAGMA table_info(quik_trade)").fetchall()]
@@ -374,6 +427,145 @@ def init_db():
         WHERE source='quik' AND deal_number IS NOT NULL AND deal_number != ''
     """)
 
+    # ── Очистка B/S-дублей в trade ──
+    for prefix in ('B', 'S'):
+        conn.execute(f"""
+            DELETE FROM trade WHERE id IN (
+                SELECT dup.id FROM trade dup
+                INNER JOIN trade orig ON orig.deal_number = SUBSTR(dup.deal_number, 2)
+                    AND orig.source = dup.source
+                    AND orig.security_code = dup.security_code
+                    AND orig.side = dup.side
+                WHERE dup.deal_number LIKE '{prefix}%'
+                  AND dup.source = 'vtb'
+            )
+        """)
+
+    # ── Нормализация кодов ОФЗ в trade ──
+    conn.execute("""
+        UPDATE trade SET security_code = 'SU26241RMFS8'
+        WHERE security_code IN ('26241RMFS', 'RU000A105FZ9')
+    """)
+    conn.execute("""
+        UPDATE trade SET security_code = 'SU26243RMFS4'
+        WHERE security_code = '26243RMFS'
+    """)
+    for old, new in [('SU26244RMFS2', '26244RMFS'), ('SU26245RMFS9', '26245RMFS'),
+                     ('SU26246RMFS7', '26246RMFS'), ('SU26247RMFS5', '26247RMFS'),
+                     ('SU26248RMFS3', '26248RMFS'), ('SU26249RMFS1', '26249RMFS')]:
+        conn.execute("UPDATE trade SET security_code=? WHERE security_code=?", (new, old))
+
+    # ── Дедупликация cash_flow ──
+    conn.execute("DELETE FROM cash_flow WHERE id NOT IN ("
+                 "SELECT MIN(id) FROM cash_flow GROUP BY date, description, credit, debit)")
+    conn.execute("DELETE FROM cash_flow WHERE date='Дата'")
+
+    # ── Migration: add broker and source_type to report ──
+    report_cols = [r[1] for r in cur.execute("PRAGMA table_info(report)").fetchall()]
+    if 'broker' not in report_cols:
+        cur.execute("ALTER TABLE report ADD COLUMN broker TEXT DEFAULT ''")
+    if 'source_type' not in report_cols:
+        cur.execute("ALTER TABLE report ADD COLUMN source_type TEXT DEFAULT ''")
+
+    # Set broker for existing reports
+    # Сначала чистим осиротевшие записи (без данных) — чтобы автоимпорт их пересоздал
+    cur.execute("""
+        DELETE FROM report WHERE id NOT IN (
+            SELECT DISTINCT report_id FROM trade
+            UNION SELECT DISTINCT report_id FROM cash_flow
+            UNION SELECT DISTINCT report_id FROM repo
+        ) AND filename != '_quik_ontrade_'
+    """)
+    # openbroker и my_trades приравниваем к ВТБ
+    cur.execute("""
+        UPDATE report SET broker='vtb', source_type='broker_report'
+        WHERE (broker = '' OR broker IS NULL)
+          AND (LOWER(filename) LIKE '%open%' OR LOWER(filename) LIKE '%broker%'
+               OR LOWER(filename) LIKE '%my_trade%')
+    """)
+    # Остальные — по source из торгов/cash_flow
+    cur.execute("""
+        UPDATE report SET broker = (
+            SELECT COALESCE(
+                (SELECT source FROM trade WHERE trade.report_id = report.id
+                 AND source != '' AND source != 'quik' LIMIT 1),
+                (SELECT source FROM cash_flow WHERE cash_flow.report_id = report.id
+                 AND source != '' AND source != 'quik' LIMIT 1),
+                ''
+            )
+        ) WHERE broker = '' OR broker IS NULL
+    """)
+    cur.execute("""
+        UPDATE report SET source_type='broker_report'
+        WHERE (source_type = '' OR source_type IS NULL)
+          AND broker IN ('sber', 'vtb')
+    """)
+
+    # Migration: openbroker и my_trades → vtb в trade.source
+    # Сбрасываем уникальный индекс, обновляем source, пересоздаём
+    cur.execute("DROP INDEX IF EXISTS idx_trade_source_deal")
+    cur.execute("""
+        UPDATE trade SET source='vtb'
+        WHERE source IN ('openbroker', 'my_trades')
+    """)
+    # Дедупликация перед созданием индекса
+    cur.execute("""
+        DELETE FROM trade WHERE id NOT IN (
+            SELECT MIN(id) FROM trade
+            WHERE deal_number IS NOT NULL AND deal_number != ''
+            GROUP BY source, deal_number
+        ) AND deal_number IS NOT NULL AND deal_number != ''
+    """)
+    cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_source_deal
+        ON trade(source, deal_number)
+        WHERE deal_number IS NOT NULL AND deal_number != ''
+    """)
+
+    # Fix _quik_ontrade_ pseudo-report — у него нет реального брокера
+    cur.execute("UPDATE report SET broker='' WHERE filename='_quik_ontrade_'")
+
+    # ── Таблица маппинга типов операций cash_flow → категории ──
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS cash_flow_category (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            source      TEXT NOT NULL,          -- 'sber' | 'vtb'
+            pattern     TEXT NOT NULL,           -- подстрока для поиска в description
+            match_mode  TEXT NOT NULL DEFAULT 'contains',  -- 'contains' | 'prefix'
+            category    TEXT NOT NULL,           -- Дивиденд, Купон, Налог, Пополнение, Вывод ДС, Операционные
+            priority    INTEGER NOT NULL DEFAULT 0,  -- меньше = выше приоритет
+            comment     TEXT DEFAULT ''
+        )
+    """)
+    # Очищаем старые данные при перезапуске (перезаписываем актуальные)
+    cur.execute("DELETE FROM cash_flow_category")
+    seed_mapping = [
+        # ── SBER ──
+        ('sber', 'Выплата дивидендов',        'contains', 'Дивиденд',     1, 'Дивиденды с удержанным налогом'),
+        ('sber', 'Выплата купонов',           'contains', 'Купон',        1, 'Купонный доход по облигациям'),
+        ('sber', 'Зачисление',                'prefix',   'Пополнение',   2, 'Пополнение счёта / бонусы / акции'),
+        ('sber', 'Списание д/с. Налог',       'prefix',   'Налог',        1, 'Налог на доходы физ.лиц'),
+        ('sber', 'Списание д/с',              'prefix',   'Вывод ДС',     3, 'Вывод денежных средств'),
+        ('sber', 'Комиссия',                  'prefix',   'Операционные', 0, 'Комиссии биржи и брокера'),
+        ('sber', 'Сделка от',                 'prefix',   'Операционные', 0, 'Расчёты по сделкам'),
+        # ── VTB ──
+        ('vtb', 'Вознаграждение',             'prefix',   'Операционные', 0, 'Комиссии брокера'),
+        ('vtb', 'Дивиденды —',                'prefix',   'Дивиденд',     1, 'Дивиденды по акциям'),
+        ('vtb', 'Дивиденды ',                 'prefix',   'Дивиденд',     1, 'Дивиденды (альт. формат)'),
+        ('vtb', 'Зачисление денежных средств','prefix',   'Пополнение',   1, 'Пополнение счёта'),
+        ('vtb', 'Купонный доход —',           'prefix',   'Купон',        1, 'Купонный доход по облигациям'),
+        ('vtb', 'НДФЛ —',                     'prefix',   'Налог',        1, 'Налог на доходы'),
+        ('vtb', 'Перевод денежных средств',   'prefix',   'Пополнение',   2, 'Перевод между субсчетами'),
+        ('vtb', 'Сальдо расчетов',            'prefix',   'Операционные', 0, 'Технические сальдо (расчеты)'),
+        ('vtb', 'Сальдо расчётов',            'prefix',   'Операционные', 0, 'Технические сальдо (расчёты)'),
+        ('vtb', 'Списание денежных средств —','prefix',   'Вывод ДС',     2, 'Вывод денежных средств'),
+    ]
+    for src, pat, mode, cat, prio, comment in seed_mapping:
+        cur.execute(
+            "INSERT INTO cash_flow_category(source, pattern, match_mode, category, priority, comment) VALUES (?,?,?,?,?,?)",
+            (src, pat, mode, cat, prio, comment)
+        )
+
     conn.commit()
     conn.close()
 
@@ -438,10 +630,14 @@ def get_open_trades(report_id=None, date_from=None, date_to=None, broker=None):
     Buys that have NOT been closed by a sell within this period.
     Returns unmatched buy lots, merged by (security_code, buy_date, buy_price).
 
+    ВНИМАНИЕ: дата фильтрует только продажи (чтобы определить, какие покупки
+    были закрыты в периоде), но сами покупки показываются ВСЕ независимо от
+    даты — открытая позиция должна быть видна всегда, даже если куплена давно.
+
     Все сделки в единой таблице trade (source='sber'/'vtb'/'quik').
     QUIK-трейды участвуют в LIFO-матчинге вместе со своим брокером.
     """
-    _, unmatched = _match_trades_lifo(report_id, date_from, date_to, broker)
+    _, unmatched = _match_trades_lifo(report_id, None, None, broker)
 
     # Merge consecutive lots with same code, date, and price
     merged = []
@@ -510,50 +706,145 @@ def get_repo_total(report_id=None, date_from=None, date_to=None, broker=None):
     }
 
 
-def get_cash_flow_summary(report_id=None, date_from=None, date_to=None, broker=None):
-    """Get cash flow grouped by category (description prefix).
+# ── Кэш маппинга типов операций cash_flow → категории ─────────
+_cf_category_cache = None
 
-    Категории: Налог, Дивиденд, Купон, Комиссия, Списание, Зачисление, Сделка, Прочее.
+def _load_cf_category_mapping():
+    """Загружает маппинг (source, pattern, match_mode) → category из БД."""
+    global _cf_category_cache
+    if _cf_category_cache is not None:
+        return _cf_category_cache
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT source, pattern, match_mode, category, priority
+        FROM cash_flow_category
+        ORDER BY priority, id
+    """).fetchall()
+    conn.close()
+    _cf_category_cache = rows
+    return rows
+
+
+def _categorize_cash_flow(description: str, source: str) -> str:
+    """Определяет категорию cash_flow по маппингу из БД.
+
+    Сначала проверяет точные pattern'ы из таблицы cash_flow_category
+    (prefix — начало строки, contains — вхождение подстроки).
+    Если не найдено — fallback на старые keyword'ы.
+    Возвращает категорию или 'Прочее'.
+    """
+    mapping = _load_cf_category_mapping()
+    desc_lower = description.lower()
+
+    # 1. Проверяем по маппингу из БД
+    for row in mapping:
+        if row['source'] != source:
+            continue
+        pat = row['pattern']
+        match_mode = row['match_mode']
+        if match_mode == 'prefix':
+            if desc_lower.startswith(pat.lower()):
+                return row['category']
+        else:  # contains
+            if pat.lower() in desc_lower:
+                return row['category']
+
+    # 2. Fallback: старые keyword'ы (для обратной совместимости)
+    FALLBACK = [
+        ('Дивиденд',     ['Дивиденд', 'дивиденд']),
+        ('Купон',        ['Купон', 'Выплата купонов', 'купонный']),
+        ('Налог',        ['НДФЛ', 'Уплата налога', 'Оплата налога', 'Списание задолженности по налогу',
+                          'Налог на доходы', 'Налог удержан']),
+        ('Пополнение',   ['Зачисление денежных средств', 'Зачисление д/с', 'Перевод денежных средств',
+                          'Пополнение']),
+        ('Вывод ДС',     ['Списание д/с — Вывод', 'Списание денежных средств — Вывод',
+                          'Списание д/с', 'Списание денежных средств']),
+    ]
+    for cat, keywords in FALLBACK:
+        if any(kw.lower() in desc_lower for kw in keywords):
+            return cat
+    return 'Прочее'
+
+
+def get_cash_flow_summary(report_id=None, date_from=None, date_to=None, broker=None):
+    """Get non-operational cash flow grouped by category.
+
+    Исключаются операционные движения (Сделка, Комиссия) —
+    они уже учтены в trade-расчётах. Остаются только:
+    Налог, Дивиденд, Купон, Пополнение, Вывод ДС, Переводы.
     """
     conn = get_connection()
-    where_clauses, params = _date_where('cash_flow', date_from, date_to)
+    where_clauses, params = _date_where('cash_flow', date_from, date_to, date_col='date')
     if report_id is not None:
         where_clauses.append("cash_flow.report_id=?")
         params.append(report_id)
+    src_clauses, src_params = _source_where('cash_flow', broker)
+    where_clauses.extend(src_clauses)
+    params.extend(src_params)
     where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
     rows = conn.execute(f"""
-        SELECT description,
+        SELECT description, source,
                COALESCE(SUM(credit),0) AS credits,
                COALESCE(SUM(debit),0) AS debits
         FROM cash_flow WHERE {where_sql}
-        GROUP BY description
+        GROUP BY description, source
         ORDER BY description
     """, params).fetchall()
     conn.close()
 
-    # Группируем по категориям
-    CATEGORIES = {
-        'Налог': ['Налог', 'налог'],
-        'Дивиденд': ['Дивиденд', 'дивиденд'],
-        'Купон': ['Купон', 'Выплата купонов'],
-        'Комиссия': ['Комиссия'],
-        'Списание': ['Списание д/с'],
-        'Зачисление': ['Зачисление д/с'],
-        'Сделка': ['Сделка от', 'Сделка '],
-        'Пополнение': ['Пополнение'],
-        'Вывод': ['Вывод', 'Списание'],
-    }
     result = {}
     for row in rows:
         desc = row['description']
+        src = row['source']
         amount = row['credits'] - row['debits']
-        cat = 'Прочее'
-        for c, keywords in CATEGORIES.items():
-            if any(kw.lower() in desc.lower() for kw in keywords):
-                cat = c
-                break
+
+        cat = _categorize_cash_flow(desc, src)
+
+        # Пропускаем операционные движения
+        if cat == 'Операционные':
+            continue
+
         result[cat] = {'amount': round(result.get(cat, {'amount': 0})['amount'] + amount, 2)}
     return result
+
+
+def _normalize_sec_code(code: str) -> str:
+    """Normalize bond security codes to prevent phantom open positions.
+
+    ОФЗ облигации могут иметь несколько кодов:
+      - 26241RMFS / SU26241RMFS8 (старый/новый тикер)
+      - RU000A105FZ9 (ISIN)
+    Приводим все к единому виду для корректного LIFO-матчинга.
+    """
+    if not code:
+        return code
+    # ISIN → ticker mapping (ОФЗ)
+    isin_map = {
+        'RU000A105FZ9': 'SU26241RMFS8',  # ОФЗ 26241
+    }
+    if code in isin_map:
+        return isin_map[code]
+    # Старый тикер без SU → новый с SU
+    # SU26243RMFS4 → остаётся, 26243RMFS → SU26243RMFS4
+    # Определяем по длине: старый = 9-10 символов (только цифры+RMFS)
+    # новый = с префиксом SU (11+ символов)
+    if not code.startswith('SU') and code.endswith('RMFS') and len(code) <= 10:
+        # Ищем соответствующий код с SU
+        # Формат: было 26241RMFS, стало SU26241RMFS8
+        # Извлекаем номер облигации (26241) и добавляем SU + младшая цифра
+        import re
+        m = re.match(r'(\d+)(RMFS)', code)
+        if m:
+            num = m.group(1)
+            # Определяем последнюю цифру: 8 для 26241, 4 для 26243, 2 для 26244 и т.д.
+            suffix_map = {'26241': '8', '26243': '4', '26244': '2', '26245': '9',
+                         '26246': '7', '26247': '5', '26248': '3', '26249': '1',
+                         '26223': '6', '26236': '8', '26237': '6', '26238': '4',
+                         '26234': '8', '26219': '5', '26226': '5', '26229': '1'}
+            suffix = suffix_map.get(num, '')
+            if suffix:
+                return f'SU{num}RMFS{suffix}'
+    return code
 
 
 def _run_lifo(trades, name_map):
@@ -570,7 +861,7 @@ def _run_lifo(trades, name_map):
     from collections import defaultdict
     by_sec = defaultdict(list)
     for t in trades:
-        code = t['security_code'] or t['security_name']
+        code = _normalize_sec_code(t['security_code'] or t['security_name'])
         by_sec[code].append(t)
 
     all_lots = []
@@ -731,25 +1022,34 @@ def _match_trades_lifo(report_id=None, date_from=None, date_to=None, broker=None
     conn = get_connection()
 
     if broker and broker != 'all':
-        sources = [broker]
+        if broker == 'gazprombank':
+            source_groups = [('gazprombank', 'gazprombank_v2')]
+        else:
+            source_groups = [(broker,)]
     else:
-        sources = ['sber', 'vtb']
+        source_groups = [
+            ('sber',),
+            ('vtb',),
+            ('gazprombank', 'gazprombank_v2'),
+        ]
 
     all_lots = []
     all_unmatched = []
-    seen_deals_all = set()
     name_map = {}
 
-    for src in sources:
+    for src_group in source_groups:
         where_clauses, params = _date_where('trade', date_from, date_to)
 
-        # Для каждого брокера: его сделки + QUIK-трейды, помеченные этим брокером
+        # Группа источников, которые матчатся вместе (один брокер)
+        placeholders = ','.join('?' * len(src_group))
         if broker and broker != 'all':
-            where_clauses.append("(trade.source=? OR (trade.source='quik' AND trade.broker=?))")
-            params.extend([broker, broker])
+            where_clauses.append(f"(trade.source IN ({placeholders}) OR (trade.source='quik' AND trade.broker=?))")
+            params.extend(src_group)
+            params.append(broker)
         else:
-            where_clauses.append("(trade.source=? OR (trade.source='quik' AND trade.broker=?))")
-            params.extend([src, src])
+            where_clauses.append(f"(trade.source IN ({placeholders}) OR (trade.source='quik' AND trade.broker IN ({placeholders})))")
+            params.extend(src_group)
+            params.extend(src_group)
 
         if report_id is not None:
             where_clauses.append("(trade.report_id=? OR trade.source='quik')")
@@ -766,11 +1066,12 @@ def _match_trades_lifo(report_id=None, date_from=None, date_to=None, broker=None
         """, params).fetchall()
 
         trades = []
+        seen_deals = set()
         for t in trades_raw:
             key = (t['security_code'] or t['security_name'], t['deal_number'])
-            if key in seen_deals_all:
+            if key in seen_deals:
                 continue
-            seen_deals_all.add(key)
+            seen_deals.add(key)
             trades.append(t)
             code = t['security_code'] or t['security_name']
             if code not in name_map:
@@ -888,19 +1189,28 @@ def get_cash_summary(report_id=None):
 def get_reports_list():
     conn = get_connection()
     rows = conn.execute("""
-        SELECT id, filename, contract, investor, period_start, period_end, created_at
+        SELECT id, filename, contract, investor, period_start, period_end, created_at,
+               COALESCE(source_type, '') AS source_type,
+               COALESCE(broker, '') AS broker
         FROM report ORDER BY created_at DESC
     """).fetchall()
     conn.close()
-    # Add source info based on file extension
     result = []
     for r in rows:
         d = dict(r)
-        fn = d['filename'].lower()
-        if fn.endswith('.xlsx') or fn.endswith('.xls'):
-            d['source'] = 'vtb'
-        else:
-            d['source'] = 'sber'
+        # Для старых записей без source_type — определяем по расширению
+        if not d.get('source_type'):
+            fn = d['filename'].lower()
+            if fn.endswith('.xlsx') or fn.endswith('.xls'):
+                d['source_type'] = 'broker_report'
+            else:
+                d['source_type'] = 'broker_report'
+        if not d.get('broker'):
+            fn = d['filename'].lower()
+            if fn.endswith('.xlsx') or fn.endswith('.xls'):
+                d['broker'] = 'vtb'
+            else:
+                d['broker'] = 'sber'
         result.append(d)
     return result
 
@@ -936,7 +1246,14 @@ def save_price(sec_code: str, price: float, qty: int = 0, value: float = 0, clas
     For bonds (class_code TQOB/TQCB), QUIK sends price as % of nominal.
     We convert to ruble price = value / qty for correct P&L calculation.
     """
-    conn = get_connection()
+    import sqlite3 as _sqlite3
+    conn = _sqlite3.connect(DB_PATH, timeout=10)
+    conn.execute("CREATE TABLE IF NOT EXISTS current_price ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "sec_code TEXT NOT NULL, class_code TEXT NOT NULL DEFAULT '',"
+        "price REAL NOT NULL, qty INTEGER DEFAULT 0, value REAL DEFAULT 0,"
+        "timestamp TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),"
+        "UNIQUE(sec_code, class_code))")
     # Convert bond % price to ruble price
     if _is_bond_class(class_code) and qty > 0 and value > 0:
         price = round(value / qty, 2)
@@ -959,7 +1276,16 @@ def save_prices_batch(prices: list):
     Each item: dict with keys sec_code, price, [qty, value, class_code]
     For bonds (TQOB/TQCB), converts % price to ruble price = value / qty.
     """
-    conn = get_connection()
+    import sqlite3 as _sqlite3
+    conn = _sqlite3.connect(DB_PATH, timeout=10)
+    conn.row_factory = _sqlite3.Row
+    # Гарантируем, что таблица существует (быстро, если уже есть)
+    conn.execute("CREATE TABLE IF NOT EXISTS current_price ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "sec_code TEXT NOT NULL, class_code TEXT NOT NULL DEFAULT '',"
+        "price REAL NOT NULL, qty INTEGER DEFAULT 0, value REAL DEFAULT 0,"
+        "timestamp TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),"
+        "UNIQUE(sec_code, class_code))")
     cur = conn.cursor()
     cur.execute("BEGIN")
     for p in prices:

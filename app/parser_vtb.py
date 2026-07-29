@@ -166,12 +166,13 @@ def parse_vtb_report(filepath):
             report_id = existing['id']
             for tbl in ('trade', 'repo', 'cash_flow', 'portfolio', 'financial_result'):
                 cur.execute(f"DELETE FROM {tbl} WHERE report_id=?", (report_id,))
-            cur.execute("""UPDATE report SET contract=?, investor=?, period_start=?, period_end=?
+            cur.execute("""UPDATE report SET contract=?, investor=?, period_start=?, period_end=?,
+                           source_type='broker_report', broker='vtb'
                            WHERE id=?""", (contract, investor, period_start, period_end, report_id))
         else:
             cur.execute("""
-                INSERT INTO report(filename, contract, investor, period_start, period_end)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO report(filename, contract, investor, period_start, period_end, source_type, broker)
+                VALUES (?, ?, ?, ?, ?, 'broker_report', 'vtb')
             """, (filename, contract, investor, period_start, period_end))
             cur.execute("SELECT id FROM report WHERE filename=?", (filename,))
             report_id = cur.fetchone()['id']

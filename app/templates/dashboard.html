@@ -18,7 +18,7 @@
         <p class="text-muted small mb-0">
             Данные из всех загруженных отчётов
             {% if broker and broker != 'all' %}
-                · брокер: <strong>{{ {'sber': 'Сбер', 'vtb': 'ВТБ'}.get(broker, broker) }}</strong>
+                · брокер: <strong>{{ {'sber': 'Сбер', 'vtb': 'ВТБ', 'gazprombank': 'Газпромбанк'}.get(broker, broker) }}</strong>
             {% endif %}
             {% if date_from or date_to %}
                 · даты:
@@ -57,9 +57,10 @@
             <div class="col-auto">
                 <label class="form-label small">Брокер</label>
                 <select name="broker" class="form-select form-select-sm">
-                    <option value="all" {% if broker == 'all' %}selected{% endif %}>Оба</option>
+                    <option value="all" {% if broker == 'all' %}selected{% endif %}>Все</option>
                     <option value="sber" {% if broker == 'sber' %}selected{% endif %}>Сбер</option>
                     <option value="vtb" {% if broker == 'vtb' %}selected{% endif %}>ВТБ</option>
+                    <option value="gazprombank" {% if broker == 'gazprombank' %}selected{% endif %}>Газпромбанк</option>
                 </select>
             </div>
             <div class="col-auto form-check d-flex align-items-end mb-1">
@@ -255,14 +256,14 @@
             {% endfor %}
             </tbody>
             <tfoot class="table-light fw-bold">
-                {% set cf_total = ns(val=0) %}
+                {% set ns = namespace(val=0) %}
                 {% for cat, data in cash_flow | dictsort %}
-                    {% set cf_total.val = cf_total.val + data.amount %}
+                    {% set ns.val = ns.val + data.amount %}
                 {% endfor %}
                 <tr>
                     <td>ИТОГО</td>
-                    <td class="text-end {{ 'profit-positive' if cf_total.val >= 0 else 'profit-negative' }}">
-                        {{ '{:+,.2f}'.format(cf_total.val) }}
+                    <td class="text-end {{ 'profit-positive' if ns.val >= 0 else 'profit-negative' }}">
+                        {{ '{:+,.2f}'.format(ns.val) }}
                     </td>
                 </tr>
             </tfoot>
@@ -287,6 +288,7 @@
                                 <th>Дата покупки</th>
                                 <th class="text-end">Цена</th>
                                 <th class="text-end">Стоимость</th>
+                                <th class="text-end">Комиссия</th>
                                 <th class="text-end">Тек. цена</th>
                                 <th class="text-end">Прогноз P&amp;L</th>
                                 <th class="text-end">%</th>
@@ -303,17 +305,17 @@
                             {% for o in group_list %}
                                 {% set cur = o.get('current_price', 0) %}
                                 {% set sub_gross.val = sub_gross.val + (cur - o.buy_price) * o.qty %}
-                                {% set sub_fees.val = sub_fees.val + o.total_cost * trade_fee_rate + cur * o.qty * trade_fee_rate %}
+                                {% set sub_fees.val = sub_fees.val + o.get('fees', 0) %}
                             {% endfor %}
                             {% set sub_net = sub_gross.val - sub_fees.val %}
                             {% set sub_pct = (sub_net / sub_cost * 100) if sub_cost > 0 else 0 %}
                             {# ── Individual lots for this instrument ── #}
                             {% for o in group_list %}
                                 {% set cur = o.get('current_price', 0) %}
-                                {% set buy_fee = o.total_cost * trade_fee_rate %}
-                                {% set sell_fee = cur * o.qty * trade_fee_rate %}
+                                {% set buy_fee = o.get('fees', 0) %}
+                                {% set sell_fee = 0 %}
                                 {% set gross_pl = (cur - o.buy_price) * o.qty %}
-                                {% set net_pl = gross_pl - buy_fee - sell_fee %}
+                                {% set net_pl = gross_pl - buy_fee %}
                                 {% set pl_pct = (net_pl / o.total_cost * 100) if o.total_cost > 0 else 0 %}
                                 <tr class="{{ 'bg-profit-pos' if net_pl >= 0 else 'bg-profit-neg' }}"
                                     data-code="{{ o.security_code }}"
@@ -325,6 +327,7 @@
                                     <td><small>{{ o.buy_date }}</small></td>
                                     <td class="text-end">{{ '{:,.2f}'.format(o.buy_price) }}</td>
                                     <td class="text-end">{{ '{:,.2f}'.format(o.total_cost) }}</td>
+                                    <td class="text-end text-danger">{{ '{:,.2f}'.format(o.get('fees', 0)) }}</td>
                                     <td class="text-end fw-bold">{{ '{:,.4f}'.format(cur) if cur < 10 else '{:,.2f}'.format(cur) }}</td>
                                     <td class="text-end {{ 'profit-positive' if net_pl >= 0 else 'profit-negative' }}">
                                         <span class="pl-cell">{% if net_pl >= 0 %}<span class="arrow-up">&#9650;</span>{% else %}<span class="arrow-down">&#9660;</span>{% endif %}
@@ -342,6 +345,7 @@
                                 <td></td>
                                 <td></td>
                                 <td class="text-end">{{ '{:,.2f}'.format(sub_cost) }}</td>
+                                <td class="text-end text-danger">{{ '{:,.2f}'.format(sub_fees.val) }}</td>
                                 <td></td>
                                 <td class="text-end {{ 'profit-positive' if sub_net >= 0 else 'profit-negative' }}">
                                     {{ '{:+,.2f}'.format(sub_net) }}
@@ -360,7 +364,7 @@
                             {% for o in open_trades %}
                                 {% set cur = o.get('current_price', 0) %}
                                 {% set total_gross.val = total_gross.val + (cur - o.buy_price) * o.qty %}
-                                {% set total_fees.val = total_fees.val + o.total_cost * trade_fee_rate + cur * o.qty * trade_fee_rate %}
+                                {% set total_fees.val = total_fees.val + o.get('fees', 0) %}
                             {% endfor %}
                             {% set total_net = total_gross.val - total_fees.val %}
                             {% set total_pct = (total_net / total_cost * 100) if total_cost > 0 else 0 %}
@@ -370,6 +374,7 @@
                                 <td></td>
                                 <td></td>
                                 <td class="text-end">{{ '{:,.2f}'.format(total_cost) }}</td>
+                                <td class="text-end text-danger">{{ '{:,.2f}'.format(total_fees.val) }}</td>
                                 <td></td>
                                 <td class="text-end {{ 'profit-positive' if total_net >= 0 else 'profit-negative' }}">
                                     {{ '{:+,.2f}'.format(total_net) }}
@@ -834,13 +839,15 @@ setInterval(refreshOpenTrades, 3000);
         <table class="table table-sm table-hover mb-0">
             <thead class="table-light">
                 <tr>
-                    <th>Файл</th><th>Договор</th><th>Период</th><th>Загружен</th><th></th>
+                    <th>Файл</th><th>Тип</th><th>Брокер</th><th>Договор</th><th>Период</th><th>Загружен</th><th></th>
                 </tr>
             </thead>
             <tbody>
             {% for r in reports %}
                 <tr>
                     <td><a href="{{ url_for('report_view', report_id=r.id) }}">{{ r.filename }}</a></td>
+                    <td><span class="badge {% if r.source_type == 'broker_report' %}bg-primary{% elif r.source_type == 'nalog_report' %}bg-warning text-dark{% elif r.source_type == 'quik' %}bg-secondary{% else %}bg-light text-dark{% endif %}">{{ {'broker_report': 'Брокерский', 'nalog_report': 'Налоговый', 'quik': 'QUIK'}.get(r.source_type, r.source_type) }}</span></td>
+                    <td>{% if r.broker %}<span class="badge {% if r.broker == 'sber' %}bg-primary{% elif r.broker == 'vtb' %}bg-success{% elif r.broker == 'gazprombank' %}bg-info{% else %}bg-secondary{% endif %}">{{ {'sber': 'Сбер', 'vtb': 'ВТБ', 'gazprombank': 'Газпромбанк'}.get(r.broker, r.broker) }}</span>{% endif %}</td>
                     <td>{{ r.contract }}</td>
                     <td class="small">{{ r.period_start }} — {{ r.period_end }}</td>
                     <td class="small">{{ r.created_at[:10] }}</td>

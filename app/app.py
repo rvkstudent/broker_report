@@ -15,6 +15,7 @@ from app.db import (init_db, get_reports_list, get_report_by_id,
                      get_recent_quik_trades, get_quik_positions,
                      get_trades_list, get_cash_flow_summary)
 from app.parser import parse_report
+from app.parser_gazprombank_v2 import parse_gazprombank_v2_report
 from app.parser_nalog import (parse_nalog_report, get_nalog_summary,
                                get_nalog_years, get_nalog_instruments,
                                get_nalog_tax_summary_by_year,
@@ -67,22 +68,21 @@ flask_app.jinja_env.globals['ticker_color'] = ticker_color
 def _auto_import():
     """Import HTML/XLSX files from reports/ that haven't been imported yet."""
     imported = 0
-    seen = set()
     from app.db import get_connection
     conn = get_connection()
-    known = {r['filename'] for r in conn.execute("SELECT filename FROM report").fetchall()}
+    # Нормализуем: только basename в нижнем регистре — чтобы Mac/Windows пути не дублировались
+    known = {os.path.basename(r['filename']).lower()
+             for r in conn.execute("SELECT filename FROM report").fetchall()}
     conn.close()
     patterns = [
         os.path.join(REPORTS_DIR, '*.[Hh][Tt][Mm][Ll]'),
         os.path.join(REPORTS_DIR, '*.[Xx][Ll][Ss][Xx]'),
         os.path.join(REPORTS_DIR, '*.[Xx][Ll][Ss]'),
+        os.path.join(REPORTS_DIR, '*.[Pp][Dd][Ff]'),
     ]
     for pattern in patterns:
         for fp in sorted(glob.glob(pattern)):
-            if fp.lower() in seen:
-                continue
-            seen.add(fp.lower())
-            if os.path.basename(fp) in known:
+            if os.path.basename(fp).lower() in known:
                 continue
             try:
                 rid = parse_report(fp)
@@ -529,7 +529,7 @@ def upload():
             return redirect(url_for('index'))
         # Scan for HTML/XLSX files in the current directory
         found = False
-        for ext in ('*.html', '*.htm', '*.xlsx', '*.xls'):
+        for ext in ('*.html', '*.htm', '*.xlsx', '*.xls', '*.pdf'):
             for fp in glob.glob(os.path.join(REPORTS_DIR, ext)):
                 try:
                     rid = parse_report(fp)

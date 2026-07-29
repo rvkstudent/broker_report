@@ -53,11 +53,11 @@ from urllib.parse import urlparse
 from datetime import datetime, timezone
 
 from app import firebase_config
+from app.db import DB_PATH, _get_db_dir
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = os.path.join(os.path.dirname(__file__), 'broker.db')
-SYNC_STATE_PATH = os.path.join(os.path.dirname(__file__), '.broker_sync_state')
+SYNC_STATE_PATH = os.path.join(_get_db_dir(), '.broker_sync_state')
 
 # Firebase Admin SDK инициализируется лениво (lazy)
 _firebase_initialized = False

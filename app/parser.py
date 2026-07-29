@@ -1,4 +1,4 @@
-"""Parse broker reports (HTML for Sber, XLSX for VTB) and insert data into SQLite."""
+"""Parse broker reports (HTML for Sber, XLSX for VTB, PDF for Gazprombank) and insert data into SQLite."""
 
 import os
 import re
@@ -7,6 +7,8 @@ from app.db import get_connection, init_db
 from app.parser_vtb import parse_vtb_report
 from app.parser_mytrades import parse_mytrades
 from app.parser_openbroker import parse_openbroker_report
+from app.parser_gazprombank_v2 import parse_gazprombank_v2_report
+from app.parser_gazprombank_xls import parse_gazprombank_xls_report
 
 
 def parse_float(s):
@@ -65,6 +67,10 @@ def parse_report(filepath):
     fname_lower = fname.lower()
     ext = os.path.splitext(filepath)[1].lower()
 
+    if ext == '.pdf':
+        # Gazprombank PDF reports
+        return parse_gazprombank_v2_report(filepath)
+
     if ext in ('.xlsx', '.xls'):
         # my_trades.xlsx — отдельный формат
         if fname_lower == 'my_trades.xlsx':
@@ -83,6 +89,9 @@ def parse_report(filepath):
 
             if 'Открытие' in header_text or 'БМ-Банк' in header_text:
                 return parse_openbroker_report(filepath)
+
+            if 'Ньютон Инвестиции' in header_text or 'Газпромбанк' in header_text:
+                return parse_gazprombank_xls_report(filepath)
 
             # По умолчанию — VTB
             return parse_vtb_report(filepath)
@@ -130,12 +139,13 @@ def parse_report(filepath):
         # Clear old data for this report before re-parsing
         for tbl in ('trade', 'repo', 'cash_flow', 'portfolio', 'financial_result'):
             cur.execute(f"DELETE FROM {tbl} WHERE report_id=?", (report_id,))
-        cur.execute("""UPDATE report SET contract=?, investor=?, period_start=?, period_end=?
+        cur.execute("""UPDATE report SET contract=?, investor=?, period_start=?, period_end=?,
+                       source_type='broker_report', broker='sber'
                        WHERE id=?""", (contract, investor, period_start, period_end, report_id))
     else:
         cur.execute("""
-            INSERT INTO report(filename, contract, investor, period_start, period_end)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO report(filename, contract, investor, period_start, period_end, source_type, broker)
+            VALUES (?, ?, ?, ?, ?, 'broker_report', 'sber')
         """, (filename, contract, investor, period_start, period_end))
         cur.execute("SELECT id FROM report WHERE filename=?", (filename,))
         report_id = cur.fetchone()['id']

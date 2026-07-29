@@ -175,13 +175,14 @@ def parse_mytrades(filepath):
                 cur.execute(f"DELETE FROM {tbl} WHERE report_id=?", (report_id,))
             cur.execute("""
                 UPDATE report SET contract='', investor='',
-                       period_start=?, period_end=?
+                       period_start=?, period_end=?,
+                       source_type='broker_report', broker='vtb'
                 WHERE id=?
             """, (min_date, max_date, report_id))
         else:
             cur.execute("""
-                INSERT INTO report(filename, contract, investor, period_start, period_end)
-                VALUES (?, '', '', ?, ?)
+                INSERT INTO report(filename, contract, investor, period_start, period_end, source_type, broker)
+                VALUES (?, '', '', ?, ?, 'broker_report', 'vtb')
             """, (filename, min_date, max_date))
             cur.execute("SELECT id FROM report WHERE filename=?", (filename,))
             report_id = cur.fetchone()['id']
@@ -227,6 +228,9 @@ def parse_mytrades(filepath):
             trade_date = _fmt_date(dt_val)
             trade_time = _fmt_time(dt_val)
             deal_num = str(deal_val or '').strip() if not pd.isna(deal_val) else ''
+            # Нормализуем номер сделки: отбрасываем префикс B/S (тип сделки)
+            if deal_num and deal_num[0] in ('B', 'S'):
+                deal_num = deal_num[1:]
 
             if not trade_date or qty_int <= 0:
                 continue

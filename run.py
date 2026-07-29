@@ -15,7 +15,14 @@ if __name__ == '__main__':
     print('═' * 50)
     print()
 
-    init_db()
+    try:
+        init_db()
+        print('  [ok] База данных инициализирована')
+    except Exception as e:
+        print(f'  [ERROR] init_db: {e}')
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
     # Инициализация репликации в Firebase (pull при старте + фоновый sync)
     init_replication()

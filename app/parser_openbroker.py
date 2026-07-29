@@ -30,7 +30,7 @@
   C163: Комментарий
   C174: Контрагент
 
-Источник (source) = 'vtb' (по указанию пользователя — Открытие = ВТБ в Firebase).
+Источник (source) = 'vtb' (Открытие приравнено к ВТБ).
 """
 
 import re
@@ -322,10 +322,12 @@ def parse_openbroker_report(filepath):
             report_id = existing['id']
             for tbl in ('trade', 'repo', 'cash_flow', 'portfolio', 'financial_result'):
                 cur.execute(f"DELETE FROM {tbl} WHERE report_id=?", (report_id,))
-            cur.execute("""UPDATE report SET period_start=?, period_end=? WHERE id=?""",
+            cur.execute("""UPDATE report SET period_start=?, period_end=?,
+                           source_type='broker_report', broker='vtb' WHERE id=?""",
                        (period_start, period_end, report_id))
         else:
-            cur.execute("""INSERT INTO report(filename, period_start, period_end) VALUES (?,?,?)""",
+            cur.execute("""INSERT INTO report(filename, period_start, period_end, source_type, broker)
+                           VALUES (?,?,?,'broker_report','vtb')""",
                        (filename, period_start, period_end))
             cur.execute("SELECT id FROM report WHERE filename=?", (filename,))
             report_id = cur.fetchone()['id']
