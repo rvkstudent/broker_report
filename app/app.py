@@ -440,7 +440,7 @@ def index():
 
     quik_trades = get_recent_quik_trades(20)
     prices = get_current_prices()
-    quik_pos = get_quik_positions()
+    quik_pos = get_quik_positions(broker)
 
     # Индикатор соединения с QUIK: данные обновлялись за последние 10 секунд
     quik_connected = False
@@ -460,7 +460,9 @@ def index():
     price_map = {p['sec_code']: p['price'] for p in prices}
 
     # Подставляем названия для QUIK-сделок (у них только sec_code)
-    name_map = {i['sec_code']: i['sec_name'] for i in get_my_instruments()}
+    my_instruments = get_my_instruments()
+    name_map = {i['sec_code']: i['sec_name'] for i in my_instruments}
+    my_price_codes = sorted({i['sec_code'] for i in my_instruments})
     for o in open_trades:
         o['current_price'] = price_map.get(o['security_code'], 0)
         if o.get('source') == 'quik' and o['security_code'] in name_map:
@@ -473,6 +475,10 @@ def index():
         for o in open_trades:
             code = o['security_code']
             cur = o.get('current_price', 0)
+            if cur <= 0:
+                # Нет текущей цены — прогноз не считаем (иначе -стоимость позиции
+                # превращается в ложный «убыток -100%» и раздувает итог).
+                continue
             gross = (cur - o['buy_price']) * o['qty']
             buy_fee = o['total_cost'] * TRADE_FEE_RATE
             sell_fee = cur * o['qty'] * TRADE_FEE_RATE
@@ -502,8 +508,10 @@ def index():
                            open_codes=open_codes,
                            repo_total=repo_total,
                            trade_fee_rate=TRADE_FEE_RATE,
+                           price_map=price_map,
                            quik_trades=quik_trades,
                            prices=prices,
+                           my_price_codes=my_price_codes,
                            quik_positions=quik_pos,
                            quik_connected=quik_connected,
                            cash_flow=cash_flow,
@@ -748,6 +756,44 @@ def api_quik_connected():
         except Exception:
             pass
     return jsonify({'connected': False}), 200
+
+
+@flask_app.route('/api/forecast', methods=['GET'])
+def api_forecast():
+    """Get forecast P&L for open positions based on current prices.
+
+    Учитывает фильтр по брокеру (query-параметр broker), чтобы прогноз
+    на дашборде совпадал с выбранным брокером.
+    """
+    broker = request.args.get('broker', 'all')
+    prices = get_current_prices()
+    price_map = {p['sec_code']: p['price'] for p in prices}
+    open_trades = list(get_open_trades(None, '', '', broker))
+
+    TRADE_FEE_RATE = 0.000685
+    forecast_map = {}
+    if open_trades:
+        for o in open_trades:
+            code = o['security_code']
+            cur = price_map.get(code, 0)
+            if cur <= 0:
+                # Нет текущей цены — прогноз не считаем (иначе -стоимость позиции
+                # превращается в ложный «убыток -100%» и раздувает итог).
+                continue
+            gross = (cur - o['buy_price']) * o['qty']
+            buy_fee = o['total_cost'] * TRADE_FEE_RATE
+            sell_fee = cur * o['qty'] * TRADE_FEE_RATE
+            net = gross - buy_fee - sell_fee
+            forecast_map[code] = forecast_map.get(code, 0) + net
+
+    result = {}
+    for code, val in forecast_map.items():
+        result[code] = {
+            'forecast': round(val, 2),
+            'current_price': price_map.get(code, 0),
+            'net_profit': None,  # заполняется на клиенте из HTML
+        }
+    return jsonify(result), 200
 
 
 TICKER_LOGO_COLORS = {

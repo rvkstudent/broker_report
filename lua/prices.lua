@@ -444,6 +444,9 @@ function OnTrade(trade)
     local settlecode = tostring(trade.settlecode or "")
     local raw_flags = tonumber(trade.flags) or 0
     local raw_op_type = tonumber(trade.operation_type) or -1
+    -- brokerref — поле "Комментарий" в терминале QUIK, содержит код клиента
+    local brokerref = tostring(trade.brokerref or "")
+    local client_code = tostring(trade.client_code or "")
     table.insert(trade_cache, {
         trade_num = tonumber(trade.trade_num) or 0,
         sec_code = sec_code,
@@ -463,9 +466,11 @@ function OnTrade(trade)
         datetime = dt,
         side = side,
         lotsize = lotsize,
-        broker = BROKER_NAME,      -- fallback: если ACCOUNT_BROKER_MAP не заполнен
+        broker = BROKER_NAME,      -- fallback: если CLIENT_CODE_MAP не заполнен
         flags = raw_flags,         -- оригинальные флаги для перепроверки на сервере
         operation_type = raw_op_type,
+        brokerref = brokerref,     -- "Комментарий" в терминале QUIK (код клиента)
+        client_code = client_code, -- код клиента (если есть)
     })
 
     -- Если очередь сделок слишком большая — сбрасываем старые (срезом, а не циклом)
@@ -531,12 +536,15 @@ local function load_existing_trades()
                 local dt = normalize_trade_datetime(trade.datetime)
                 local account = tostring(trade.account or "")
                 local raw_flags = trade_raw_flags
+                -- brokerref — поле "Комментарий" в терминале QUIK, содержит код клиента
+                local brokerref = tostring(trade.brokerref or "")
+                local client_code = tostring(trade.client_code or "")
                 table.insert(trade_cache, {
                     trade_num = tonumber(trade.trade_num) or 0,
                     sec_code = sec_code,
                     class_code = class_code,
                     price = tonumber(trade.price) or 0,
-                    qty = tonumber(trade.quantity) or 0,
+                    qty = tonumber(trade.qty) or 0,
                     value = tonumber(trade.value) or 0,
                     accruedint = tonumber(trade.accruedint) or 0,
                     yield = tonumber(trade.yield) or 0,
@@ -552,6 +560,8 @@ local function load_existing_trades()
                     lotsize = trade_lotsize,
                     broker = BROKER_NAME,
                     flags = raw_flags,
+                    brokerref = brokerref,
+                    client_code = client_code,
                 })
                 loaded = loaded + 1
 

@@ -122,13 +122,15 @@
                     <th class="text-end">Вал.приб.</th>
                     <th class="text-end">Комис.</th>
                     <th class="text-end">Чист.приб.</th>
+                    <th class="text-end">Тек.цена</th>
                     <th class="text-end">Прогноз</th>
                     <th class="text-end">Итого P&amp;L</th>
                 </tr>
             </thead>
             <tbody>
             {% for p in profit %}
-                <tr data-has-open="{{ 'true' if p.security_code in open_codes else 'false' }}">
+                {% set cur_price = price_map.get(p.security_code, 0) %}
+                <tr data-has-open="{{ 'true' if p.security_code in open_codes else 'false' }}" data-code="{{ p.security_code }}" data-price="{{ cur_price }}">
                     <td>{{ p.security_name }} <small class="text-muted">({{ p.security_code }})</small></td>
                     <td class="text-end">{{ p.buy_qty }}</td>
                     <td class="text-end">{{ p.sell_qty }}</td>
@@ -138,10 +140,13 @@
                     <td class="text-end {{ 'profit-positive' if p.net_profit >= 0 else 'profit-negative' }} fw-bold">
                         {{ '{:+,.2f}'.format(p.net_profit) }}
                     </td>
+                    <td class="text-end price-cell">
+                        {{ '{:,.4f}'.format(cur_price) if cur_price and cur_price < 10 else '{:,.2f}'.format(cur_price) if cur_price else '—' }}
+                    </td>
                     <td class="text-end {{ 'profit-positive' if p.forecast_pl >= 0 else 'profit-negative' }}">
                         {{ '{:+,.2f}'.format(p.forecast_pl) }}
                     </td>
-                    <td class="text-end {{ 'profit-positive' if p.total_pl >= 0 else 'profit-negative' }} fw-bold">
+                    <td class="text-end fw-bold {{ 'profit-positive bg-profit-positive' if p.total_pl >= 0 else 'profit-negative bg-profit-negative' }}">
                         {{ '{:+,.2f}'.format(p.total_pl) }}
                     </td>
                 </tr>
@@ -164,10 +169,11 @@
                     <td class="text-end {{ 'profit-positive' if total_net >= 0 else 'profit-negative' }}">
                         {{ '{:+,.2f}'.format(total_net) }}
                     </td>
+                    <td></td>
                     <td class="text-end {{ 'profit-positive' if total_forecast >= 0 else 'profit-negative' }}">
                         {{ '{:+,.2f}'.format(total_forecast) }}
                     </td>
-                    <td class="text-end {{ 'profit-positive' if total_totalpl >= 0 else 'profit-negative' }} fw-bold">
+                    <td class="text-end fw-bold {{ 'profit-positive bg-profit-positive' if total_totalpl >= 0 else 'profit-negative bg-profit-negative' }}">
                         {{ '{:+,.2f}'.format(total_totalpl) }}
                     </td>
                 </tr>
@@ -175,7 +181,7 @@
                     <td>РАСХОДЫ НА РЕПО</td>
                     <td></td><td></td><td></td><td></td>
                     <td class="text-end">{{ '{:,.2f}'.format(repo_cost) }}</td>
-                    <td></td><td>−{{ '{:,.2f}'.format(repo_cost) }}</td>
+                    <td></td><td></td><td>−{{ '{:,.2f}'.format(repo_cost) }}</td>
                 </tr>
                 <tr class="table-dark">
                     <td>ИТОГОВЫЙ РЕЗУЛЬТАТ (с учётом РЕПО)</td>
@@ -462,24 +468,25 @@
                 {% set ticker_colors = {'AFKS':'#2563eb','SBER':'#059669','MOEX':'#7c3aed','MTSS':'#ea580c','RAGR':'#0891b2','LQDT':'#d97706','GAZP':'#1d4ed8','RU000A10C3M0':'#be123c'} %}
 {% for p in quik_positions %}
                     {% set cur = prices | selectattr('sec_code', 'equalto', p.sec_code) | first %}
-                    {% set current_price = cur.price if cur else 0 %}
+                    {% set has_price = cur and cur.price and cur.price > 0 %}
+                    {% set current_price = cur.price if has_price else 0 %}
                     {% set buy_fee = p.total_cost * trade_fee_rate %}
                     {% set sell_fee = current_price * p.qty * trade_fee_rate %}
                     {% set gross_pl = (current_price - p.avg_price) * p.qty %}
                     {% set net_pl = gross_pl - buy_fee - sell_fee %}
                     {% set pl_pct = (net_pl / p.total_cost * 100) if p.total_cost > 0 else 0 %}
-                    <tr class="{{ 'bg-profit-pos' if net_pl >= 0 else 'bg-profit-neg' }}">
+                    <tr class="{{ 'bg-profit-pos' if (has_price and net_pl >= 0) else ('bg-profit-neg' if has_price else '') }}">
                         <td><small><img class="tkr-logo" src="/api/logo/{{ p.sec_code }}" alt="" loading="lazy" onerror="this.style.display='none'" /> {{ p.sec_code }}</small></td>
                         <td class="text-end">{{ p.qty }}</td>
                         <td class="text-end">{{ '{:,.4f}'.format(p.avg_price) if p.avg_price < 10 else '{:,.2f}'.format(p.avg_price) }}</td>
                         <td class="text-end">{{ '{:,.2f}'.format(p.total_cost) }}</td>
-                        <td class="text-end fw-bold">{{ '{:,.4f}'.format(current_price) if current_price < 10 else '{:,.2f}'.format(current_price) }}</td>
+                        <td class="text-end fw-bold">{% if has_price %}{{ '{:,.4f}'.format(current_price) if current_price < 10 else '{:,.2f}'.format(current_price) }}{% else %}—{% endif %}</td>
                         <td class="text-end {{ 'profit-positive' if net_pl >= 0 else 'profit-negative' }}">
-                            <span class="pl-cell">{% if net_pl >= 0 %}<span class="arrow-up">&#9650;</span>{% else %}<span class="arrow-down">&#9660;</span>{% endif %}
-                            {{ '{:+,.2f}'.format(net_pl) }}</span>
+                            {% if has_price %}<span class="pl-cell">{% if net_pl >= 0 %}<span class="arrow-up">&#9650;</span>{% else %}<span class="arrow-down">&#9660;</span>{% endif %}
+                            {{ '{:+,.2f}'.format(net_pl) }}</span>{% else %}—{% endif %}
                         </td>
                         <td class="text-end {{ 'profit-positive' if net_pl >= 0 else 'profit-negative' }}">
-                            {{ '{:+,.2f}'.format(pl_pct) }}%
+                            {% if has_price %}{{ '{:+,.2f}'.format(pl_pct) }}%{% else %}—{% endif %}
                         </td>
                     </tr>
                 {% endfor %}
@@ -505,6 +512,7 @@
                         <thead class="table-light">
                             <tr>
                                 <th>Код</th>
+                                <th>Направление</th>
                                 <th class="text-end">Цена</th>
                                 <th class="text-end">Кол-во</th>
                                 <th class="text-end">Сумма</th>
@@ -515,6 +523,15 @@
                         {% for t in quik_trades %}
                             <tr>
                                 <td><small><img class="tkr-logo" src="/api/logo/{{ t.sec_code }}" alt="" loading="lazy" onerror="this.style.display='none'" /> {{ t.sec_code }}</small></td>
+                                <td>
+                                    {% if t.side == 'Покупка' %}
+                                    <span class="badge bg-success bg-opacity-10 text-success">Покупка</span>
+                                    {% elif t.side == 'Продажа' %}
+                                    <span class="badge bg-danger bg-opacity-10 text-danger">Продажа</span>
+                                    {% else %}
+                                    <span class="badge bg-secondary">{{ t.side or '—' }}</span>
+                                    {% endif %}
+                                </td>
                                 <td class="text-end price-cell">{{ '{:,.4f}'.format(t.price) }}</td>
                                 <td class="text-end">{{ t.qty }}</td>
                                 <td class="text-end">{{ '{:,.2f}'.format(t.value) }}</td>
@@ -536,9 +553,18 @@
         <div class="card h-100">
             <div class="card-header bg-white">
                 <i class="bi bi-graph-up"></i> Текущие цены (OnAllTrade)
+                <span class="badge bg-secondary" id="pricesCount"></span>
                 <small class="text-muted ms-2" id="pricesUpdated"></small>
             </div>
-            <div class="card-body p-0">
+            <div class="card-body p-2">
+                <div class="d-flex gap-2 mb-2">
+                    <input type="text" id="pricesSearch" class="form-control form-control-sm"
+                           placeholder="Поиск по коду…" autocomplete="off">
+                    <div class="form-check text-nowrap mt-1 ms-1">
+                        <input class="form-check-input" type="checkbox" id="pricesShowAll">
+                        <label class="form-check-label small" for="pricesShowAll">Все</label>
+                    </div>
+                </div>
                 <div class="table-responsive">
                     <table class="table table-sm table-hover mb-0" style="font-size:12px" class="ref-table" id="pricesTable">
                         <thead class="table-light">
@@ -551,7 +577,7 @@
                         </thead>
                         <tbody>
                         {% for p in prices %}
-                            <tr>
+                            <tr data-code="{{ p.sec_code }}" data-mine="{{ '1' if p.sec_code in my_price_codes else '0' }}"{% if p.sec_code not in my_price_codes %} style="display:none"{% endif %}>
                                 <td><small><img class="tkr-logo" src="/api/logo/{{ p.sec_code }}" alt="" loading="lazy" onerror="this.style.display='none'" /> {{ p.sec_code }}</small></td>
                                 <td class="text-end fw-bold price-cell">{{ '{:,.4f}'.format(p.price) }}</td>
                                 <td class="text-end">{{ p.qty }}</td>
@@ -571,8 +597,17 @@
 
 <script>
 function parseNum(s) {
-    if (!s) return 0;
-    return parseFloat(s.replace(/\s/g,'').replace(/,/g,'')) || 0;
+    if (s == null || s === '') return 0;
+    let str = String(s).replace(/\s/g, '');
+    // Формат может быть RU ("1 234,56" — запятая = десятичная) или US ("1,234.56" — запятая = тысячи).
+    if (str.includes('.') && str.includes(',')) {
+        // US: "1,234,567.89" — запятые только разделитель тысяч
+        str = str.replace(/,/g, '');
+    } else if (str.includes(',')) {
+        // RU: "1 234,56" — запятая это десятичный разделитель
+        str = str.replace(',', '.');
+    }
+    return parseFloat(str) || 0;
 }
 
 function toggleOpenOnly() {
@@ -597,14 +632,14 @@ function toggleOpenOnly() {
         tbody.querySelectorAll('tr').forEach(tr => {
             if (tr.style.display === 'none') return;
             const cells = tr.querySelectorAll('td');
-            if (cells.length < 8) return;
+            if (cells.length < 9) return;
             buyQty += parseInt(parseNum(cells[1]?.textContent));
             sellQty += parseInt(parseNum(cells[2]?.textContent));
             gross += parseNum(cells[3]?.textContent);
             fees += parseNum(cells[4]?.textContent);
             net += parseNum(cells[5]?.textContent);
-            forecast += parseNum(cells[6]?.textContent);
-            totalPl += parseNum(cells[7]?.textContent);
+            forecast += parseNum(cells[7]?.textContent);
+            totalPl += parseNum(cells[8]?.textContent);
         });
         let el = document.getElementById('profitFilteredTotal');
         if (!el) {
@@ -663,11 +698,17 @@ async function refreshQuik() {
         if (!tb) return;
         let html = '';
         for (let t of data) {
+            let sideBadge = t.side === 'Покупка'
+                ? '<span class="badge bg-success bg-opacity-10 text-success">Покупка</span>'
+                : (t.side === 'Продажа'
+                    ? '<span class="badge bg-danger bg-opacity-10 text-danger">Продажа</span>'
+                    : '<span class="badge bg-secondary">' + (t.side || '—') + '</span>');
             html += '<tr><td><small><img class="tkr-logo" src="/api/logo/' + t.sec_code + '" alt="" loading="lazy" onerror="this.style.display=\'none\'" /> ' + t.sec_code + '</small></td>' +
+                '<td>' + sideBadge + '</td>' +
                 '<td class="text-end price-cell">' + fmtPrice(t.price) + '</td>' +
                 '<td class="text-end">' + t.qty + '</td>' +
                 '<td class="text-end">' + (t.value || 0).toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2}) + '</td>' +
-                '<td><small>' + (t.created_at ? t.created_at.substr(11,8) : '') + '</small></td></tr>';
+                '<td><small>' + (t.trade_time || '') + '</small></td></tr>';
         }
         tb.innerHTML = html;
         let cnt = document.getElementById('quikCount');
@@ -675,6 +716,31 @@ async function refreshQuik() {
         let upd = document.getElementById('quikUpdated');
         if (upd) upd.textContent = 'обн. ' + new Date().toLocaleTimeString('ru');
     } catch(e) {}
+}
+
+// ── Набор «моих» инструментов для фильтра таблицы цен ──
+const MY_PRICE_CODES = new Set({{ my_price_codes | tojson }});
+// Текущий выбранный брокер (для /api/forecast и QUIK-позиций)
+const CURRENT_BROKER = {{ broker | tojson }};
+
+// Фильтр таблицы цен: «Все» + поиск по коду
+function applyPriceFilter() {
+    const showAll = document.getElementById('pricesShowAll').checked;
+    const q = (document.getElementById('pricesSearch').value || '').trim().toUpperCase();
+    const tb = document.querySelector('#pricesTable tbody');
+    if (!tb) return;
+    let visible = 0;
+    for (const tr of tb.querySelectorAll('tr[data-code]')) {
+        const mine = tr.dataset.mine === '1' || MY_PRICE_CODES.has(tr.dataset.code);
+        let show = showAll || mine;
+        if (show && q) {
+            show = tr.dataset.code.toUpperCase().indexOf(q) !== -1;
+        }
+        tr.style.display = show ? '' : 'none';
+        if (show) visible++;
+    }
+    const cnt = document.getElementById('pricesCount');
+    if (cnt) cnt.textContent = visible;
 }
 
 // Обновление таблицы цен
@@ -686,13 +752,81 @@ async function refreshPrices() {
         if (!tb) return;
         let html = '';
         for (let p of data) {
-            html += '<tr><td><small><img class="tkr-logo" src="/api/logo/' + p.sec_code + '" alt="" loading="lazy" onerror="this.style.display=\'none\'" /> ' + p.sec_code + '</small></td>' +
+            let mine = MY_PRICE_CODES.has(p.sec_code) ? '1' : '0';
+            html += '<tr data-code="' + p.sec_code + '" data-mine="' + mine + '">' +
+                '<td><small><img class="tkr-logo" src="/api/logo/' + p.sec_code + '" alt="" loading="lazy" onerror="this.style.display=\'none\'" /> ' + p.sec_code + '</small></td>' +
                 '<td class="text-end fw-bold price-cell">' + fmtPrice(p.price) + '</td>' +
                 '<td class="text-end">' + p.qty + '</td>' +
                 '<td><small class="ts-cell">' + (p.timestamp ? p.timestamp.substr(11,8) : '') + '</small></td></tr>';
         }
         tb.innerHTML = html;
+        applyPriceFilter();
         let upd = document.getElementById('pricesUpdated');
+        if (upd) upd.textContent = 'обн. ' + new Date().toLocaleTimeString('ru');
+    } catch(e) {}
+}
+
+// Обновление прогноза P&L в таблице прибыли по текущим ценам
+async function refreshForecast() {
+    try {
+        let r = await fetch('/api/forecast?broker=' + encodeURIComponent(CURRENT_BROKER));
+        let data = await r.json();
+        let tb = document.querySelector('#profitTable tbody');
+        if (!tb) return;
+
+        for (let tr of tb.querySelectorAll('tr[data-code]')) {
+            let code = tr.dataset.code;
+            let info = data[code];
+            if (!info) continue;
+
+            let netText = tr.querySelector('td:nth-child(6)');
+            let priceCell = tr.querySelector('td:nth-child(7)');
+            let forecastCell = tr.querySelector('td:nth-child(8)');
+            let totalCell = tr.querySelector('td:nth-child(9)');
+            if (!forecastCell || !totalCell || !priceCell || !netText) continue;
+
+            let net = parseNum(netText.textContent);
+            let fVal = info.forecast || 0;
+            let cur = info.current_price || 0;
+            let tVal = net + fVal;
+
+            // Текущая цена
+            priceCell.textContent = cur ? (cur < 10 ? cur.toFixed(4) : cur.toFixed(2)) : '—';
+            priceCell.className = 'text-end price-cell';
+
+            // Прогноз
+            forecastCell.textContent = (fVal >= 0 ? '+' : '') + fVal.toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2});
+            forecastCell.className = 'text-end ' + (fVal >= 0 ? 'profit-positive' : 'profit-negative');
+
+            // Итого P&L
+            totalCell.textContent = (tVal >= 0 ? '+' : '') + tVal.toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2});
+            totalCell.className = 'text-end fw-bold ' + (tVal >= 0 ? 'profit-positive' : 'profit-negative');
+        }
+
+        // Обновить итоговую строку (tfoot)
+        let tfoot = document.querySelector('#profitTable tfoot');
+        if (tfoot) {
+            let rows = tb.querySelectorAll('tr[data-code]');
+            let totalForecast = 0, totalTotal = 0;
+            for (let tr of rows) {
+                let fCell = tr.querySelector('td:nth-child(8)');
+                let tCell = tr.querySelector('td:nth-child(9)');
+                if (fCell) totalForecast += parseNum(fCell.textContent);
+                if (tCell) totalTotal += parseNum(tCell.textContent);
+            }
+            let fc = tfoot.querySelector('td:nth-child(8)');
+            let tc = tfoot.querySelector('td:nth-child(9)');
+            if (fc) {
+                fc.textContent = (totalForecast >= 0 ? '+' : '') + totalForecast.toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2});
+                fc.className = 'text-end ' + (totalForecast >= 0 ? 'profit-positive' : 'profit-negative');
+            }
+            if (tc) {
+                tc.textContent = (totalTotal >= 0 ? '+' : '') + totalTotal.toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2});
+                tc.className = 'text-end fw-bold ' + (totalTotal >= 0 ? 'profit-positive' : 'profit-negative');
+            }
+        }
+
+        let upd = document.getElementById('forecastUpdated');
         if (upd) upd.textContent = 'обн. ' + new Date().toLocaleTimeString('ru');
     } catch(e) {}
 }
@@ -818,14 +952,21 @@ async function refreshOpenTrades() {
 
 // Запуск
 toggleOpenOnly();  // применить фильтр "только открытые" при загрузке
+applyPriceFilter();  // применить фильтр "только мои" для цен при загрузке
 refreshQuikStatus();
 refreshQuik();
 refreshPrices();
 refreshOpenTrades();
+refreshForecast();
 setInterval(refreshQuikStatus, 3000);
 setInterval(refreshQuik, 5000);
 setInterval(refreshPrices, 3000);
 setInterval(refreshOpenTrades, 3000);
+setInterval(refreshForecast, 5000);
+
+// События фильтра цен
+document.getElementById('pricesSearch').addEventListener('input', applyPriceFilter);
+document.getElementById('pricesShowAll').addEventListener('change', applyPriceFilter);
 </script>
 
 <!-- █████  Reports list  █████ -->
@@ -836,6 +977,7 @@ setInterval(refreshOpenTrades, 3000);
     </div>
     <div class="card-body p-0">
         {% if reports %}
+        <div class="table-responsive">
         <table class="table table-sm table-hover mb-0">
             <thead class="table-light">
                 <tr>
@@ -861,6 +1003,7 @@ setInterval(refreshOpenTrades, 3000);
             {% endfor %}
             </tbody>
         </table>
+        </div>
         {% else %}
         <div class="p-4 text-muted text-center">Нет загруженных отчётов.</div>
         {% endif %}

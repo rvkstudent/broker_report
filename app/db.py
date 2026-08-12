@@ -302,6 +302,8 @@ def init_db():
         cur.execute("ALTER TABLE quik_trade ADD COLUMN operation TEXT DEFAULT ''")
     if 'operation_type' not in qk_cols:
         cur.execute("ALTER TABLE quik_trade ADD COLUMN operation_type INTEGER DEFAULT -1")
+    if 'comment' not in qk_cols:
+        cur.execute("ALTER TABLE quik_trade ADD COLUMN comment TEXT DEFAULT ''")
     cur.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS idx_quik_trade_source_num
         ON quik_trade(source, trade_num)
@@ -452,8 +454,47 @@ def init_db():
     """)
     for old, new in [('SU26244RMFS2', '26244RMFS'), ('SU26245RMFS9', '26245RMFS'),
                      ('SU26246RMFS7', '26246RMFS'), ('SU26247RMFS5', '26247RMFS'),
-                     ('SU26248RMFS3', '26248RMFS'), ('SU26249RMFS1', '26249RMFS')]:
+                     ('SU26248RMFS3', '26248RMFS'), ('SU26249RMFS1', '26249RMFS'),
+                     ('SU26248RMFS8', '26248RMFS')]:
         conn.execute("UPDATE trade SET security_code=? WHERE security_code=?", (new, old))
+    # Также чиним SU26248RMFS8 в repo
+    conn.execute("UPDATE repo SET security_code='26248RMFS' WHERE security_code='SU26248RMFS8'")
+
+    # ── Дедупликация: удаляем дубликаты source='vtb' с B/S-префиксом, если уже есть без префикса ──
+    conn.execute("""
+        DELETE FROM trade WHERE source='vtb' AND id IN (
+            SELECT t1.id FROM trade t1
+            JOIN trade t2 ON t2.source = t1.source
+                 AND t2.deal_number = SUBSTR(t1.deal_number, 2)
+                 AND t2.side = t1.side
+                 AND t2.quantity = t1.quantity
+            WHERE t1.deal_number GLOB '[BS]*'
+              AND LENGTH(t1.deal_number) > 1
+        )
+    """)
+
+    # ── Нормализация deal_number для source='vtb' (отрезаем B/S-префикс) ──
+    conn.execute("""
+        UPDATE trade SET deal_number = SUBSTR(deal_number, 2)
+        WHERE source='vtb' AND deal_number GLOB '[BS]*'
+          AND LENGTH(deal_number) > 1
+          AND deal_number LIKE '_______%'
+    """)
+
+    # ── Финальная дедупликация trade после всех нормализаций ──
+    conn.execute("""
+        DELETE FROM trade WHERE id IN (
+            SELECT t2.id FROM trade t2
+            INNER JOIN (
+                SELECT MIN(id) AS keep_id, source, deal_number
+                FROM trade
+                WHERE deal_number IS NOT NULL AND deal_number != ''
+                GROUP BY source, deal_number
+                HAVING COUNT(*) > 1
+            ) dup ON t2.deal_number = dup.deal_number AND t2.source = dup.source
+            WHERE t2.id != dup.keep_id
+        )
+    """)
 
     # ── Дедупликация cash_flow ──
     conn.execute("DELETE FROM cash_flow WHERE id NOT IN ("
@@ -872,17 +913,24 @@ def _run_lifo(trades, name_map):
         buy_queue = []
 
         for t in txns:
+            # НКД по облигациям: отчёты (vtb/sber/gp) хранят amount уже с НКД,
+            # а QUIK — «чистую» цену без НКД (nkd отдельно). Чтобы база P&L была
+            # единообразной (реальные потоки денег), добавляем НКД к QUIK-сделкам.
+            amount_eff = t['amount']
+            if t['source'] == 'quik' and _is_bond_class(t['class_code'] or ''):
+                amount_eff = (t['amount'] or 0) + (t['nkd'] or 0)
+
             if t['side'] == 'Покупка' and t['quantity'] > 0:
                 buy_queue.append([
                     t['quantity'],
-                    t['amount'] / t['quantity'],
+                    amount_eff / t['quantity'],
                     t,
                     (t['broker_fee'] or 0) + (t['exchange_fee'] or 0)
                 ])
 
             elif t['side'] == 'Продажа' and t['quantity'] > 0:
                 remaining = t['quantity']
-                sell_unit_price = t['amount'] / t['quantity']
+                sell_unit_price = amount_eff / t['quantity']
                 sell_fee = (t['broker_fee'] or 0) + (t['exchange_fee'] or 0)
 
                 while remaining > 0 and buy_queue:
@@ -1059,7 +1107,8 @@ def _match_trades_lifo(report_id=None, date_from=None, date_to=None, broker=None
 
         trades_raw = conn.execute(f"""
             SELECT id, security_code, security_name, side, quantity, amount,
-                   broker_fee, exchange_fee, trade_date, trade_time, deal_number, source
+                   broker_fee, exchange_fee, trade_date, trade_time, deal_number, source,
+                   nkd, class_code
             FROM trade
             WHERE {where_sql}
             ORDER BY substr(trade_date,7,4)||substr(trade_date,4,2)||substr(trade_date,1,2), trade_time, LENGTH(deal_number), deal_number
@@ -1085,7 +1134,8 @@ def _match_trades_lifo(report_id=None, date_from=None, date_to=None, broker=None
     if not broker or broker == 'all':
         quik_nobroker = conn.execute(f"""
             SELECT id, security_code, security_name, side, quantity, amount,
-                   broker_fee, exchange_fee, trade_date, trade_time, deal_number, source
+                   broker_fee, exchange_fee, trade_date, trade_time, deal_number, source,
+                   nkd, class_code
             FROM trade
             WHERE source='quik' AND (broker IS NULL OR broker='')
         """, []).fetchall()
@@ -1240,6 +1290,21 @@ def _is_bond_class(class_code: str) -> bool:
     return class_code in ('TQOB', 'TQCB', 'TQOD') or class_code.startswith('TQO')
 
 
+def _bond_price_ruble(price_pct: float, qty: int, value: float) -> float:
+    """Convert bond price from % of nominal to ruble price.
+
+    QUIK sends bond price as % of nominal (e.g. 77.53 = 77.53%).
+    Рублёвая цена за бумагу = value / qty (value — сумма сделки в рублях,
+    qty — фактическое количество бумаг).
+    Раньше при value/qty >> price_pct значение ошибочно делилось на 100 как
+    «копейки» — это ломало высокономинальные и валютные облигации
+    (напр. 80306.28 → 803.06). value всегда в рублях, делить нельзя.
+    """
+    if qty <= 0 or value <= 0:
+        return price_pct
+    return round(value / qty, 2)
+
+
 def save_price(sec_code: str, price: float, qty: int = 0, value: float = 0, class_code: str = ''):
     """Upsert current price for a security.
 
@@ -1255,8 +1320,8 @@ def save_price(sec_code: str, price: float, qty: int = 0, value: float = 0, clas
         "timestamp TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),"
         "UNIQUE(sec_code, class_code))")
     # Convert bond % price to ruble price
-    if _is_bond_class(class_code) and qty > 0 and value > 0:
-        price = round(value / qty, 2)
+    if _is_bond_class(class_code):
+        price = _bond_price_ruble(price, qty, value)
     conn.execute("""
         INSERT INTO current_price (sec_code, class_code, price, qty, value, timestamp)
         VALUES (?, ?, ?, ?, ?, datetime('now', 'localtime'))
@@ -1293,8 +1358,8 @@ def save_prices_batch(prices: list):
         class_code = p.get('class_code', '')
         qty = p.get('qty', 0)
         value = p.get('value', 0)
-        if _is_bond_class(class_code) and qty > 0 and value > 0:
-            price = round(value / qty, 2)
+        if _is_bond_class(class_code):
+            price = _bond_price_ruble(price, qty, value)
         cur.execute("""
             INSERT INTO current_price (sec_code, class_code, price, qty, value, timestamp)
             VALUES (?, ?, ?, ?, ?, datetime('now', 'localtime'))
@@ -1308,35 +1373,38 @@ def save_prices_batch(prices: list):
     conn.close()
 
 
-# ── Карта счетов → брокер ─────────────────────────────────────
-# Ключ — номер счёта (account) из QUIK OnTrade.
-# Значение — 'sber' или 'vtb'. Добавьте свои счета.
-ACCOUNT_BROKER_MAP = {
-    # Заполнить позже: 'номер_счёта': 'sber' or 'vtb'
-    # Список счетов можно получить через GET /api/accounts
+# ── Карта кодов клиента → брокер ──────────────────────────────
+# Ключ — код клиента из поля comment (Комментарий) QUIK OnTrade.
+# Значение — 'sber' или 'vtb'. Добавьте свои коды.
+CLIENT_CODE_MAP = {
+    '424F02N': 'sber',       # Сбер
+    '130R63': 'vtb',         # ВТБ (основной)
+    '1ABWG': 'vtb',          # ВТБ (альтернативный)
 }
 
 
 def _resolve_broker(t: dict) -> str:
-    """Определить брокера по счёту (account) из QUIK.
+    """Определить брокера по данным из QUIK OnTrade.
 
     Приоритет:
-    1. Явное поле broker из JSON (если не пустое)
-    2. Маппинг account → broker из ACCOUNT_BROKER_MAP
-    3. settlecode (код расчётов) — часто содержит код брокера
+    1. Код клиента из brokerref / client_code — маппинг по CLIENT_CODE_MAP
+    2. Явное поле broker из JSON (fallback из Lua)
+    3. settlecode (код расчётов)
     4. Пустая строка (неизвестный)
     """
+    # Определяем брокера по коду клиента (приоритет — реальный источник)
+    for field in ('brokerref', 'client_code', 'comment'):
+        val = (t.get(field) or '').strip()
+        if val:
+            for client_code, br in CLIENT_CODE_MAP.items():
+                if client_code in val:
+                    return br
+
     broker = (t.get('broker') or '').strip()
     if broker:
         return broker
 
-    account = (t.get('account') or '').strip()
-    if account and account in ACCOUNT_BROKER_MAP:
-        return ACCOUNT_BROKER_MAP[account]
-
     settlecode = (t.get('settlecode') or '').strip()
-    # Часто settlecode содержит код брокера: 'Y0'/'Y1'/'N0'/'N1' и т.д.
-    # Если понадобится — можно добавить маппинг settlecode → broker
 
     return ''
 
@@ -1424,28 +1492,35 @@ def save_quik_trades(trades: list):
                         side = 'sell'
                 # иначе флаги нестандартные — оставляем side от Lua как есть
 
-        # QUIK OnTrade передаёт qty в лотах. Фактическое количество
-        # акций = value / price (price — за 1 акцию), но если известен
-        # lotsize из таблицы instrument — умножаем qty на lotsize.
+        # QUIK OnTrade передаёт qty в лотах. Для акций фактическое количество
+        # = value / price (price — за 1 акцию в рублях). Для облигаций цена
+        # в % от номинала, поэтому value/price даёт мусор (напр. 826 вместо 1)
+        # — фактическое кол-во берём из QUIK: qty (лоты) × lotsize.
         price = t['price']
         qty = t['qty']
         t_val = t.get('value', 0) or 0
-        if price > 0:
+        sec_code = t.get('sec_code', '')
+        class_code = t.get('class_code', '')
+        lotsize = get_instrument_lotsize(sec_code, class_code)
+        if lotsize <= 1:
+            lotsize = int(t.get('lotsize') or 0) or 1
+
+        if _is_bond_class(class_code):
+            actual_qty = int(qty or 0) * max(int(lotsize or 1), 1)
+            if actual_qty > 0:
+                qty = actual_qty
+                if t_val > 0:
+                    # Храним цену облигации за бумагу в рублях (как в отчётах),
+                    # чтобы единицы совпадали с current_price и buy_price.
+                    price = round(t_val / actual_qty, 2)
+        elif price > 0:
             actual_qty = int(round(t_val / price))
             if actual_qty > 0:
                 qty = actual_qty
 
-        # Если в БД есть lotsize, используем для контроля (может отличаться
-        # от value/price для некоторых инструментов)
-        lotsize = get_instrument_lotsize(t.get('sec_code', ''), t.get('class_code', ''))
-        if lotsize > 1 and qty == 1 and t_val > 0:
-            pass  # уже исправлено выше через actual_qty
-
         account = (t.get('account') or '').strip()
         broker = _resolve_broker(t)
         op_type = t.get('operation_type', -1)
-        sec_code = t.get('sec_code', '')
-        class_code = t.get('class_code', '')
         deal_number = str(t.get('trade_num', ''))
         side_ru = 'Покупка' if side == 'buy' else 'Продажа'
 
@@ -1457,15 +1532,15 @@ def save_quik_trades(trades: list):
                  currency, side, quantity, price, amount, nkd,
                  broker_fee, exchange_fee, deal_number,
                  source, broker, account,
-                 flags, operation, operation_type)
+                 flags, operation, operation_type, comment)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    0, 0, ?, 'quik', ?, ?, ?, ?, ?)
+                    0, 0, ?, 'quik', ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source, deal_number) WHERE source='quik' AND deal_number IS NOT NULL AND deal_number != ''
             DO UPDATE SET
                 side=COALESCE(NULLIF(trade.side, ''), excluded.side),
                 price=excluded.price, quantity=excluded.quantity, amount=excluded.amount,
                 trade_date=excluded.trade_date, trade_time=excluded.trade_time,
-                broker=COALESCE(NULLIF(trade.broker, ''), excluded.broker),
+                broker=excluded.broker,
                 account=COALESCE(NULLIF(trade.account, ''), excluded.account),
                 flags=COALESCE(NULLIF(trade.flags, 0), excluded.flags),
                 operation=COALESCE(NULLIF(trade.operation, ''), excluded.operation),
@@ -1479,6 +1554,7 @@ def save_quik_trades(trades: list):
             deal_number,
             broker, account,
             flags, operation, op_type,
+            t.get('brokerref', '') or t.get('client_code', '') or t.get('comment', ''),
         ))
 
         # ── Также дублируем в quik_trade (для обратной совместимости) ──
@@ -1488,9 +1564,9 @@ def save_quik_trades(trades: list):
                  accruedint, yield, settlecode,
                  reporate, repovalue, repo2value, repoterm, period,
                  trade_date, trade_time, source, side, flags, operation,
-                 broker, account, operation_type)
+                 broker, account, operation_type, comment)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'quik',
-                    ?, ?, ?, ?, ?, ?)
+                    ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source, trade_num) DO UPDATE SET
                 side=COALESCE(NULLIF(quik_trade.side, ''), excluded.side),
                 flags=COALESCE(NULLIF(quik_trade.flags, 0), excluded.flags),
@@ -1498,7 +1574,7 @@ def save_quik_trades(trades: list):
                 operation_type=COALESCE(NULLIF(quik_trade.operation_type, -1), excluded.operation_type),
                 price=excluded.price, qty=excluded.qty, value=excluded.value,
                 trade_date=excluded.trade_date, trade_time=excluded.trade_time,
-                broker=COALESCE(NULLIF(quik_trade.broker, ''), excluded.broker),
+                broker=excluded.broker,
                 account=COALESCE(NULLIF(quik_trade.account, ''), excluded.account)
         """, (
             t.get('trade_num'), sec_code, class_code,
@@ -1507,7 +1583,8 @@ def save_quik_trades(trades: list):
             t.get('repolate', 0), t.get('repovalue', 0), t.get('repo2value', 0),
             t.get('repoterm', 0), t.get('period', 0),
             trade_date, trade_time,
-            side, flags, operation, broker, account, op_type
+            side, flags, operation, broker, account, op_type,
+            t.get('brokerref', '') or t.get('client_code', '') or t.get('comment', ''),
         ))
     conn.commit()
     conn.close()
@@ -1521,7 +1598,16 @@ def save_quik_trades(trades: list):
 
 
 def get_current_prices():
-    """Get latest price per instrument (deduplicated by sec_code)."""
+    """Get latest price per instrument (deduplicated by sec_code).
+
+    Для облигаций (TQO*) цена в QUIK приходит в % от номинала, а рублёвая
+    цена за бумагу = value / qty. В БД могла попасть «сырая» цена без
+    конвертации (старая версия кода с эвристикой /100 или pull из Firebase
+    с другого хоста) — например RU000A10C3M0 (Атомэнп06): хранится 803.08
+    вместо 80308.34. Чтобы такие строки не ломали P&L (‑99%), при чтении
+    самокорректируем: если хранимая цена расходится с value/qty более чем
+    на 5% — берём рублёвую цену за бумагу = value/qty.
+    """
     conn = get_connection()
     rows = conn.execute("""
         SELECT sec_code, class_code, price, qty, value, timestamp
@@ -1534,7 +1620,18 @@ def get_current_prices():
         ORDER BY sec_code
     """).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    result = []
+    for r in rows:
+        d = dict(r)
+        if _is_bond_class(d.get('class_code', '')):
+            qty = d.get('qty') or 0
+            value = d.get('value') or 0
+            if qty > 0 and value > 0:
+                per_qty = round(value / qty, 2)
+                if per_qty > 0 and abs(d['price'] / per_qty - 1) > 0.05:
+                    d['price'] = per_qty
+        result.append(d)
+    return result
 
 
 def get_my_instruments():
@@ -1590,23 +1687,27 @@ def get_instrument_lotsize(sec_code: str, class_code: str = '') -> int:
     return 1
 
 
-def get_quik_positions():
+def get_quik_positions(broker=None):
     """Aggregate QUIK positions from OnTrade data (читает из trade, source='quik').
        side='Покупка' → +qty, side='Продажа' → -qty.
+       broker: если задан и != 'all' — учитывать позиции только этого брокера.
     """
     conn = get_connection()
-    rows = conn.execute("""
+    where = "source='quik' AND side IN ('Покупка', 'Продажа') AND quantity > 0"
+    params = []
+    if broker and broker != 'all':
+        where += " AND broker=?"
+        params.append(broker)
+    rows = conn.execute(f"""
         SELECT security_code AS sec_code, class_code,
                SUM(CASE WHEN side='Продажа' THEN -quantity ELSE quantity END) AS net_qty,
                SUM(CASE WHEN side='Продажа' THEN 0 ELSE amount END) AS buy_value
         FROM trade
-        WHERE source='quik'
-          AND side IN ('Покупка', 'Продажа')
-          AND quantity > 0
+        WHERE {where}
         GROUP BY security_code, class_code
         HAVING net_qty > 0
         ORDER BY security_code
-    """).fetchall()
+    """, params).fetchall()
     conn.close()
     result = []
     for r in rows:
@@ -1626,7 +1727,7 @@ def get_recent_quik_trades(limit: int = 20):
     conn = get_connection()
     rows = conn.execute("""
         SELECT id, deal_number AS trade_num, security_code AS sec_code,
-               class_code, price, quantity AS qty, amount AS value,
+               class_code, side, price, quantity AS qty, amount AS value,
                trade_date, trade_time
         FROM trade
         WHERE source='quik'

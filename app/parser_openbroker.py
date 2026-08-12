@@ -212,6 +212,9 @@ def _parse_trade_section(df, cur, report_id, section_start, header_row, section_
         if pd.isna(deal_val):
             continue
         deal_num = str(deal_val).strip()
+        # Нормализуем номер сделки: отбрасываем префикс B/S (как в VTB парсере)
+        if len(deal_num) > 1 and deal_num[0] in ('B', 'S') and deal_num[1:].isdigit():
+            deal_num = deal_num[1:]
 
         # Дата
         date_col = col_map.get('date', 29)

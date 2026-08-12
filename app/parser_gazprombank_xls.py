@@ -153,7 +153,7 @@ def _is_instrument_header(df, row):
 _GPX_TICKER_MAP = {
     '26241RMFS': 'SU26241RMFS8',
     '26243RMFS': 'SU26243RMFS4',
-    '26248RMFS': 'SU26248RMFS8',
+    '26248RMFS': '26248RMFS',
     'LQDT': 'LQDT',
     'LQDT ETF': 'LQDT',
     'МТС-ао': 'MTSS',
