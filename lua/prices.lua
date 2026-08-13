@@ -404,11 +404,25 @@ function OnTrade(trade)
     }
 
     -- Определяем сторону сделки:
-    -- В Lua 5.1 нет оператора &, используем % 2 (нечётное = бит 0 установлен)
+    -- Приоритет 1: trade.operation ("B"/"S") — надёжный признак из QUIK.
+    -- Приоритет 2: flags — бит 0 (0x01) установлен = покупка (в Lua 5.1 нет &
+    --              используем % 2: нечётное = бит 0 установлен).
+    -- ВАЖНО: QUIK вызывает OnTrade для одной сделки несколько раз, и в первый
+    -- раз флаги могут не содержать бит стороны (flags=32/64) → неверная сторона.
+    -- На сервере при конфликте по trade_num сторона перезаписывается последней,
+    -- поэтому здесь важно передавать trade.operation, если он доступен.
     local raw_flags = tonumber(trade.flags) or 0
-    local side = "sell"
-    if raw_flags > 0 and raw_flags % 2 == 1 then
+    local trade_operation = tostring(trade.operation or "")
+    local side
+    if trade_operation == "B" then
         side = "buy"
+    elseif trade_operation == "S" then
+        side = "sell"
+    else
+        side = "sell"
+        if raw_flags > 0 and raw_flags % 2 == 1 then
+            side = "buy"
+        end
     end
 
     -- Диагностика: если flags=0, дамп всех полей для анализа
@@ -468,6 +482,7 @@ function OnTrade(trade)
         lotsize = lotsize,
         broker = BROKER_NAME,      -- fallback: если CLIENT_CODE_MAP не заполнен
         flags = raw_flags,         -- оригинальные флаги для перепроверки на сервере
+        operation = trade_operation, -- "B"/"S" из QUIK (если доступно)
         operation_type = raw_op_type,
         brokerref = brokerref,     -- "Комментарий" в терминале QUIK (код клиента)
         client_code = client_code, -- код клиента (если есть)
@@ -520,10 +535,19 @@ local function load_existing_trades()
                 -- не логируем каждый пропуск, только счётчик
             else
                 -- Определяем сторону сделки:
+                -- Приоритет: trade.operation ("B"/"S"), затем flags (бит 0 = покупка)
                 local trade_raw_flags = tonumber(trade.flags) or 0
-                local trade_side = "sell"
-                if trade_raw_flags > 0 and trade_raw_flags % 2 == 1 then
+                local trade_operation = tostring(trade.operation or "")
+                local trade_side
+                if trade_operation == "B" then
                     trade_side = "buy"
+                elseif trade_operation == "S" then
+                    trade_side = "sell"
+                else
+                    trade_side = "sell"
+                    if trade_raw_flags > 0 and trade_raw_flags % 2 == 1 then
+                        trade_side = "buy"
+                    end
                 end
 
                 -- Размер лота из QUIK
@@ -560,6 +584,7 @@ local function load_existing_trades()
                     lotsize = trade_lotsize,
                     broker = BROKER_NAME,
                     flags = raw_flags,
+                    operation = trade_operation,
                     brokerref = brokerref,
                     client_code = client_code,
                 })

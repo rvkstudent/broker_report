@@ -65,7 +65,7 @@
             </div>
             <div class="col-auto form-check d-flex align-items-end mb-1">
                 <input type="checkbox" class="form-check-input me-1" id="showOpenOnly"
-                       onchange="toggleOpenOnly()" checked>
+                       onchange="toggleOpenOnly()">
                 <label class="form-check-label small" for="showOpenOnly">Только открытые</label>
             </div>
             <div class="col-auto">
@@ -130,21 +130,24 @@
             <tbody>
             {% for p in profit %}
                 {% set cur_price = price_map.get(p.security_code, 0) %}
-                <tr data-has-open="{{ 'true' if p.security_code in open_codes else 'false' }}" data-code="{{ p.security_code }}" data-price="{{ cur_price }}">
-                    <td>{{ p.security_name }} <small class="text-muted">({{ p.security_code }})</small></td>
+                <tr data-has-open="{{ 'true' if p.security_code in open_codes else 'false' }}" data-code="{{ p.security_code }}" data-price="{{ cur_price }}" data-is-open="{{ 'true' if p.is_open else 'false' }}" {% if p.is_open %}class="table-warning"{% endif %}>
+                    <td>
+                        {{ p.security_name }} <small class="text-muted">({{ p.security_code }})</small>
+                        {% if p.is_open %}<span class="badge bg-warning text-dark ms-1">открытая</span>{% endif %}
+                    </td>
                     <td class="text-end">{{ p.buy_qty }}</td>
                     <td class="text-end">{{ p.sell_qty }}</td>
                     <td class="text-end {{ 'profit-positive' if p.gross_profit >= 0 else 'profit-negative' }}">
-                        {{ '{:+,.2f}'.format(p.gross_profit) }}</td>
-                    <td class="text-end text-danger">{{ '{:,.2f}'.format(p.total_fees) }}</td>
+                        {% if p.is_open %}—{% else %}{{ '{:+,.2f}'.format(p.gross_profit) }}{% endif %}</td>
+                    <td class="text-end text-danger">{% if p.is_open %}—{% else %}{{ '{:,.2f}'.format(p.total_fees) }}{% endif %}</td>
                     <td class="text-end {{ 'profit-positive' if p.net_profit >= 0 else 'profit-negative' }} fw-bold">
-                        {{ '{:+,.2f}'.format(p.net_profit) }}
+                        {% if p.is_open %}—{% else %}{{ '{:+,.2f}'.format(p.net_profit) }}{% endif %}
                     </td>
                     <td class="text-end price-cell">
                         {{ '{:,.4f}'.format(cur_price) if cur_price and cur_price < 10 else '{:,.2f}'.format(cur_price) if cur_price else '—' }}
                     </td>
                     <td class="text-end {{ 'profit-positive' if p.forecast_pl >= 0 else 'profit-negative' }}">
-                        {{ '{:+,.2f}'.format(p.forecast_pl) }}
+                        {{ '{:+,.2f}'.format(p.forecast_pl) if p.is_open else '—' }}
                     </td>
                     <td class="text-end fw-bold {{ 'profit-positive bg-profit-positive' if p.total_pl >= 0 else 'profit-negative bg-profit-negative' }}">
                         {{ '{:+,.2f}'.format(p.total_pl) }}
@@ -722,6 +725,9 @@ async function refreshQuik() {
 const MY_PRICE_CODES = new Set({{ my_price_codes | tojson }});
 // Текущий выбранный брокер (для /api/forecast и QUIK-позиций)
 const CURRENT_BROKER = {{ broker | tojson }};
+// Текущий фильтр дат (для /api/forecast — прогноз только по позициям периода)
+const DATE_FROM_ISO = {{ date_from_iso | tojson }};
+const DATE_TO_ISO = {{ date_to_iso | tojson }};
 
 // Фильтр таблицы цен: «Все» + поиск по коду
 function applyPriceFilter() {
@@ -769,7 +775,10 @@ async function refreshPrices() {
 // Обновление прогноза P&L в таблице прибыли по текущим ценам
 async function refreshForecast() {
     try {
-        let r = await fetch('/api/forecast?broker=' + encodeURIComponent(CURRENT_BROKER));
+        let url = '/api/forecast?broker=' + encodeURIComponent(CURRENT_BROKER);
+        if (DATE_FROM_ISO) url += '&date_from=' + encodeURIComponent(DATE_FROM_ISO);
+        if (DATE_TO_ISO) url += '&date_to=' + encodeURIComponent(DATE_TO_ISO);
+        let r = await fetch(url);
         let data = await r.json();
         let tb = document.querySelector('#profitTable tbody');
         if (!tb) return;
@@ -779,20 +788,33 @@ async function refreshForecast() {
             let info = data[code];
             if (!info) continue;
 
+            let isOpen = tr.dataset.isOpen === 'true';
+
             let netText = tr.querySelector('td:nth-child(6)');
             let priceCell = tr.querySelector('td:nth-child(7)');
             let forecastCell = tr.querySelector('td:nth-child(8)');
             let totalCell = tr.querySelector('td:nth-child(9)');
             if (!forecastCell || !totalCell || !priceCell || !netText) continue;
 
-            let net = parseNum(netText.textContent);
-            let fVal = info.forecast || 0;
             let cur = info.current_price || 0;
-            let tVal = net + fVal;
 
-            // Текущая цена
+            // Текущая цена (для всех строк — открытых и закрытых)
             priceCell.textContent = cur ? (cur < 10 ? cur.toFixed(4) : cur.toFixed(2)) : '—';
             priceCell.className = 'text-end price-cell';
+
+            // Закрытая сделка: прогноз не показываем, итого = чист.приб.
+            if (!isOpen) {
+                forecastCell.textContent = '—';
+                forecastCell.className = 'text-end';
+                let net = parseNum(netText.textContent);
+                totalCell.textContent = (net >= 0 ? '+' : '') + net.toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2});
+                totalCell.className = 'text-end fw-bold ' + (net >= 0 ? 'profit-positive' : 'profit-negative');
+                continue;
+            }
+
+            let net = parseNum(netText.textContent);
+            let fVal = info.forecast || 0;
+            let tVal = net + fVal;
 
             // Прогноз
             forecastCell.textContent = (fVal >= 0 ? '+' : '') + fVal.toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2});

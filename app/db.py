@@ -671,14 +671,15 @@ def get_open_trades(report_id=None, date_from=None, date_to=None, broker=None):
     Buys that have NOT been closed by a sell within this period.
     Returns unmatched buy lots, merged by (security_code, buy_date, buy_price).
 
-    ВНИМАНИЕ: дата фильтрует только продажи (чтобы определить, какие покупки
-    были закрыты в периоде), но сами покупки показываются ВСЕ независимо от
-    даты — открытая позиция должна быть видна всегда, даже если куплена давно.
+    Дата: учитывается как для покупок, так и для продаж — открытая позиция
+    показывается только если куплена в выбранном периоде (date_from..date_to).
+    Так блок «Прибыль» по фильтру показывает открытые сделки именно с даты
+    фильтра, а не все исторические (например, MTSS/ОФЗ, купленные до 01.08).
 
     Все сделки в единой таблице trade (source='sber'/'vtb'/'quik').
     QUIK-трейды участвуют в LIFO-матчинге вместе со своим брокером.
     """
-    _, unmatched = _match_trades_lifo(report_id, None, None, broker)
+    _, unmatched = _match_trades_lifo(report_id, date_from, date_to, broker)
 
     # Merge consecutive lots with same code, date, and price
     merged = []
@@ -698,6 +699,9 @@ def get_instrument_summary(report_id=None, date_from=None, date_to=None, broker=
     """
     Aggregate summary per instrument from OPEN (unmatched) buy positions.
     Shows total qty, average price, total cost per security.
+
+    Дата учитывается (как в get_open_trades): открытые позиции показываются
+    только если куплены в выбранном периоде.
     """
     from collections import defaultdict
     _, unmatched = _match_trades_lifo(report_id, date_from, date_to, broker)
@@ -1287,7 +1291,9 @@ def delete_report(report_id):
 
 def _is_bond_class(class_code: str) -> bool:
     """Detect if a class_code represents bonds (price in % of nominal)."""
-    return class_code in ('TQOB', 'TQCB', 'TQOD') or class_code.startswith('TQO')
+    return (class_code in ('TQOB', 'TQCB', 'TQOD')
+            or class_code.startswith('TQO')
+            or class_code in ('SIRMR_BND', 'SIRMRBND', 'BND'))
 
 
 def _bond_price_ruble(price_pct: float, qty: int, value: float) -> float:
@@ -1537,7 +1543,7 @@ def save_quik_trades(trades: list):
                     0, 0, ?, 'quik', ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source, deal_number) WHERE source='quik' AND deal_number IS NOT NULL AND deal_number != ''
             DO UPDATE SET
-                side=COALESCE(NULLIF(trade.side, ''), excluded.side),
+                side=excluded.side,
                 price=excluded.price, quantity=excluded.quantity, amount=excluded.amount,
                 trade_date=excluded.trade_date, trade_time=excluded.trade_time,
                 broker=excluded.broker,
@@ -1568,7 +1574,7 @@ def save_quik_trades(trades: list):
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'quik',
                     ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source, trade_num) DO UPDATE SET
-                side=COALESCE(NULLIF(quik_trade.side, ''), excluded.side),
+                side=excluded.side,
                 flags=COALESCE(NULLIF(quik_trade.flags, 0), excluded.flags),
                 operation=COALESCE(NULLIF(quik_trade.operation, ''), excluded.operation),
                 operation_type=COALESCE(NULLIF(quik_trade.operation_type, -1), excluded.operation_type),

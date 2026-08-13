@@ -485,11 +485,37 @@ def index():
             net = gross - buy_fee - sell_fee
             forecast_map[code] = forecast_map.get(code, 0) + net
 
-    # Добавляем прогноз в каждый элемент profit и вычисляем итоговый P&L
+    # Реализованные строки: прогноз по открытым позициям выносим в отдельные
+    # строки ниже (с пометкой is_open), чтобы покупки без продаж были видны
+    # прямо в таблице «Прибыль» и не дублировали прогноз в итогах.
+    from collections import defaultdict
     for p in profit:
-        code = p['security_code']
-        p['forecast_pl'] = round(forecast_map.get(code, 0), 2)
-        p['total_pl'] = round(p['net_profit'] + p['forecast_pl'], 2)
+        p['forecast_pl'] = 0.0
+        p['total_pl'] = round(p['net_profit'], 2)
+        p['is_open'] = False
+
+    # Открытые позиции (куплено, нет продажи) — отдельные строки с пометкой.
+    open_agg = defaultdict(lambda: {'qty': 0, 'name': ''})
+    for o in open_trades:
+        code = o['security_code']
+        open_agg[code]['qty'] += o['qty']
+        open_agg[code]['name'] = o['security_name']
+    for code, d in open_agg.items():
+        if d['qty'] <= 0:
+            continue
+        forecast = round(forecast_map.get(code, 0), 2)
+        profit.append({
+            'security_code': code,
+            'security_name': d['name'],
+            'buy_qty': d['qty'],
+            'sell_qty': 0,
+            'gross_profit': 0,
+            'total_fees': 0,
+            'net_profit': 0,
+            'forecast_pl': forecast,
+            'total_pl': forecast,
+            'is_open': True,
+        })
 
     # Движение денежных средств
     cash_flow = get_cash_flow_summary(None, df_dmy, dt_dmy, broker)
@@ -762,13 +788,25 @@ def api_quik_connected():
 def api_forecast():
     """Get forecast P&L for open positions based on current prices.
 
-    Учитывает фильтр по брокеру (query-параметр broker), чтобы прогноз
-    на дашборде совпадал с выбранным брокером.
+    Учитывает фильтр по брокеру и датам (query-параметры broker, date_from,
+    date_to), чтобы прогноз на дашборде совпадал с выбранным фильтром.
     """
     broker = request.args.get('broker', 'all')
+    date_from = request.args.get('date_from', '')
+    date_to = request.args.get('date_to', '')
+
+    # Конвертация HTML date (YYYY-MM-DD) → DD.MM.YYYY для БД
+    def to_dmy(iso):
+        if not iso:
+            return ''
+        parts = iso.split('-')
+        if len(parts) == 3:
+            return f'{parts[2]}.{parts[1]}.{parts[0]}'
+        return iso
+
     prices = get_current_prices()
     price_map = {p['sec_code']: p['price'] for p in prices}
-    open_trades = list(get_open_trades(None, '', '', broker))
+    open_trades = list(get_open_trades(None, to_dmy(date_from), to_dmy(date_to), broker))
 
     TRADE_FEE_RATE = 0.000685
     forecast_map = {}
