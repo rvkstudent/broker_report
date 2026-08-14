@@ -1115,6 +1115,7 @@ def _match_trades_lifo(report_id=None, date_from=None, date_to=None, broker=None
                    nkd, class_code
             FROM trade
             WHERE {where_sql}
+              AND (trade.class_code IS NULL OR trade.class_code != 'INSTR')
             ORDER BY substr(trade_date,7,4)||substr(trade_date,4,2)||substr(trade_date,1,2), trade_time, LENGTH(deal_number), deal_number
         """, params).fetchall()
 
@@ -1142,6 +1143,7 @@ def _match_trades_lifo(report_id=None, date_from=None, date_to=None, broker=None
                    nkd, class_code
             FROM trade
             WHERE source='quik' AND (broker IS NULL OR broker='')
+              AND (class_code IS NULL OR class_code != 'INSTR')
         """, []).fetchall()
         if quik_nobroker:
             q_trades = []
@@ -1467,10 +1469,13 @@ def save_quik_trades(trades: list):
         if not trade_time:
             trade_time = t.get('trade_time')
 
-        # Определяем сторону сделки: приоритет — operation (OnTrade),
-        #   затем flags (OnAllTrade), затем явное side из JSON.
-        #   OnTrade: operation='B' (buy) / 'S' (sell)
-        #   OnAllTrade: flags & 0x02 (bid) → buy, flags & 0x01 (offer) → sell
+        # Определяем сторону сделки: приоритет — явная операция из JSON,
+        #   затем side от Lua (OnTrade уже определил по trade.operation/flags),
+        #   затем operation_type / flags как fallback (OnAllTrade, старые клиенты).
+        #
+        # ВАЖНО: для фьючерсов (SPBFUT) QUIK шлёт operation_type=0 и для покупки,
+        #   и для продажи, поэтому operation_type НЕЛЬЗЯ использовать как признак
+        #   стороны, если есть валидный side от Lua.
         flags = t.get('flags', 0) or 0
         operation = t.get('operation', '') or ''
         side = t.get('side', '')
@@ -1478,8 +1483,11 @@ def save_quik_trades(trades: list):
             side = 'buy'
         elif operation == 'S':
             side = 'sell'
+        elif side in ('buy', 'sell'):
+            # side от Lua уже определён (OnTrade: operation → flags) — доверяем
+            pass
         else:
-            # Приоритет для OnTrade: operation_type → flags → side от Lua
+            # Приоритет для старых/сторонних клиентов: operation_type → flags
             # operation_type: 0 = покупка, 1 = продажа, -1 = неизвестно
             op_type = t.get('operation_type', -1)
             if op_type == 0:
@@ -1519,6 +1527,14 @@ def save_quik_trades(trades: list):
                     # Храним цену облигации за бумагу в рублях (как в отчётах),
                     # чтобы единицы совпадали с current_price и buy_price.
                     price = round(t_val / actual_qty, 2)
+        elif class_code == 'SPBFUT':
+            # Фьючерсы: qty из QUIK — это количество контрактов (не лотов × lotsize).
+            # value уже включает множитель контракта (lotsize): value = price × qty × lotsize.
+            # НЕ пересчитываем qty через value/price (это даст qty × lotsize).
+            qty = int(qty or 0)
+            # Цена за контракт в рублях (для единообразия с отчётами и LIFO)
+            if qty > 0 and t_val > 0:
+                price = round(t_val / qty, 2)
         elif price > 0:
             actual_qty = int(round(t_val / price))
             if actual_qty > 0:
@@ -1644,7 +1660,8 @@ def get_my_instruments():
     """Get distinct securities from the trade table (user's instruments)."""
     conn = get_connection()
     rows = conn.execute("""
-        SELECT DISTINCT security_code AS sec_code, security_name AS sec_name
+        SELECT DISTINCT security_code AS sec_code, security_name AS sec_name,
+               COALESCE(NULLIF(class_code, ''), '') AS class_code
         FROM trade
         WHERE security_code IS NOT NULL AND security_code != ''
         ORDER BY security_code
@@ -1699,7 +1716,7 @@ def get_quik_positions(broker=None):
        broker: если задан и != 'all' — учитывать позиции только этого брокера.
     """
     conn = get_connection()
-    where = "source='quik' AND side IN ('Покупка', 'Продажа') AND quantity > 0"
+    where = "source='quik' AND side IN ('Покупка', 'Продажа') AND quantity > 0 AND (class_code IS NULL OR class_code != 'INSTR')"
     params = []
     if broker and broker != 'all':
         where += " AND broker=?"
@@ -1736,7 +1753,7 @@ def get_recent_quik_trades(limit: int = 20):
                class_code, side, price, quantity AS qty, amount AS value,
                trade_date, trade_time
         FROM trade
-        WHERE source='quik'
+        WHERE source='quik' AND (class_code IS NULL OR class_code != 'INSTR')
         ORDER BY id DESC
         LIMIT ?
     """, (limit,)).fetchall()

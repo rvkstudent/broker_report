@@ -38,10 +38,11 @@ local LOG_FILE = os.getenv("TEMP") and (os.getenv("TEMP") .. "\\brokerreport_pri
 -- Загружается с API /api/instruments при старте и периодически обновляется.
 -- Если API недоступен, можно задать вручную:
 local INSTRUMENTS = {}
+local INSTRUMENT_CLASSES = {}  -- sec_code => class_code (из API)
 
 -- Фильтр по class_code, если INSTRUMENTS пуст после загрузки
 -- (например, только "TQBR" для акций, "TQOB" для облигаций)
-local FILTER_CLASS_CODES = {"TQBR", "TQOB", "TQTD", "TQBS"}
+local FILTER_CLASS_CODES = {"TQBR", "TQOB", "TQTD", "TQBS", "SPBFUT"}
 -- ===================================================
 
 local price_cache = {}   -- sec_code => { price, qty, value, class_code, time }
@@ -100,10 +101,15 @@ local function fetch_instruments()
 
     -- Очищаем и заполняем список инструментов
     INSTRUMENTS = {}
+    INSTRUMENT_CLASSES = {}
     for _, item in ipairs(data) do
         local sec_code = item.sec_code
         if sec_code and #sec_code > 0 then
             table.insert(INSTRUMENTS, sec_code)
+            local cc = item.class_code or ""
+            if cc and #cc > 0 then
+                INSTRUMENT_CLASSES[sec_code] = cc
+            end
         end
     end
 
@@ -215,6 +221,54 @@ local function send_prices()
         log_info(string.format("Sent %d prices, response: %s", #prices, table.concat(resp)))
         -- Очищаем кеш после успешной отправки (оставляем только неподтверждённые)
         price_cache = {}
+    end
+end
+
+-- Обновление текущих цен фьючерсов (SPBFUT) через getParamEx(LAST).
+-- Для срочного рынка QUIK НЕ шлёт OnAllTrade, поэтому рыночная цена
+-- не приходит — берём её из параметра LAST (последняя цена контракта).
+-- LAST для фьючерсов = цена за единицу (пункт/акцию), а стоимость контракта
+-- = LAST × lotsize. На сервере фьючерс хранится как price = стоимость контракта
+-- и qty = контракты, поэтому здесь умножаем на lotsize для согласованности.
+local FUTURES_LAST_PARAMS = {"LAST", "LASTPRICE", "CURRENTPRICE"}
+local function refresh_futures_prices()
+    if #INSTRUMENTS == 0 then
+        return
+    end
+    for _, sec_code in ipairs(INSTRUMENTS) do
+        local cc = INSTRUMENT_CLASSES[sec_code] or ""
+        if cc == "SPBFUT" then
+            local price
+            for _, param in ipairs(FUTURES_LAST_PARAMS) do
+                local ok_p, p = pcall(getParamEx, cc, sec_code, param)
+                if ok_p and p and p.param_value then
+                    local v = tonumber(p.param_value)
+                    if v and v > 0 then
+                        price = v
+                        break
+                    end
+                end
+            end
+            if price then
+                -- lotsize фьючерса (множитель контракта)
+                local lotsize = 1
+                local ok_l, lp = pcall(getParamEx, cc, sec_code, "LOTSIZE")
+                if ok_l and lp and lp.param_value then
+                    local lv = tonumber(lp.param_value)
+                    if lv and lv > 1 then
+                        lotsize = lv
+                    end
+                end
+                price = price * lotsize
+                price_cache[sec_code] = {
+                    price = price,
+                    qty = 0,
+                    value = 0,
+                    class_code = cc,
+                    time = os.time()
+                }
+            end
+        end
     end
 end
 
@@ -461,8 +515,10 @@ function OnTrade(trade)
     -- brokerref — поле "Комментарий" в терминале QUIK, содержит код клиента
     local brokerref = tostring(trade.brokerref or "")
     local client_code = tostring(trade.client_code or "")
+    -- trade_num как СТРОКА: номера фьючерсных сделок (SPBFUT) 19-значные (>2^53),
+    -- передача числом через cjson теряет точность и разные сделки сливаются в одну.
     table.insert(trade_cache, {
-        trade_num = tonumber(trade.trade_num) or 0,
+        trade_num = tostring(trade.trade_num or ""),
         sec_code = sec_code,
         class_code = class_code,
         price = price,
@@ -563,8 +619,9 @@ local function load_existing_trades()
                 -- brokerref — поле "Комментарий" в терминале QUIK, содержит код клиента
                 local brokerref = tostring(trade.brokerref or "")
                 local client_code = tostring(trade.client_code or "")
+                -- trade_num как СТРОКА (сохраняем точность 19-значных номеров SPBFUT)
                 table.insert(trade_cache, {
-                    trade_num = tonumber(trade.trade_num) or 0,
+                    trade_num = tostring(trade.trade_num or ""),
                     sec_code = sec_code,
                     class_code = class_code,
                     price = tonumber(trade.price) or 0,
@@ -648,6 +705,9 @@ function main()
 
         -- Отправка пачки цен по таймеру
         if now - last_send_time >= SEND_INTERVAL then
+            -- Для фьючерсов (SPBFUT) рыночная цена берётся из getParamEx(LAST),
+            -- т.к. OnAllTrade для срочного рынка не приходит
+            pcall(refresh_futures_prices)
             pcall(send_prices)
             last_send_time = now
         end

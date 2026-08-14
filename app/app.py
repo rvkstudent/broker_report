@@ -659,16 +659,9 @@ def api_trade():
 
     save_quik_trades(data['trades'])
 
-    # Also update current prices from trade data
-    for t in data['trades']:
-        if t.get('sec_code') and t.get('price'):
-            save_price(
-                sec_code=t['sec_code'],
-                price=float(t['price']),
-                qty=int(t.get('qty', 0)),
-                value=float(t.get('value', 0)),
-                class_code=t.get('class_code', '')
-            )
+    # НЕ перезаписываем current_price ценой сделки: цена покупки/продажи —
+    # это не текущая рыночная цена (особенно для фьючерсов SPBFUT, где цена
+    # контракта отличается). Рыночные цены приходят отдельно через /api/price.
 
     return jsonify({'status': 'ok', 'count': len(data['trades'])}), 200
 
