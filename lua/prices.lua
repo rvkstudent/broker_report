@@ -415,6 +415,26 @@ local function normalize_trade_datetime(dt)
     return nil, nil
 end
 
+-- Цена фьючерса (SPBFUT): QUIK отдаёт LAST/цену сделки за единицу (акцию/пункт),
+-- а на сервере фьючерс хранится как price = стоимость контракта (LAST × lotsize)
+-- и qty = контракты. Чтобы не сбивать прогноз P&L (иначе ложный убыток -99%,
+-- когда цену за штуку сравнивают с ценой контракта), приводим цену фьючерса
+-- к стоимости контракта, умножая на lotsize (как в refresh_futures_prices).
+local function futures_price(price, class_code, sec_code)
+    if class_code ~= "SPBFUT" or not price or price <= 0 then
+        return price
+    end
+    local lotsize = 1
+    local ok, lp = pcall(getParamEx, class_code, sec_code, "LOTSIZE")
+    if ok and lp and lp.param_value then
+        local lv = tonumber(lp.param_value)
+        if lv and lv > 1 then
+            lotsize = lv
+        end
+    end
+    return price * lotsize
+end
+
 -- Callback QUIK: обезличенные сделки (для отслеживания цен моих инструментов)
 function OnAllTrade(alltrade)
     local sec_code = alltrade.sec_code
@@ -427,7 +447,7 @@ function OnAllTrade(alltrade)
 
     -- Обновляем цену (только последнюю, в trade_cache НЕ добавляем)
     price_cache[sec_code] = {
-        price = tonumber(alltrade.price) or 0,
+        price = futures_price(tonumber(alltrade.price) or 0, class_code, sec_code),
         qty = tonumber(alltrade.qty) or 0,
         value = tonumber(alltrade.value) or 0,
         class_code = class_code,
@@ -450,7 +470,9 @@ function OnTrade(trade)
     local qty = tonumber(trade.qty or trade.quantity) or 0
     local value = tonumber(trade.value) or 0
     price_cache[sec_code] = {
-        price = price,
+        -- Для фьючерсов (SPBFUT) цена сделки — за единицу; приводим к стоимости
+        -- контракта (× lotsize), иначе прогноз P&L будет показывать ложный -99%.
+        price = futures_price(price, class_code, sec_code),
         qty = qty,
         value = value,
         class_code = class_code,

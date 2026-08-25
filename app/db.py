@@ -1116,6 +1116,7 @@ def _match_trades_lifo(report_id=None, date_from=None, date_to=None, broker=None
             FROM trade
             WHERE {where_sql}
               AND (trade.class_code IS NULL OR trade.class_code != 'INSTR')
+              AND (trade.comment IS NULL OR trade.comment NOT LIKE '%sp_repo%')
             ORDER BY substr(trade_date,7,4)||substr(trade_date,4,2)||substr(trade_date,1,2), trade_time, LENGTH(deal_number), deal_number
         """, params).fetchall()
 
@@ -1144,6 +1145,7 @@ def _match_trades_lifo(report_id=None, date_from=None, date_to=None, broker=None
             FROM trade
             WHERE source='quik' AND (broker IS NULL OR broker='')
               AND (class_code IS NULL OR class_code != 'INSTR')
+              AND (comment IS NULL OR comment NOT LIKE '%sp_repo%')
         """, []).fetchall()
         if quik_nobroker:
             q_trades = []
@@ -1716,7 +1718,7 @@ def get_quik_positions(broker=None):
        broker: если задан и != 'all' — учитывать позиции только этого брокера.
     """
     conn = get_connection()
-    where = "source='quik' AND side IN ('Покупка', 'Продажа') AND quantity > 0 AND (class_code IS NULL OR class_code != 'INSTR')"
+    where = "source='quik' AND side IN ('Покупка', 'Продажа') AND quantity > 0 AND (class_code IS NULL OR class_code != 'INSTR') AND (comment IS NULL OR comment NOT LIKE '%sp_repo%')"
     params = []
     if broker and broker != 'all':
         where += " AND broker=?"
