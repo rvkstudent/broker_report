@@ -1714,34 +1714,82 @@ def get_quik_positions(broker=None):
     """Aggregate QUIK positions from OnTrade data (читает из trade, source='quik').
        side='Покупка' → +qty, side='Продажа' → -qty.
        broker: если задан и != 'all' — учитывать позиции только этого брокера.
+
+       Количество — нетто (покупки − продажи). Средняя цена и стоимость
+       считаются по лотам, оставшимся «в позиции» после LIFO-списания продажами
+       (как в _run_lifo). Раньше сумма ВСЕХ покупок делилась на остаток — для
+       частично закрытых позиций цена раздувалась (SBERF: 166 029 вместо ~27 9xx,
+       SBER: 140 285 вместо ~280). Несопоставленные продажи (нет истории покупок
+       в QUIK-наборе) уменьшают итоговый остаток.
     """
+    from collections import defaultdict
     conn = get_connection()
     where = "source='quik' AND side IN ('Покупка', 'Продажа') AND quantity > 0 AND (class_code IS NULL OR class_code != 'INSTR')"
     params = []
     if broker and broker != 'all':
         where += " AND broker=?"
         params.append(broker)
-    rows = conn.execute(f"""
-        SELECT security_code AS sec_code, class_code,
-               SUM(CASE WHEN side='Продажа' THEN -quantity ELSE quantity END) AS net_qty,
-               SUM(CASE WHEN side='Продажа' THEN 0 ELSE amount END) AS buy_value
+    trades_raw = conn.execute(f"""
+        SELECT security_code, security_name, class_code, side, quantity, amount,
+               broker_fee, exchange_fee, nkd
         FROM trade
         WHERE {where}
-        GROUP BY security_code, class_code
-        HAVING net_qty > 0
-        ORDER BY security_code
+        ORDER BY security_code, class_code,
+                 substr(trade_date,7,4)||substr(trade_date,4,2)||substr(trade_date,1,2),
+                 trade_time, LENGTH(deal_number), deal_number
     """, params).fetchall()
     conn.close()
+
+    by_key = defaultdict(list)
+    for t in trades_raw:
+        by_key[(t['security_code'], t['class_code'] or '')].append(t)
+
     result = []
-    for r in rows:
-        avg_price = round(r['buy_value'] / r['net_qty'], 2) if r['net_qty'] > 0 else 0
+    for (sec_code, class_code), txns in by_key.items():
+        # LIFO: покупки в очередь, продажи списывают последние покупки.
+        buy_queue = []  # [qty, unit_price]
+        unmatched_sell = 0
+        for t in txns:
+            qty = t['quantity']
+            if t['side'] == 'Покупка':
+                amount_eff = t['amount'] or 0
+                if _is_bond_class(class_code):
+                    amount_eff = amount_eff + (t['nkd'] or 0)
+                unit = amount_eff / qty if qty > 0 else 0
+                buy_queue.append([qty, unit])
+            else:  # Продажа
+                remaining = qty
+                while remaining > 0 and buy_queue:
+                    avail = buy_queue[-1][0]
+                    used = min(avail, remaining)
+                    buy_queue[-1][0] -= used
+                    if buy_queue[-1][0] <= 0:
+                        buy_queue.pop()
+                    remaining -= used
+                if remaining > 0:
+                    unmatched_sell += remaining
+
+        net_qty = sum(l[0] for l in buy_queue) - unmatched_sell
+        if net_qty <= 0:
+            continue
+        # Оставшиеся лоты — с начала очереди (самые ранние из несписанных покупок)
+        total_cost = 0.0
+        remaining = net_qty
+        for lot in buy_queue:
+            if remaining <= 0:
+                break
+            take = min(lot[0], remaining)
+            total_cost += take * lot[1]
+            remaining -= take
         result.append({
-            'sec_code': r['sec_code'],
-            'class_code': r['class_code'],
-            'qty': r['net_qty'],
-            'avg_price': avg_price,
-            'total_cost': round(r['buy_value'], 2),
+            'sec_code': sec_code,
+            'class_code': class_code,
+            'qty': net_qty,
+            'avg_price': round(total_cost / net_qty, 2) if net_qty > 0 else 0,
+            'total_cost': round(total_cost, 2),
         })
+
+    result.sort(key=lambda x: x['sec_code'])
     return result
 
 
