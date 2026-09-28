@@ -650,13 +650,6 @@ def api_trade():
     if not data['trades']:
         return jsonify({'error': 'Empty trades list'}), 400
 
-    # DEBUG: пишем полный JSON первого трейда
-    if data['trades']:
-        import json as _json
-        t0 = data['trades'][0]
-        with open(r'C:\Users\kozlov.r\YandexDisk\ProjectSQL\Broker_Report\debug_trade.json', 'w') as f:
-            _json.dump(t0, f, indent=2, ensure_ascii=False, default=str)
-
     save_quik_trades(data['trades'])
 
     # НЕ перезаписываем current_price ценой сделки: цена покупки/продажи —
