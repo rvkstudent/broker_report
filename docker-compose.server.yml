@@ -41,8 +41,13 @@ services:
       - ./secrets/firebase-key.json:/app/app/firebase-key.json:ro
       - ./secrets/password_hash.txt:/app/secrets/password_hash.txt:ro
       - ./logs:/app/logs
+    ports:
+      # Порт публикуется ТОЛЬКО на localhost сервера — для SSH-туннеля с машины QUIK:
+      #   ssh -N -L 5180:127.0.0.1:5000 roman@78.17.114.178
+      # Из интернета порт недоступен: наружу открыт только Cloudflare Tunnel.
+      - "127.0.0.1:5000:5000"
     expose:
-      - "5000"          # наружу НЕ публикуем — только внутри сети стека
+      - "5000"          # внутри сети стека (cloudflared -> http://broker-report:5000)
     networks:
       - broker-net
     logging:
