@@ -502,6 +502,7 @@ def index():
                            open_codes=open_codes,
                            repo_total=repo_total,
                            trade_fee_rate=TRADE_FEE_RATE,
+                           price_map=price_map,
                            quik_trades=quik_trades,
                            prices=prices,
                            quik_positions=quik_pos,
@@ -748,6 +749,35 @@ def api_quik_connected():
         except Exception:
             pass
     return jsonify({'connected': False}), 200
+
+
+@flask_app.route('/api/forecast', methods=['GET'])
+def api_forecast():
+    """Get forecast P&L for open positions based on current prices."""
+    prices = get_current_prices()
+    price_map = {p['sec_code']: p['price'] for p in prices}
+    open_trades = list(get_open_trades(None, '', '', ''))
+
+    TRADE_FEE_RATE = 0.000685
+    forecast_map = {}
+    if open_trades:
+        for o in open_trades:
+            code = o['security_code']
+            cur = price_map.get(code, 0)
+            gross = (cur - o['buy_price']) * o['qty']
+            buy_fee = o['total_cost'] * TRADE_FEE_RATE
+            sell_fee = cur * o['qty'] * TRADE_FEE_RATE
+            net = gross - buy_fee - sell_fee
+            forecast_map[code] = forecast_map.get(code, 0) + net
+
+    result = {}
+    for code, val in forecast_map.items():
+        result[code] = {
+            'forecast': round(val, 2),
+            'current_price': price_map.get(code, 0),
+            'net_profit': None,  # заполняется на клиенте из HTML
+        }
+    return jsonify(result), 200
 
 
 TICKER_LOGO_COLORS = {
