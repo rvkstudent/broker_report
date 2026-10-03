@@ -34,6 +34,15 @@ rsync -av --delete \
   ./ vps-root:/home/roman/broker-report/
 ```
 
+> Если `rsync` запускается от `root` (`vps-root`), владельцами файлов станут `root`,
+> и дальше `docker compose` придётся запускать через `sudo` (он не сможет прочитать
+> `.env`). После переноса верните владельца:
+>
+> ```bash
+> ssh vps-root 'chown -R roman:roman /home/roman/broker-report'
+> ssh vps-root 'chmod 600 /home/roman/broker-report/.env; chmod 700 /home/roman/broker-report/secrets; chmod 600 /home/roman/broker-report/secrets/*'
+> ```
+
 Ключ Firebase — отдельно, только по защищённому каналу:
 
 ```bash
@@ -127,6 +136,39 @@ return {
 Файл `config.local.lua` в `.gitignore` — в публичный репозиторий не попадёт.
 Если проверка TLS не пройдёт (старый корневой сертификат в QUIK), в этом же
 файле можно поставить `verify_tls = false` — но это снижает защиту канала.
+
+### 5.1. Если DNS для `broker.roman-it.dev` ещё не создан (SSH-туннель)
+
+Туннель Cloudflare требует DNS-записи. Пока её нет, можно ходить на сервер по
+SSH-туннелю: наружу порты при этом остаются закрытыми, трафик шифрует SSH.
+
+На сервере порт `broker-report` публикуется только на его localhost
+(`ports: ["127.0.0.1:5000:5000"]` в `docker-compose.server.yml`) — из интернета он
+недоступен, но SSH-форвард до него дотягивается.
+
+На машине с QUIK:
+
+```bash
+ssh -N -L 5180:127.0.0.1:5000 roman@78.17.114.178
+```
+
+В `config.local.lua` указать локальный конец туннеля:
+
+```lua
+return {
+    api_base  = "http://127.0.0.1:5180",
+    api_token = "<токен из init-secrets.sh>",
+    timeout   = 15,
+}
+```
+
+Проверка: `curl http://127.0.0.1:5180/healthz` → `{"status":"ok"}`.
+Порт 5180 выбран, чтобы не конфликтовать с локальным сервером на 5000.
+
+Туннель нужно держать поднятым: если он упал, QUIK получает
+`connection refused`. Сделки при этом не теряются — скрипт держит их в очереди
+(до 2000) и отправляет после восстановления связи, а при перезапуске скрипта
+подтягивает историю сделок заново (`load_existing_trades`).
 
 ---
 
