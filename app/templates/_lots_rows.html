@@ -1,0 +1,22 @@
+{# Строки таблицы «Детали» на дашборде.
+   Отдаётся отдельно через /api/lots: полный список лотов весит несколько
+   мегабайт, и держать его в HTML страницы (свёрнутым) бессмысленно —
+   блок «Детали» подгружает его при первом раскрытии. #}
+{% for lot in lots %}
+{% set net = lot.profit - lot.buy_fee - lot.sell_fee %}
+<tr data-has-open="{{ 'true' if lot.security_code in open_codes else 'false' }}">
+    <td><small>{{ lot.security_code }}</small></td>
+    <td>{{ lot.qty }}</td>
+    <td><small>{{ lot.buy_date }}</small></td>
+    <td class="text-end">{{ '{:,.2f}'.format(lot.buy_price) }}</td>
+    <td class="text-end">{{ '{:,.2f}'.format(lot.buy_amount) }}</td>
+    <td><small>{{ lot.sell_date }}</small></td>
+    <td class="text-end">{{ '{:,.2f}'.format(lot.sell_price) }}</td>
+    <td class="text-end">{{ '{:,.2f}'.format(lot.sell_amount) }}</td>
+    <td class="text-end {{ 'profit-positive' if lot.profit >= 0 else 'profit-negative' }}">
+        {{ '{:+,.2f}'.format(lot.profit) }}</td>
+    <td class="text-end text-danger"><small>{{ '{:,.2f}'.format(lot.buy_fee + lot.sell_fee) }}</small></td>
+    <td class="text-end {{ 'profit-positive' if net >= 0 else 'profit-negative' }}">
+        {{ '{:+,.2f}'.format(net) }}</td>
+</tr>
+{% endfor %}

@@ -2,6 +2,7 @@
 
 import os
 import glob
+import mimetypes
 import secrets
 import threading
 import time
@@ -29,6 +30,15 @@ from app.allowed_devices import (is_device_allowed, add_pending_device,
 from app.auth import register_auth, auth_enabled
 
 flask_app = Flask(__name__, template_folder='templates')
+
+# Шрифт иконок Bootstrap отдаётся Python'ом как application/octet-stream:
+# файла mimetypes.types_map для .woff2 в slim-образе нет. Если рядом появится
+# X-Content-Type-Options: nosniff (его добавляет Cloudflare), браузер откажется
+# применять шрифт и все иконки bi-* превратятся в квадратики. Регистрируем тип
+# явно — это надёжнее, чем рассчитывать на системную таблицу MIME.
+mimetypes.add_type('font/woff2', '.woff2')
+mimetypes.add_type('font/woff', '.woff')
+mimetypes.add_type('font/ttf', '.ttf')
 
 
 def _resolve_secret_key() -> str:
@@ -361,19 +371,33 @@ def trades_view():
 NALOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'reports', 'nalog')
 os.makedirs(NALOG_DIR, exist_ok=True)
 
+# Отметки времени уже разобранных налоговых файлов: путь -> mtime.
+# Нужны, чтобы не перечитывать xlsx на каждый запрос страницы «Налоги».
+_nalog_imported: dict[str, float] = {}
+
 
 @flask_app.route('/nalog')
 def nalog_view():
     """Страница налоговых отчётов со сводной таблицей (инструменты × годы)."""
-    # Автоимпорт новых файлов
+    # Автоимпорт новых файлов. Разбирать xlsx на каждый заход нельзя: это
+    # чтение и разбор мегабайтов на каждый запрос. Держим отметки времени
+    # разобранных файлов и трогаем только изменившиеся.
     if os.path.exists(NALOG_DIR):
         for fname in sorted(os.listdir(NALOG_DIR)):
-            if fname.lower().endswith('.xlsx'):
-                fp = os.path.join(NALOG_DIR, fname)
-                try:
-                    parse_nalog_report(fp)
-                except Exception:
-                    pass
+            if not fname.lower().endswith('.xlsx'):
+                continue
+            fp = os.path.join(NALOG_DIR, fname)
+            try:
+                mtime = os.path.getmtime(fp)
+            except OSError:
+                continue
+            if _nalog_imported.get(fp) == mtime:
+                continue
+            try:
+                parse_nalog_report(fp)
+                _nalog_imported[fp] = mtime
+            except Exception:
+                pass
 
     years = get_nalog_years()
     flat = get_nalog_summary()
@@ -401,13 +425,35 @@ def nalog_view():
     tax_dict = {t['year']: t for t in get_nalog_tax_summary_by_year()}
 
     # Итоги по году — используем broker_result (фин. результат из сводки отчёта)
+    # Базу для итогов всегда строим по сделкам, а официальный broker_result
+    # накладываем сверху, если сводка по этому году есть.
+    #
+    # Так страница не падает и не пустует, когда детальные строки пришли из
+    # Firebase, а xlsx со сводкой ещё не загружен: раньше year_totals в этом
+    # случае оставался пустым, шаблон обращался к yt.income и отдавал 500.
     year_totals = {}
+    for r in flat:
+        t = year_totals.setdefault(r['year'], {
+            'deals': 0, 'income': 0.0, 'amount': 0.0, 'pos': 0, 'neg': 0,
+        })
+        t['deals'] += r['deals'] or 0
+        t['income'] += r['total_income'] or 0
+        t['amount'] += r['total_amount'] or 0
+        t['pos'] += r['positive_deals'] or 0
+        t['neg'] += r['negative_deals'] or 0
+
+    # Годы, у которых все строки без названия инструмента, в flat не попадают,
+    # но в списке years есть — заводим их явно, чтобы ключ существовал всегда.
+    for y in years:
+        year_totals.setdefault(y, {
+            'deals': 0, 'income': 0.0, 'amount': 0.0, 'pos': 0, 'neg': 0,
+        })
+
     for y, td in tax_dict.items():
-        year_totals[y] = {
-            'deals': 0,
-            'income': td.get('broker_result', 0),
-            'amount': 0.0, 'pos': 0, 'neg': 0,
-        }
+        t = year_totals.setdefault(y, {
+            'deals': 0, 'income': 0.0, 'amount': 0.0, 'pos': 0, 'neg': 0,
+        })
+        t['income'] = td.get('broker_result', t['income'])
 
     # Группировка ОФЗ / Прочие → {grp: {year: {data}}}
     group_summary = get_nalog_group_summary()
@@ -455,7 +501,8 @@ def index():
 
     reports = get_reports_list()
     profit = get_trade_profit(None, df_dmy, dt_dmy, broker)
-    lots = get_trade_lots(None, df_dmy, dt_dmy, broker)
+    # Лоты не считаем: блок «Детали» грузит их отдельно через /api/lots,
+    # а полный список — это тысячи строк и сотни миллисекунд на запрос.
     open_trades = get_open_trades(None, df_dmy, dt_dmy, broker)
     instruments = get_instrument_summary(None, df_dmy, dt_dmy, broker)
 
@@ -554,7 +601,7 @@ def index():
 
     return render_template('dashboard.html',
                            reports=reports,
-                           profit=profit, lots=lots,
+                           profit=profit,
                            open_trades=open_trades,
                            instruments=instruments,
                            open_codes=open_codes,
@@ -703,6 +750,33 @@ def api_accounts():
     """).fetchall()
     conn.close()
     return jsonify([dict(r) for r in rows])
+
+
+# ── Detail lots API ───────────────────────────────────────────
+
+@flask_app.route('/api/lots', methods=['GET'])
+def api_lots():
+    """Строки блока «Детали» на дашборде.
+
+    Лотов набираются тысячи, и в HTML страницы они давали больше двух
+    мегабайт, хотя блок по умолчанию свёрнут. Отдаём их отдельно и
+    подгружаем при первом раскрытии.
+    """
+    def to_dmy(iso):
+        parts = (iso or '').split('-')
+        if len(parts) == 3:
+            return f'{parts[2]}.{parts[1]}.{parts[0]}'
+        return iso or ''
+
+    df_dmy = to_dmy(request.args.get('date_from', ''))
+    dt_dmy = to_dmy(request.args.get('date_to', ''))
+    broker = request.args.get('broker', 'all')
+
+    lots = get_trade_lots(None, df_dmy, dt_dmy, broker)
+    instruments = get_instrument_summary(None, df_dmy, dt_dmy, broker)
+    open_codes = set(i['security_code'] for i in instruments) if instruments else set()
+
+    return render_template('_lots_rows.html', lots=lots, open_codes=open_codes)
 
 
 # ── Instruments API ───────────────────────────────────────────

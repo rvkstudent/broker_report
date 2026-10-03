@@ -255,6 +255,14 @@ def init_db():
             sec_code    TEXT NOT NULL,
             updated_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
         )""",
+        # Таблица nalog крупная (сотни тысяч строк), а страница «Налоги»
+        # группирует её по году и инструменту. Без индексов это 4–5 полных
+        # сканов на каждый заход — около секунды. Строки вставляются пакетно
+        # (DELETE + INSERT по source_file), поэтому индексы не тормозят импорт.
+        """CREATE INDEX IF NOT EXISTS idx_nalog_year ON nalog(year)""",
+        """CREATE INDEX IF NOT EXISTS idx_nalog_instr ON nalog(instrument_code, instrument_name, year)""",
+        """CREATE INDEX IF NOT EXISTS idx_nalog_source ON nalog(source_file, year)""",
+        """CREATE INDEX IF NOT EXISTS idx_nalog_tax_year ON nalog_tax_summary(year)""",
     ]
     for d in ddl:
         try:
@@ -1095,6 +1103,21 @@ def _match_trades_lifo(report_id=None, date_from=None, date_to=None, broker=None
 
     Returns (matched_lots, unmatched_buys).
     """
+    # Одну и ту же сводку за один заход считают три функции: прибыль, открытые
+    # позиции и сводка по инструментам. Полный LIFO стоит ~90 мс, поэтому
+    # держим результат в flask.g — он живёт ровно один запрос и устареть
+    # не успевает (в отличие от кэша уровня модуля).
+    memo_key = (report_id, date_from, date_to, broker)
+    memo = None
+    try:
+        from flask import g, has_request_context
+        if has_request_context():
+            memo = g.setdefault('_lifo_memo', {})
+    except Exception:
+        memo = None
+    if memo is not None and memo_key in memo:
+        return memo[memo_key]
+
     conn = get_connection()
 
     if broker and broker != 'all':
@@ -1193,7 +1216,10 @@ def _match_trades_lifo(report_id=None, date_from=None, date_to=None, broker=None
         all_lots = [l for l in all_lots if _norm_date(l['sell_date']) >= d_from]
 
     conn.close()
-    return all_lots, all_unmatched
+    result = (all_lots, all_unmatched)
+    if memo is not None:
+        memo[memo_key] = result
+    return result
 
 
 def get_financial_result(report_id=None):

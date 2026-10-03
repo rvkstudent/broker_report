@@ -10,8 +10,12 @@
     <meta name="format-detection" content="telephone=no">
     <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>{% block title %}Анализ брокерских отчетов{% endblock %}</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+    {# Bootstrap и иконки лежат в app/static/vendor и отдаются тем же сервером,
+       что и страница. С CDN страница зависела от jsdelivr: если он тормозит
+       или недоступен, вёрстка приезжает без стилей, а разбор HTML встаёт на
+       блокирующем <script> — страница открывается частично и «висит». #}
+    <link href="{{ url_for('static', filename='vendor/bootstrap-5.3.3/bootstrap.min.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', filename='vendor/bootstrap-icons-1.11.3/bootstrap-icons.css') }}" rel="stylesheet">
     <style>
         html, body { overflow-x: hidden; }
         body { background: #f5f7fb; -webkit-text-size-adjust: 100%; }
@@ -140,7 +144,8 @@
         {% block content %}{% endblock %}
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    {# Свой скрипт идёт ДО Bootstrap: если его файл почему-то не загрузится,
+       CSRF-токен всё равно подставится, а таблицы — обернутся. #}
     <script>
         // Подставляем CSRF-токен во все POST-формы, где его ещё нет.
         // Токен лежит в мета-теге и недоступен сторонним сайтам (same-origin policy).
@@ -200,6 +205,9 @@
 
         window.addEventListener('load', function () { window.brokerWrapTables(); });
     </script>
+
+    {# Bootstrap JS — нужен для модалок, вкладок и сворачивающихся блоков. #}
+    <script src="{{ url_for('static', filename='vendor/bootstrap-5.3.3/bootstrap.bundle.min.js') }}"></script>
     {% block scripts %}{% endblock %}
 </body>
 </html>

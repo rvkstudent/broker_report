@@ -199,6 +199,8 @@
         </table>
 
         <!-- Detail lots -->
+        <!-- Строки подгружает /api/lots при первом раскрытии: в разметке они
+             давали больше двух мегабайт на каждый заход, хотя блок свёрнут. -->
         <div class="collapse" id="profitDetail">
             <div class="table-responsive">
                 <table class="table table-sm table-hover mb-0" style="font-size:12px">
@@ -211,25 +213,8 @@
                             <th class="text-end">Ком.</th><th class="text-end">Чистая</th>
                         </tr>
                     </thead>
-                    <tbody>
-                    {% for lot in lots %}
-                        {% set net = lot.profit - lot.buy_fee - lot.sell_fee %}
-                        <tr data-has-open="{{ 'true' if lot.security_code in open_codes else 'false' }}">
-                            <td><small>{{ lot.security_code }}</small></td>
-                            <td>{{ lot.qty }}</td>
-                            <td><small>{{ lot.buy_date }}</small></td>
-                            <td class="text-end">{{ '{:,.2f}'.format(lot.buy_price) }}</td>
-                            <td class="text-end">{{ '{:,.2f}'.format(lot.buy_amount) }}</td>
-                            <td><small>{{ lot.sell_date }}</small></td>
-                            <td class="text-end">{{ '{:,.2f}'.format(lot.sell_price) }}</td>
-                            <td class="text-end">{{ '{:,.2f}'.format(lot.sell_amount) }}</td>
-                            <td class="text-end {{ 'profit-positive' if lot.profit >= 0 else 'profit-negative' }}">
-                                {{ '{:+,.2f}'.format(lot.profit) }}</td>
-                            <td class="text-end text-danger"><small>{{ '{:,.2f}'.format(lot.buy_fee + lot.sell_fee) }}</small></td>
-                            <td class="text-end {{ 'profit-positive' if net >= 0 else 'profit-negative' }}">
-                                {{ '{:+,.2f}'.format(net) }}</td>
-                        </tr>
-                    {% endfor %}
+                    <tbody id="lotsBody">
+                        <tr><td colspan="11" class="text-center text-muted p-3">Загрузка…</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -579,14 +564,9 @@
                             </tr>
                         </thead>
                         <tbody>
-                        {% for p in prices %}
-                            <tr data-code="{{ p.sec_code }}" data-mine="{{ '1' if p.sec_code in my_price_codes else '0' }}"{% if p.sec_code not in my_price_codes %} style="display:none"{% endif %}>
-                                <td><small><img class="tkr-logo" src="/api/logo/{{ p.sec_code }}" alt="" loading="lazy" onerror="this.style.display='none'" /> {{ p.sec_code }}</small></td>
-                                <td class="text-end fw-bold price-cell">{{ '{:,.4f}'.format(p.price) }}</td>
-                                <td class="text-end">{{ p.qty }}</td>
-                                <td><small class="ts-cell">{{ p.timestamp[11:19] }}</small></td>
-                            </tr>
-                        {% endfor %}
+                        {# Строки цен не рендерим на сервере: refreshPrices()
+                           ниже всё равно перезаписывает tbody из /api/prices
+                           каждые 3 секунды. 777 строк ≈ 400 КБ впустую. #}
                         </tbody>
                     </table>
                 </div>
@@ -750,10 +730,32 @@ function applyPriceFilter() {
 }
 
 // Обновление таблицы цен
+// ── Цены: один запрос на два блока ────────────────────────────
+// /api/prices отдаёт ~88 КБ и тянет запрос к БД, а забирать его нужно сразу
+// двум таблицам — «Цены» и «Открытые сделки» — причём оба таймера тикают
+// каждые 3 с. Без общего кэша это два одинаковых запроса на каждый тик
+// (~176 КБ и два обращения к БД за 3 с). Держим один запрос на TTL.
+const PRICES_TTL_MS = 2500;
+let _pricesPromise = null;
+let _pricesAt = 0;
+
+function getPrices() {
+    const now = Date.now();
+    if (_pricesPromise && now - _pricesAt < PRICES_TTL_MS) return _pricesPromise;
+    _pricesAt = now;
+    _pricesPromise = fetch('/api/prices').then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+    });
+    // Ошибку не кэшируем: обнуляем ссылку, чтобы следующий тик попробовал снова.
+    // Исходный промис остаётся отклонённым — вызывающий catch сохранит старые данные.
+    _pricesPromise.catch(function () { _pricesPromise = null; });
+    return _pricesPromise;
+}
+
 async function refreshPrices() {
     try {
-        let r = await fetch('/api/prices');
-        let data = await r.json();
+        let data = await getPrices();
         let tb = document.querySelector('#pricesTable tbody');
         if (!tb) return;
         let html = '';
@@ -857,8 +859,7 @@ async function refreshForecast() {
 const TRADE_FEE_RATE = 0.000685;
 async function refreshOpenTrades() {
     try {
-        let r = await fetch('/api/prices');
-        let prices = await r.json();
+        let prices = await getPrices();
         let pmap = {};
         for (let p of prices) pmap[p.sec_code] = p.price;
 
@@ -989,6 +990,51 @@ setInterval(refreshForecast, 5000);
 // События фильтра цен
 document.getElementById('pricesSearch').addEventListener('input', applyPriceFilter);
 document.getElementById('pricesShowAll').addEventListener('change', applyPriceFilter);
+
+// ── Детальные лоты: грузим при первом раскрытии блока ──────────
+(function () {
+    const detail = document.getElementById('profitDetail');
+    const body = document.getElementById('lotsBody');
+    if (!detail || !body) return;
+
+    let loaded = false;
+    let pending = null;   // идущий запрос: защищает от двух загрузок подряд
+
+    function loadLots() {
+        if (loaded) return pending || Promise.resolve();
+        if (pending) return pending;
+        const qs = new URLSearchParams({ broker: CURRENT_BROKER });
+        if (DATE_FROM_ISO) qs.set('date_from', DATE_FROM_ISO);
+        if (DATE_TO_ISO) qs.set('date_to', DATE_TO_ISO);
+        pending = fetch('/api/lots?' + qs.toString())
+            .then(function (r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.text();
+            })
+            .then(function (html) {
+                html = html.trim();
+                body.innerHTML = html ||
+                    '<tr><td colspan="11" class="text-center text-muted p-3">Нет данных.</td></tr>';
+                loaded = true;
+                // Если «только открытые» уже включён — применить к новым строкам
+                toggleOpenOnly();
+            })
+            .catch(function () {
+                body.innerHTML = '<tr><td colspan="11" class="text-center text-danger p-3">' +
+                    'Не удалось загрузить детали. Обновите страницу.</td></tr>';
+            })
+            .then(function () { pending = null; });
+        return pending;
+    }
+
+    // show.bs.collapse приходит из Bootstrap; на случай его отсутствия
+    // вешаем ещё и обычный click по кнопке «Детали». Оба обработчика могут
+    // сработать на одно раскрытие, поэтому loadLots переиспользует уже
+    // идущий запрос, а не запускает второй.
+    detail.addEventListener('show.bs.collapse', loadLots);
+    const btn = document.querySelector('[data-bs-target="#profitDetail"]');
+    if (btn) btn.addEventListener('click', loadLots);
+})();
 </script>
 
 <!-- █████  Reports list  █████ -->
