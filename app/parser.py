@@ -3,7 +3,7 @@
 import os
 import re
 from bs4 import BeautifulSoup
-from app.db import get_connection, init_db
+from app.db import get_connection, init_db, get_instrument_lotsize
 from app.parser_vtb import parse_vtb_report
 from app.parser_mytrades import parse_mytrades
 from app.parser_openbroker import parse_openbroker_report
@@ -183,88 +183,138 @@ def _find_table_by_header(soup, header_text):
 
 
 def _parse_trades(soup, cur, report_id):
-    """Parse the сделки купли/продажи ценных бумаг table."""
-    # Find the trade table - it has a specific header
+    """Parse tables of trades: stocks («Сделки купли/продажи ценных бумаг»)
+    and futures («Срочные сделки»). Отчёт — источник истины: существующие сделки
+    с тем же номером корректируются (сторона, цена, количество)."""
+    tables = {}
     for p_tag in soup.find_all(['p', 'p1']):
-        if 'Сделки купли/продажи ценных бумаг' in p_tag.get_text():
-            table = p_tag.find_next('table')
-            break
-    else:
-        # fallback: find table with header row containing "Дата заключения" and "Код ЦБ"
+        txt = p_tag.get_text()
+        if 'Сделки купли/продажи ценных бумаг' in txt and 'stocks' not in tables:
+            tables['stocks'] = p_tag.find_next('table')
+        if 'Срочные сделки' in txt and 'futures' not in tables:
+            tables['futures'] = p_tag.find_next('table')
+
+    if not tables:
+        # fallback: таблица с заголовком «Дата заключения»/«Код ЦБ»
         for table in soup.find_all('table'):
-            rows = table.find_all('tr')
-            for row in rows:
+            for row in table.find_all('tr'):
                 cells = row.find_all('td')
                 texts = [c.get_text(strip=True) for c in cells]
                 if 'Дата заключения' in texts and 'Код ЦБ' in texts and 'Вид' in texts:
+                    tables['stocks'] = table
                     break
-            else:
+            if 'stocks' in tables:
+                break
+        if not tables:
+            return  # нет таблиц сделок
+
+    for kind, table in tables.items():
+        for row in table.find_all('tr'):
+            cells = row.find_all('td')
+            if not cells:
                 continue
-            break
-        else:
-            return  # no trade table found
+            txt = row.get_text(strip=True)
+            if 'Площадка:' in txt:
+                continue
+            first_text = cells[0].get_text(strip=True)
+            if first_text in ('1', 'Дата заключения', '№ п/п'):
+                continue
+            if 'row-number' in (cells[0].get('class') or []):
+                continue
+            if 'Итого' in txt:
+                continue
+            if len(cells) < 10:
+                continue
 
-    rows = table.find_all('tr')
-    in_data = False
-    platform = ''
+            if kind == 'futures':
+                # Срочные сделки (фьючерсы), 12 колонок:
+                #   дата, расчёты, время, код (SBERF), «фьючерс», сторона, кол-во,
+                #   цена за ед. (акцию/пункт), комис. брокера, комис. биржи, № сделки, комментарий
+                try:
+                    trade_date = extract_text(cells[0])
+                    settle_date = extract_text(cells[1])
+                    trade_time = extract_text(cells[2])
+                    sec_code = extract_text(cells[3])
+                    # Импортируем только фьючерсы с известным коду кодом (как в QUIK/справочнике),
+                    # чтобы не плодить дубли под другим кодом (отчёт: MIX-9.26, QUIK: MXU6).
+                    if not cur.execute(
+                        "SELECT 1 FROM instrument WHERE sec_code=? AND class_code='SPBFUT'",
+                        (sec_code,)).fetchone():
+                        continue
+                    side = extract_text(cells[5])
+                    qty = parse_int(extract_text(cells[6]))
+                    price_unit = parse_float(extract_text(cells[7]))
+                    broker_fee = parse_float(extract_text(cells[8])) if len(cells) > 8 else 0
+                    exchange_fee = parse_float(extract_text(cells[9])) if len(cells) > 9 else 0
+                    deal_number = extract_text(cells[10]) if len(cells) > 10 else ''
+                    # Для согласованности с QUIK (price = стоимость контракта, qty = контракты)
+                    # умножаем цену за единицу на lotsize (для MXU6 lotsize=1 — цена не меняется).
+                    lotsize = get_instrument_lotsize(sec_code, 'SPBFUT')
+                    if lotsize <= 1:
+                        lotsize = 1
+                    price = round(price_unit * lotsize, 2)
+                    amount = round(qty * price, 2)
+                    sec_name, currency = sec_code, 'RUB'
+                    nkd, comment, status = 0, '', ''
+                except (IndexError, ValueError):
+                    continue
+            else:
+                try:
+                    trade_date = extract_text(cells[0])
+                    settle_date = extract_text(cells[1])
+                    trade_time = extract_text(cells[2])
+                    sec_name = extract_text(cells[3])
+                    sec_code = extract_text(cells[4])
+                    currency = extract_text(cells[5])
+                    side = extract_text(cells[6])
+                    qty = parse_int(extract_text(cells[7]))
+                    price = parse_float(extract_text(cells[8]))
+                    amount = parse_float(extract_text(cells[9]))
+                    nkd = parse_float(extract_text(cells[10])) if len(cells) > 10 else 0
+                    broker_fee = parse_float(extract_text(cells[11])) if len(cells) > 11 else 0
+                    exchange_fee = parse_float(extract_text(cells[12])) if len(cells) > 12 else 0
+                    deal_number = extract_text(cells[13]) if len(cells) > 13 else ''
+                    comment = extract_text(cells[14]) if len(cells) > 14 else ''
+                    status = extract_text(cells[15]) if len(cells) > 15 else ''
+                except (IndexError, ValueError):
+                    continue
 
-    for row in rows:
-        cells = row.find_all('td')
-        if not cells:
-            continue
+            if not trade_date or not sec_name or not side:
+                continue
+            if side not in ('Покупка', 'Продажа'):
+                continue
 
-        # Check for platform row
-        txt = row.get_text(strip=True)
-        if 'Площадка:' in txt:
-            platform = txt.replace('Площадка:', '').strip()
-            continue
-
-        # Skip header rows
-        first_text = cells[0].get_text(strip=True)
-        if first_text in ('1', 'Дата заключения', '№ п/п'):
-            continue
-        if 'row-number' in (cells[0].get('class') or []):
-            continue
-        if 'Итого' in txt:
-            continue
-
-        # Ensure we have enough columns
-        if len(cells) < 10:
-            continue
-
-        try:
-            trade_date = extract_text(cells[0])
-            settle_date = extract_text(cells[1])
-            trade_time = extract_text(cells[2])
-            sec_name = extract_text(cells[3])
-            sec_code = extract_text(cells[4])
-            currency = extract_text(cells[5])
-            side = extract_text(cells[6])
-            qty = parse_int(extract_text(cells[7]))
-            price = parse_float(extract_text(cells[8]))
-            amount = parse_float(extract_text(cells[9]))
-            nkd = parse_float(extract_text(cells[10])) if len(cells) > 10 else 0
-            broker_fee = parse_float(extract_text(cells[11])) if len(cells) > 11 else 0
-            exchange_fee = parse_float(extract_text(cells[12])) if len(cells) > 12 else 0
-            deal_number = extract_text(cells[13]) if len(cells) > 13 else ''
-            comment = extract_text(cells[14]) if len(cells) > 14 else ''
-            status = extract_text(cells[15]) if len(cells) > 15 else ''
-        except (IndexError, ValueError):
-            continue
-
-        if not trade_date or not sec_name or not side:
-            continue
-        if side not in ('Покупка', 'Продажа'):
-            continue
-
-        cur.execute("""
-            INSERT OR IGNORE INTO trade(report_id, trade_date, settle_date, trade_time,
-                security_name, security_code, currency, side, quantity, price,
-                amount, nkd, broker_fee, exchange_fee, deal_number, comment, status, source)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """, (report_id, trade_date, settle_date, trade_time,
-              sec_name, sec_code, currency, side, qty, price,
-              amount, nkd, broker_fee, exchange_fee, deal_number, comment, status, 'sber'))
+            # Отчёт — источник истины: если сделка с таким № уже есть (например, из QUIK,
+            # где сторона могла быть определена неверно по флагам), корректируем её значения,
+            # иначе вставляем новую строку с source='sber'.
+            if deal_number:
+                cur.execute("""
+                    UPDATE trade SET
+                        trade_date=?, settle_date=?, trade_time=?, security_name=?,
+                        security_code=?, currency=?, side=?, quantity=?, price=?, amount=?,
+                        nkd=?, broker_fee=?, exchange_fee=?, comment=?, status=?
+                    WHERE deal_number=? AND deal_number != ''
+                """, (trade_date, settle_date, trade_time, sec_name, sec_code, currency,
+                      side, qty, price, amount, nkd, broker_fee, exchange_fee, comment, status,
+                      deal_number))
+                if cur.rowcount == 0:
+                    cur.execute("""
+                        INSERT OR IGNORE INTO trade(report_id, trade_date, settle_date, trade_time,
+                            security_name, security_code, currency, side, quantity, price,
+                            amount, nkd, broker_fee, exchange_fee, deal_number, comment, status, source)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """, (report_id, trade_date, settle_date, trade_time,
+                          sec_name, sec_code, currency, side, qty, price,
+                          amount, nkd, broker_fee, exchange_fee, deal_number, comment, status, 'sber'))
+            else:
+                cur.execute("""
+                    INSERT OR IGNORE INTO trade(report_id, trade_date, settle_date, trade_time,
+                        security_name, security_code, currency, side, quantity, price,
+                        amount, nkd, broker_fee, exchange_fee, deal_number, comment, status, source)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """, (report_id, trade_date, settle_date, trade_time,
+                      sec_name, sec_code, currency, side, qty, price,
+                      amount, nkd, broker_fee, exchange_fee, deal_number, comment, status, 'sber'))
 
 
 def _parse_repo(soup, cur, report_id):

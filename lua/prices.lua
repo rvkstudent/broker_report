@@ -38,10 +38,11 @@ local LOG_FILE = os.getenv("TEMP") and (os.getenv("TEMP") .. "\\brokerreport_pri
 -- Загружается с API /api/instruments при старте и периодически обновляется.
 -- Если API недоступен, можно задать вручную:
 local INSTRUMENTS = {}
+local INSTRUMENT_CLASSES = {}  -- sec_code => class_code (из API)
 
 -- Фильтр по class_code, если INSTRUMENTS пуст после загрузки
 -- (например, только "TQBR" для акций, "TQOB" для облигаций)
-local FILTER_CLASS_CODES = {"TQBR", "TQOB", "TQTD", "TQBS"}
+local FILTER_CLASS_CODES = {"TQBR", "TQOB", "TQTD", "TQBS", "SPBFUT"}
 -- ===================================================
 
 local price_cache = {}   -- sec_code => { price, qty, value, class_code, time }
@@ -100,10 +101,15 @@ local function fetch_instruments()
 
     -- Очищаем и заполняем список инструментов
     INSTRUMENTS = {}
+    INSTRUMENT_CLASSES = {}
     for _, item in ipairs(data) do
         local sec_code = item.sec_code
         if sec_code and #sec_code > 0 then
             table.insert(INSTRUMENTS, sec_code)
+            local cc = item.class_code or ""
+            if cc and #cc > 0 then
+                INSTRUMENT_CLASSES[sec_code] = cc
+            end
         end
     end
 
@@ -215,6 +221,54 @@ local function send_prices()
         log_info(string.format("Sent %d prices, response: %s", #prices, table.concat(resp)))
         -- Очищаем кеш после успешной отправки (оставляем только неподтверждённые)
         price_cache = {}
+    end
+end
+
+-- Обновление текущих цен фьючерсов (SPBFUT) через getParamEx(LAST).
+-- Для срочного рынка QUIK НЕ шлёт OnAllTrade, поэтому рыночная цена
+-- не приходит — берём её из параметра LAST (последняя цена контракта).
+-- LAST для фьючерсов = цена за единицу (пункт/акцию), а стоимость контракта
+-- = LAST × lotsize. На сервере фьючерс хранится как price = стоимость контракта
+-- и qty = контракты, поэтому здесь умножаем на lotsize для согласованности.
+local FUTURES_LAST_PARAMS = {"LAST", "LASTPRICE", "CURRENTPRICE"}
+local function refresh_futures_prices()
+    if #INSTRUMENTS == 0 then
+        return
+    end
+    for _, sec_code in ipairs(INSTRUMENTS) do
+        local cc = INSTRUMENT_CLASSES[sec_code] or ""
+        if cc == "SPBFUT" then
+            local price
+            for _, param in ipairs(FUTURES_LAST_PARAMS) do
+                local ok_p, p = pcall(getParamEx, cc, sec_code, param)
+                if ok_p and p and p.param_value then
+                    local v = tonumber(p.param_value)
+                    if v and v > 0 then
+                        price = v
+                        break
+                    end
+                end
+            end
+            if price then
+                -- lotsize фьючерса (множитель контракта)
+                local lotsize = 1
+                local ok_l, lp = pcall(getParamEx, cc, sec_code, "LOTSIZE")
+                if ok_l and lp and lp.param_value then
+                    local lv = tonumber(lp.param_value)
+                    if lv and lv > 1 then
+                        lotsize = lv
+                    end
+                end
+                price = price * lotsize
+                price_cache[sec_code] = {
+                    price = price,
+                    qty = 0,
+                    value = 0,
+                    class_code = cc,
+                    time = os.time()
+                }
+            end
+        end
     end
 end
 
@@ -361,6 +415,26 @@ local function normalize_trade_datetime(dt)
     return nil, nil
 end
 
+-- Цена фьючерса (SPBFUT): QUIK отдаёт LAST/цену сделки за единицу (акцию/пункт),
+-- а на сервере фьючерс хранится как price = стоимость контракта (LAST × lotsize)
+-- и qty = контракты. Чтобы не сбивать прогноз P&L (иначе ложный убыток -99%,
+-- когда цену за штуку сравнивают с ценой контракта), приводим цену фьючерса
+-- к стоимости контракта, умножая на lotsize (как в refresh_futures_prices).
+local function futures_price(price, class_code, sec_code)
+    if class_code ~= "SPBFUT" or not price or price <= 0 then
+        return price
+    end
+    local lotsize = 1
+    local ok, lp = pcall(getParamEx, class_code, sec_code, "LOTSIZE")
+    if ok and lp and lp.param_value then
+        local lv = tonumber(lp.param_value)
+        if lv and lv > 1 then
+            lotsize = lv
+        end
+    end
+    return price * lotsize
+end
+
 -- Callback QUIK: обезличенные сделки (для отслеживания цен моих инструментов)
 function OnAllTrade(alltrade)
     local sec_code = alltrade.sec_code
@@ -373,7 +447,7 @@ function OnAllTrade(alltrade)
 
     -- Обновляем цену (только последнюю, в trade_cache НЕ добавляем)
     price_cache[sec_code] = {
-        price = tonumber(alltrade.price) or 0,
+        price = futures_price(tonumber(alltrade.price) or 0, class_code, sec_code),
         qty = tonumber(alltrade.qty) or 0,
         value = tonumber(alltrade.value) or 0,
         class_code = class_code,
@@ -396,7 +470,9 @@ function OnTrade(trade)
     local qty = tonumber(trade.qty or trade.quantity) or 0
     local value = tonumber(trade.value) or 0
     price_cache[sec_code] = {
-        price = price,
+        -- Для фьючерсов (SPBFUT) цена сделки — за единицу; приводим к стоимости
+        -- контракта (× lotsize), иначе прогноз P&L будет показывать ложный -99%.
+        price = futures_price(price, class_code, sec_code),
         qty = qty,
         value = value,
         class_code = class_code,
@@ -404,11 +480,25 @@ function OnTrade(trade)
     }
 
     -- Определяем сторону сделки:
-    -- В Lua 5.1 нет оператора &, используем % 2 (нечётное = бит 0 установлен)
+    -- Приоритет 1: trade.operation ("B"/"S") — надёжный признак из QUIK.
+    -- Приоритет 2: flags — бит 0 (0x01) установлен = покупка (в Lua 5.1 нет &
+    --              используем % 2: нечётное = бит 0 установлен).
+    -- ВАЖНО: QUIK вызывает OnTrade для одной сделки несколько раз, и в первый
+    -- раз флаги могут не содержать бит стороны (flags=32/64) → неверная сторона.
+    -- На сервере при конфликте по trade_num сторона перезаписывается последней,
+    -- поэтому здесь важно передавать trade.operation, если он доступен.
     local raw_flags = tonumber(trade.flags) or 0
-    local side = "sell"
-    if raw_flags > 0 and raw_flags % 2 == 1 then
+    local trade_operation = tostring(trade.operation or "")
+    local side
+    if trade_operation == "B" then
         side = "buy"
+    elseif trade_operation == "S" then
+        side = "sell"
+    else
+        side = "sell"
+        if raw_flags > 0 and raw_flags % 2 == 1 then
+            side = "buy"
+        end
     end
 
     -- Диагностика: если flags=0, дамп всех полей для анализа
@@ -447,8 +537,10 @@ function OnTrade(trade)
     -- brokerref — поле "Комментарий" в терминале QUIK, содержит код клиента
     local brokerref = tostring(trade.brokerref or "")
     local client_code = tostring(trade.client_code or "")
+    -- trade_num как СТРОКА: номера фьючерсных сделок (SPBFUT) 19-значные (>2^53),
+    -- передача числом через cjson теряет точность и разные сделки сливаются в одну.
     table.insert(trade_cache, {
-        trade_num = tonumber(trade.trade_num) or 0,
+        trade_num = tostring(trade.trade_num or ""),
         sec_code = sec_code,
         class_code = class_code,
         price = price,
@@ -468,6 +560,7 @@ function OnTrade(trade)
         lotsize = lotsize,
         broker = BROKER_NAME,      -- fallback: если CLIENT_CODE_MAP не заполнен
         flags = raw_flags,         -- оригинальные флаги для перепроверки на сервере
+        operation = trade_operation, -- "B"/"S" из QUIK (если доступно)
         operation_type = raw_op_type,
         brokerref = brokerref,     -- "Комментарий" в терминале QUIK (код клиента)
         client_code = client_code, -- код клиента (если есть)
@@ -520,10 +613,19 @@ local function load_existing_trades()
                 -- не логируем каждый пропуск, только счётчик
             else
                 -- Определяем сторону сделки:
+                -- Приоритет: trade.operation ("B"/"S"), затем flags (бит 0 = покупка)
                 local trade_raw_flags = tonumber(trade.flags) or 0
-                local trade_side = "sell"
-                if trade_raw_flags > 0 and trade_raw_flags % 2 == 1 then
+                local trade_operation = tostring(trade.operation or "")
+                local trade_side
+                if trade_operation == "B" then
                     trade_side = "buy"
+                elseif trade_operation == "S" then
+                    trade_side = "sell"
+                else
+                    trade_side = "sell"
+                    if trade_raw_flags > 0 and trade_raw_flags % 2 == 1 then
+                        trade_side = "buy"
+                    end
                 end
 
                 -- Размер лота из QUIK
@@ -539,8 +641,9 @@ local function load_existing_trades()
                 -- brokerref — поле "Комментарий" в терминале QUIK, содержит код клиента
                 local brokerref = tostring(trade.brokerref or "")
                 local client_code = tostring(trade.client_code or "")
+                -- trade_num как СТРОКА (сохраняем точность 19-значных номеров SPBFUT)
                 table.insert(trade_cache, {
-                    trade_num = tonumber(trade.trade_num) or 0,
+                    trade_num = tostring(trade.trade_num or ""),
                     sec_code = sec_code,
                     class_code = class_code,
                     price = tonumber(trade.price) or 0,
@@ -560,6 +663,7 @@ local function load_existing_trades()
                     lotsize = trade_lotsize,
                     broker = BROKER_NAME,
                     flags = raw_flags,
+                    operation = trade_operation,
                     brokerref = brokerref,
                     client_code = client_code,
                 })
@@ -623,6 +727,9 @@ function main()
 
         -- Отправка пачки цен по таймеру
         if now - last_send_time >= SEND_INTERVAL then
+            -- Для фьючерсов (SPBFUT) рыночная цена берётся из getParamEx(LAST),
+            -- т.к. OnAllTrade для срочного рынка не приходит
+            pcall(refresh_futures_prices)
             pcall(send_prices)
             last_send_time = now
         end

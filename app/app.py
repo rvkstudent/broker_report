@@ -440,7 +440,7 @@ def index():
 
     quik_trades = get_recent_quik_trades(20)
     prices = get_current_prices()
-    quik_pos = get_quik_positions()
+    quik_pos = get_quik_positions(broker)
 
     # Индикатор соединения с QUIK: данные обновлялись за последние 10 секунд
     quik_connected = False
@@ -460,7 +460,9 @@ def index():
     price_map = {p['sec_code']: p['price'] for p in prices}
 
     # Подставляем названия для QUIK-сделок (у них только sec_code)
-    name_map = {i['sec_code']: i['sec_name'] for i in get_my_instruments()}
+    my_instruments = get_my_instruments()
+    name_map = {i['sec_code']: i['sec_name'] for i in my_instruments}
+    my_price_codes = sorted({i['sec_code'] for i in my_instruments})
     for o in open_trades:
         o['current_price'] = price_map.get(o['security_code'], 0)
         if o.get('source') == 'quik' and o['security_code'] in name_map:
@@ -473,17 +475,47 @@ def index():
         for o in open_trades:
             code = o['security_code']
             cur = o.get('current_price', 0)
+            if cur <= 0:
+                # Нет текущей цены — прогноз не считаем (иначе -стоимость позиции
+                # превращается в ложный «убыток -100%» и раздувает итог).
+                continue
             gross = (cur - o['buy_price']) * o['qty']
             buy_fee = o['total_cost'] * TRADE_FEE_RATE
             sell_fee = cur * o['qty'] * TRADE_FEE_RATE
             net = gross - buy_fee - sell_fee
             forecast_map[code] = forecast_map.get(code, 0) + net
 
-    # Добавляем прогноз в каждый элемент profit и вычисляем итоговый P&L
+    # Реализованные строки: прогноз по открытым позициям выносим в отдельные
+    # строки ниже (с пометкой is_open), чтобы покупки без продаж были видны
+    # прямо в таблице «Прибыль» и не дублировали прогноз в итогах.
+    from collections import defaultdict
     for p in profit:
-        code = p['security_code']
-        p['forecast_pl'] = round(forecast_map.get(code, 0), 2)
-        p['total_pl'] = round(p['net_profit'] + p['forecast_pl'], 2)
+        p['forecast_pl'] = 0.0
+        p['total_pl'] = round(p['net_profit'], 2)
+        p['is_open'] = False
+
+    # Открытые позиции (куплено, нет продажи) — отдельные строки с пометкой.
+    open_agg = defaultdict(lambda: {'qty': 0, 'name': ''})
+    for o in open_trades:
+        code = o['security_code']
+        open_agg[code]['qty'] += o['qty']
+        open_agg[code]['name'] = o['security_name']
+    for code, d in open_agg.items():
+        if d['qty'] <= 0:
+            continue
+        forecast = round(forecast_map.get(code, 0), 2)
+        profit.append({
+            'security_code': code,
+            'security_name': d['name'],
+            'buy_qty': d['qty'],
+            'sell_qty': 0,
+            'gross_profit': 0,
+            'total_fees': 0,
+            'net_profit': 0,
+            'forecast_pl': forecast,
+            'total_pl': forecast,
+            'is_open': True,
+        })
 
     # Движение денежных средств
     cash_flow = get_cash_flow_summary(None, df_dmy, dt_dmy, broker)
@@ -505,6 +537,7 @@ def index():
                            price_map=price_map,
                            quik_trades=quik_trades,
                            prices=prices,
+                           my_price_codes=my_price_codes,
                            quik_positions=quik_pos,
                            quik_connected=quik_connected,
                            cash_flow=cash_flow,
@@ -617,25 +650,11 @@ def api_trade():
     if not data['trades']:
         return jsonify({'error': 'Empty trades list'}), 400
 
-    # DEBUG: пишем полный JSON первого трейда
-    if data['trades']:
-        import json as _json
-        t0 = data['trades'][0]
-        with open(r'C:\Users\kozlov.r\YandexDisk\ProjectSQL\Broker_Report\debug_trade.json', 'w') as f:
-            _json.dump(t0, f, indent=2, ensure_ascii=False, default=str)
-
     save_quik_trades(data['trades'])
 
-    # Also update current prices from trade data
-    for t in data['trades']:
-        if t.get('sec_code') and t.get('price'):
-            save_price(
-                sec_code=t['sec_code'],
-                price=float(t['price']),
-                qty=int(t.get('qty', 0)),
-                value=float(t.get('value', 0)),
-                class_code=t.get('class_code', '')
-            )
+    # НЕ перезаписываем current_price ценой сделки: цена покупки/продажи —
+    # это не текущая рыночная цена (особенно для фьючерсов SPBFUT, где цена
+    # контракта отличается). Рыночные цены приходят отдельно через /api/price.
 
     return jsonify({'status': 'ok', 'count': len(data['trades'])}), 200
 
@@ -753,10 +772,27 @@ def api_quik_connected():
 
 @flask_app.route('/api/forecast', methods=['GET'])
 def api_forecast():
-    """Get forecast P&L for open positions based on current prices."""
+    """Get forecast P&L for open positions based on current prices.
+
+    Учитывает фильтр по брокеру и датам (query-параметры broker, date_from,
+    date_to), чтобы прогноз на дашборде совпадал с выбранным фильтром.
+    """
+    broker = request.args.get('broker', 'all')
+    date_from = request.args.get('date_from', '')
+    date_to = request.args.get('date_to', '')
+
+    # Конвертация HTML date (YYYY-MM-DD) → DD.MM.YYYY для БД
+    def to_dmy(iso):
+        if not iso:
+            return ''
+        parts = iso.split('-')
+        if len(parts) == 3:
+            return f'{parts[2]}.{parts[1]}.{parts[0]}'
+        return iso
+
     prices = get_current_prices()
     price_map = {p['sec_code']: p['price'] for p in prices}
-    open_trades = list(get_open_trades(None, '', '', ''))
+    open_trades = list(get_open_trades(None, to_dmy(date_from), to_dmy(date_to), broker))
 
     TRADE_FEE_RATE = 0.000685
     forecast_map = {}
@@ -764,6 +800,10 @@ def api_forecast():
         for o in open_trades:
             code = o['security_code']
             cur = price_map.get(code, 0)
+            if cur <= 0:
+                # Нет текущей цены — прогноз не считаем (иначе -стоимость позиции
+                # превращается в ложный «убыток -100%» и раздувает итог).
+                continue
             gross = (cur - o['buy_price']) * o['qty']
             buy_fee = o['total_cost'] * TRADE_FEE_RATE
             sell_fee = cur * o['qty'] * TRADE_FEE_RATE

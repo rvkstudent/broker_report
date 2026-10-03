@@ -671,14 +671,15 @@ def get_open_trades(report_id=None, date_from=None, date_to=None, broker=None):
     Buys that have NOT been closed by a sell within this period.
     Returns unmatched buy lots, merged by (security_code, buy_date, buy_price).
 
-    ВНИМАНИЕ: дата фильтрует только продажи (чтобы определить, какие покупки
-    были закрыты в периоде), но сами покупки показываются ВСЕ независимо от
-    даты — открытая позиция должна быть видна всегда, даже если куплена давно.
+    Дата: учитывается как для покупок, так и для продаж — открытая позиция
+    показывается только если куплена в выбранном периоде (date_from..date_to).
+    Так блок «Прибыль» по фильтру показывает открытые сделки именно с даты
+    фильтра, а не все исторические (например, MTSS/ОФЗ, купленные до 01.08).
 
     Все сделки в единой таблице trade (source='sber'/'vtb'/'quik').
     QUIK-трейды участвуют в LIFO-матчинге вместе со своим брокером.
     """
-    _, unmatched = _match_trades_lifo(report_id, None, None, broker)
+    _, unmatched = _match_trades_lifo(report_id, date_from, date_to, broker)
 
     # Merge consecutive lots with same code, date, and price
     merged = []
@@ -698,6 +699,9 @@ def get_instrument_summary(report_id=None, date_from=None, date_to=None, broker=
     """
     Aggregate summary per instrument from OPEN (unmatched) buy positions.
     Shows total qty, average price, total cost per security.
+
+    Дата учитывается (как в get_open_trades): открытые позиции показываются
+    только если куплены в выбранном периоде.
     """
     from collections import defaultdict
     _, unmatched = _match_trades_lifo(report_id, date_from, date_to, broker)
@@ -913,17 +917,24 @@ def _run_lifo(trades, name_map):
         buy_queue = []
 
         for t in txns:
+            # НКД по облигациям: отчёты (vtb/sber/gp) хранят amount уже с НКД,
+            # а QUIK — «чистую» цену без НКД (nkd отдельно). Чтобы база P&L была
+            # единообразной (реальные потоки денег), добавляем НКД к QUIK-сделкам.
+            amount_eff = t['amount']
+            if t['source'] == 'quik' and _is_bond_class(t['class_code'] or ''):
+                amount_eff = (t['amount'] or 0) + (t['nkd'] or 0)
+
             if t['side'] == 'Покупка' and t['quantity'] > 0:
                 buy_queue.append([
                     t['quantity'],
-                    t['amount'] / t['quantity'],
+                    amount_eff / t['quantity'],
                     t,
                     (t['broker_fee'] or 0) + (t['exchange_fee'] or 0)
                 ])
 
             elif t['side'] == 'Продажа' and t['quantity'] > 0:
                 remaining = t['quantity']
-                sell_unit_price = t['amount'] / t['quantity']
+                sell_unit_price = amount_eff / t['quantity']
                 sell_fee = (t['broker_fee'] or 0) + (t['exchange_fee'] or 0)
 
                 while remaining > 0 and buy_queue:
@@ -1100,9 +1111,12 @@ def _match_trades_lifo(report_id=None, date_from=None, date_to=None, broker=None
 
         trades_raw = conn.execute(f"""
             SELECT id, security_code, security_name, side, quantity, amount,
-                   broker_fee, exchange_fee, trade_date, trade_time, deal_number, source
+                   broker_fee, exchange_fee, trade_date, trade_time, deal_number, source,
+                   nkd, class_code
             FROM trade
             WHERE {where_sql}
+              AND (trade.class_code IS NULL OR trade.class_code != 'INSTR')
+              AND (trade.comment IS NULL OR trade.comment NOT LIKE '%sp_repo%')
             ORDER BY substr(trade_date,7,4)||substr(trade_date,4,2)||substr(trade_date,1,2), trade_time, LENGTH(deal_number), deal_number
         """, params).fetchall()
 
@@ -1126,9 +1140,12 @@ def _match_trades_lifo(report_id=None, date_from=None, date_to=None, broker=None
     if not broker or broker == 'all':
         quik_nobroker = conn.execute(f"""
             SELECT id, security_code, security_name, side, quantity, amount,
-                   broker_fee, exchange_fee, trade_date, trade_time, deal_number, source
+                   broker_fee, exchange_fee, trade_date, trade_time, deal_number, source,
+                   nkd, class_code
             FROM trade
             WHERE source='quik' AND (broker IS NULL OR broker='')
+              AND (class_code IS NULL OR class_code != 'INSTR')
+              AND (comment IS NULL OR comment NOT LIKE '%sp_repo%')
         """, []).fetchall()
         if quik_nobroker:
             q_trades = []
@@ -1278,23 +1295,24 @@ def delete_report(report_id):
 
 def _is_bond_class(class_code: str) -> bool:
     """Detect if a class_code represents bonds (price in % of nominal)."""
-    return class_code in ('TQOB', 'TQCB', 'TQOD') or class_code.startswith('TQO')
+    return (class_code in ('TQOB', 'TQCB', 'TQOD')
+            or class_code.startswith('TQO')
+            or class_code in ('SIRMR_BND', 'SIRMRBND', 'BND'))
 
 
 def _bond_price_ruble(price_pct: float, qty: int, value: float) -> float:
     """Convert bond price from % of nominal to ruble price.
 
     QUIK sends bond price as % of nominal (e.g. 77.53 = 77.53%).
-    value is the deal amount — either in rubles (775.31) or kopecks (77531.31).
-    We detect kopecks when value/qty >> price_pct and normalize.
+    Рублёвая цена за бумагу = value / qty (value — сумма сделки в рублях,
+    qty — фактическое количество бумаг).
+    Раньше при value/qty >> price_pct значение ошибочно делилось на 100 как
+    «копейки» — это ломало высокономинальные и валютные облигации
+    (напр. 80306.28 → 803.06). value всегда в рублях, делить нельзя.
     """
     if qty <= 0 or value <= 0:
         return price_pct
-    val_per_qty = value / qty
-    # Если val_per_qty многократно (50x) больше price_pct — value в копейках
-    if val_per_qty > price_pct * 50:
-        val_per_qty = val_per_qty / 100.0
-    return round(val_per_qty, 2)
+    return round(value / qty, 2)
 
 
 def save_price(sec_code: str, price: float, qty: int = 0, value: float = 0, class_code: str = ''):
@@ -1453,10 +1471,13 @@ def save_quik_trades(trades: list):
         if not trade_time:
             trade_time = t.get('trade_time')
 
-        # Определяем сторону сделки: приоритет — operation (OnTrade),
-        #   затем flags (OnAllTrade), затем явное side из JSON.
-        #   OnTrade: operation='B' (buy) / 'S' (sell)
-        #   OnAllTrade: flags & 0x02 (bid) → buy, flags & 0x01 (offer) → sell
+        # Определяем сторону сделки: приоритет — явная операция из JSON,
+        #   затем side от Lua (OnTrade уже определил по trade.operation/flags),
+        #   затем operation_type / flags как fallback (OnAllTrade, старые клиенты).
+        #
+        # ВАЖНО: для фьючерсов (SPBFUT) QUIK шлёт operation_type=0 и для покупки,
+        #   и для продажи, поэтому operation_type НЕЛЬЗЯ использовать как признак
+        #   стороны, если есть валидный side от Lua.
         flags = t.get('flags', 0) or 0
         operation = t.get('operation', '') or ''
         side = t.get('side', '')
@@ -1464,8 +1485,11 @@ def save_quik_trades(trades: list):
             side = 'buy'
         elif operation == 'S':
             side = 'sell'
+        elif side in ('buy', 'sell'):
+            # side от Lua уже определён (OnTrade: operation → flags) — доверяем
+            pass
         else:
-            # Приоритет для OnTrade: operation_type → flags → side от Lua
+            # Приоритет для старых/сторонних клиентов: operation_type → flags
             # operation_type: 0 = покупка, 1 = продажа, -1 = неизвестно
             op_type = t.get('operation_type', -1)
             if op_type == 0:
@@ -1484,28 +1508,43 @@ def save_quik_trades(trades: list):
                         side = 'sell'
                 # иначе флаги нестандартные — оставляем side от Lua как есть
 
-        # QUIK OnTrade передаёт qty в лотах. Фактическое количество
-        # акций = value / price (price — за 1 акцию), но если известен
-        # lotsize из таблицы instrument — умножаем qty на lotsize.
+        # QUIK OnTrade передаёт qty в лотах. Для акций фактическое количество
+        # = value / price (price — за 1 акцию в рублях). Для облигаций цена
+        # в % от номинала, поэтому value/price даёт мусор (напр. 826 вместо 1)
+        # — фактическое кол-во берём из QUIK: qty (лоты) × lotsize.
         price = t['price']
         qty = t['qty']
         t_val = t.get('value', 0) or 0
-        if price > 0:
+        sec_code = t.get('sec_code', '')
+        class_code = t.get('class_code', '')
+        lotsize = get_instrument_lotsize(sec_code, class_code)
+        if lotsize <= 1:
+            lotsize = int(t.get('lotsize') or 0) or 1
+
+        if _is_bond_class(class_code):
+            actual_qty = int(qty or 0) * max(int(lotsize or 1), 1)
+            if actual_qty > 0:
+                qty = actual_qty
+                if t_val > 0:
+                    # Храним цену облигации за бумагу в рублях (как в отчётах),
+                    # чтобы единицы совпадали с current_price и buy_price.
+                    price = round(t_val / actual_qty, 2)
+        elif class_code == 'SPBFUT':
+            # Фьючерсы: qty из QUIK — это количество контрактов (не лотов × lotsize).
+            # value уже включает множитель контракта (lotsize): value = price × qty × lotsize.
+            # НЕ пересчитываем qty через value/price (это даст qty × lotsize).
+            qty = int(qty or 0)
+            # Цена за контракт в рублях (для единообразия с отчётами и LIFO)
+            if qty > 0 and t_val > 0:
+                price = round(t_val / qty, 2)
+        elif price > 0:
             actual_qty = int(round(t_val / price))
             if actual_qty > 0:
                 qty = actual_qty
 
-        # Если в БД есть lotsize, используем для контроля (может отличаться
-        # от value/price для некоторых инструментов)
-        lotsize = get_instrument_lotsize(t.get('sec_code', ''), t.get('class_code', ''))
-        if lotsize > 1 and qty == 1 and t_val > 0:
-            pass  # уже исправлено выше через actual_qty
-
         account = (t.get('account') or '').strip()
         broker = _resolve_broker(t)
         op_type = t.get('operation_type', -1)
-        sec_code = t.get('sec_code', '')
-        class_code = t.get('class_code', '')
         deal_number = str(t.get('trade_num', ''))
         side_ru = 'Покупка' if side == 'buy' else 'Продажа'
 
@@ -1522,7 +1561,7 @@ def save_quik_trades(trades: list):
                     0, 0, ?, 'quik', ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source, deal_number) WHERE source='quik' AND deal_number IS NOT NULL AND deal_number != ''
             DO UPDATE SET
-                side=COALESCE(NULLIF(trade.side, ''), excluded.side),
+                side=excluded.side,
                 price=excluded.price, quantity=excluded.quantity, amount=excluded.amount,
                 trade_date=excluded.trade_date, trade_time=excluded.trade_time,
                 broker=excluded.broker,
@@ -1553,7 +1592,7 @@ def save_quik_trades(trades: list):
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'quik',
                     ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source, trade_num) DO UPDATE SET
-                side=COALESCE(NULLIF(quik_trade.side, ''), excluded.side),
+                side=excluded.side,
                 flags=COALESCE(NULLIF(quik_trade.flags, 0), excluded.flags),
                 operation=COALESCE(NULLIF(quik_trade.operation, ''), excluded.operation),
                 operation_type=COALESCE(NULLIF(quik_trade.operation_type, -1), excluded.operation_type),
@@ -1583,7 +1622,16 @@ def save_quik_trades(trades: list):
 
 
 def get_current_prices():
-    """Get latest price per instrument (deduplicated by sec_code)."""
+    """Get latest price per instrument (deduplicated by sec_code).
+
+    Для облигаций (TQO*) цена в QUIK приходит в % от номинала, а рублёвая
+    цена за бумагу = value / qty. В БД могла попасть «сырая» цена без
+    конвертации (старая версия кода с эвристикой /100 или pull из Firebase
+    с другого хоста) — например RU000A10C3M0 (Атомэнп06): хранится 803.08
+    вместо 80308.34. Чтобы такие строки не ломали P&L (‑99%), при чтении
+    самокорректируем: если хранимая цена расходится с value/qty более чем
+    на 5% — берём рублёвую цену за бумагу = value/qty.
+    """
     conn = get_connection()
     rows = conn.execute("""
         SELECT sec_code, class_code, price, qty, value, timestamp
@@ -1596,14 +1644,26 @@ def get_current_prices():
         ORDER BY sec_code
     """).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    result = []
+    for r in rows:
+        d = dict(r)
+        if _is_bond_class(d.get('class_code', '')):
+            qty = d.get('qty') or 0
+            value = d.get('value') or 0
+            if qty > 0 and value > 0:
+                per_qty = round(value / qty, 2)
+                if per_qty > 0 and abs(d['price'] / per_qty - 1) > 0.05:
+                    d['price'] = per_qty
+        result.append(d)
+    return result
 
 
 def get_my_instruments():
     """Get distinct securities from the trade table (user's instruments)."""
     conn = get_connection()
     rows = conn.execute("""
-        SELECT DISTINCT security_code AS sec_code, security_name AS sec_name
+        SELECT DISTINCT security_code AS sec_code, security_name AS sec_name,
+               COALESCE(NULLIF(class_code, ''), '') AS class_code
         FROM trade
         WHERE security_code IS NOT NULL AND security_code != ''
         ORDER BY security_code
@@ -1652,34 +1712,86 @@ def get_instrument_lotsize(sec_code: str, class_code: str = '') -> int:
     return 1
 
 
-def get_quik_positions():
+def get_quik_positions(broker=None):
     """Aggregate QUIK positions from OnTrade data (читает из trade, source='quik').
        side='Покупка' → +qty, side='Продажа' → -qty.
+       broker: если задан и != 'all' — учитывать позиции только этого брокера.
+
+       Количество — нетто (покупки − продажи). Средняя цена и стоимость
+       считаются по лотам, оставшимся «в позиции» после LIFO-списания продажами
+       (как в _run_lifo). Раньше сумма ВСЕХ покупок делилась на остаток — для
+       частично закрытых позиций цена раздувалась (SBERF: 166 029 вместо ~27 9xx,
+       SBER: 140 285 вместо ~280). Несопоставленные продажи (нет истории покупок
+       в QUIK-наборе) уменьшают итоговый остаток.
     """
+    from collections import defaultdict
     conn = get_connection()
-    rows = conn.execute("""
-        SELECT security_code AS sec_code, class_code,
-               SUM(CASE WHEN side='Продажа' THEN -quantity ELSE quantity END) AS net_qty,
-               SUM(CASE WHEN side='Продажа' THEN 0 ELSE amount END) AS buy_value
+    where = "source='quik' AND side IN ('Покупка', 'Продажа') AND quantity > 0 AND (class_code IS NULL OR class_code != 'INSTR') AND (comment IS NULL OR comment NOT LIKE '%sp_repo%')"
+    params = []
+    if broker and broker != 'all':
+        where += " AND broker=?"
+        params.append(broker)
+    trades_raw = conn.execute(f"""
+        SELECT security_code, security_name, class_code, side, quantity, amount,
+               broker_fee, exchange_fee, nkd
         FROM trade
-        WHERE source='quik'
-          AND side IN ('Покупка', 'Продажа')
-          AND quantity > 0
-        GROUP BY security_code, class_code
-        HAVING net_qty > 0
-        ORDER BY security_code
-    """).fetchall()
+        WHERE {where}
+        ORDER BY security_code, class_code,
+                 substr(trade_date,7,4)||substr(trade_date,4,2)||substr(trade_date,1,2),
+                 trade_time, LENGTH(deal_number), deal_number
+    """, params).fetchall()
     conn.close()
+
+    by_key = defaultdict(list)
+    for t in trades_raw:
+        by_key[(t['security_code'], t['class_code'] or '')].append(t)
+
     result = []
-    for r in rows:
-        avg_price = round(r['buy_value'] / r['net_qty'], 2) if r['net_qty'] > 0 else 0
+    for (sec_code, class_code), txns in by_key.items():
+        # LIFO: покупки в очередь, продажи списывают последние покупки.
+        buy_queue = []  # [qty, unit_price]
+        unmatched_sell = 0
+        for t in txns:
+            qty = t['quantity']
+            if t['side'] == 'Покупка':
+                amount_eff = t['amount'] or 0
+                if _is_bond_class(class_code):
+                    amount_eff = amount_eff + (t['nkd'] or 0)
+                unit = amount_eff / qty if qty > 0 else 0
+                buy_queue.append([qty, unit])
+            else:  # Продажа
+                remaining = qty
+                while remaining > 0 and buy_queue:
+                    avail = buy_queue[-1][0]
+                    used = min(avail, remaining)
+                    buy_queue[-1][0] -= used
+                    if buy_queue[-1][0] <= 0:
+                        buy_queue.pop()
+                    remaining -= used
+                if remaining > 0:
+                    unmatched_sell += remaining
+
+        net_qty = sum(l[0] for l in buy_queue) - unmatched_sell
+        if net_qty <= 0:
+            continue
+        # Оставшиеся лоты — с начала очереди (самые ранние из несписанных покупок)
+        total_cost = 0.0
+        remaining = net_qty
+        for lot in buy_queue:
+            if remaining <= 0:
+                break
+            take = min(lot[0], remaining)
+            total_cost += take * lot[1]
+            remaining -= take
         result.append({
-            'sec_code': r['sec_code'],
-            'class_code': r['class_code'],
-            'qty': r['net_qty'],
-            'avg_price': avg_price,
-            'total_cost': round(r['buy_value'], 2),
+            'sec_code': sec_code,
+            'class_code': class_code,
+            'qty': net_qty,
+            'avg_price': round(total_cost / net_qty, 2) if net_qty > 0 else 0,
+            'total_cost': round(total_cost, 2),
         })
+
+    result.sort(key=lambda x: x['sec_code'])
     return result
 
 
@@ -1688,10 +1800,10 @@ def get_recent_quik_trades(limit: int = 20):
     conn = get_connection()
     rows = conn.execute("""
         SELECT id, deal_number AS trade_num, security_code AS sec_code,
-               class_code, price, quantity AS qty, amount AS value,
+               class_code, side, price, quantity AS qty, amount AS value,
                trade_date, trade_time
         FROM trade
-        WHERE source='quik'
+        WHERE source='quik' AND (class_code IS NULL OR class_code != 'INSTR')
         ORDER BY id DESC
         LIMIT ?
     """, (limit,)).fetchall()
