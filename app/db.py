@@ -16,7 +16,10 @@ def _get_db_dir() -> str:
     os.makedirs(db_dir, exist_ok=True)
     return db_dir
 
-DB_PATH = os.path.join(_get_db_dir(), 'broker.db')
+# Путь к базе можно переопределить переменной окружения — на сервере база
+# лежит на отдельном docker-volume, чтобы обновление образа её не затирало.
+DB_PATH = os.environ.get('BROKER_DB_PATH') or os.path.join(_get_db_dir(), 'broker.db')
+os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)), exist_ok=True)
 
 
 def _norm_date(d: str) -> str:

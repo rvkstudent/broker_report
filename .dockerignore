@@ -22,15 +22,29 @@ lua/
 # SQLite (создаётся автоматически)
 app/broker.db
 app/.broker_sync_state
+*.db
+*.sqlite
 
-# Firebase key (копируется отдельно при необходимости)
+# Секреты
 app/firebase-key.json
+app/allowed_devices.json
+lua/config.local.lua
+secrets/
 
 # Локальные тестовые файлы
 *.tmp
 xlsx_full_analysis.txt
 
+# Не нужно в образе
+.git
+temp
+deploy
+logs
+reports/nalog
+.DS_Store
+
 # Docker
 Dockerfile
 .dockerignore
 docker-compose.yml
+docker-compose.server.yml

@@ -1,0 +1,79 @@
+# ┌────────────────────────────────────────────────────────────────────┐
+# │  BrokerReport на сервере: gunicorn + SQLite + Cloudflare Tunnel    │
+# └────────────────────────────────────────────────────────────────────┘
+# Ни один порт наружу не открывается: доступ идёт через Cloudflare
+# Tunnel (TLS на стороне Cloudflare), поэтому дополнительных сертификатов
+# и настройки nginx не требуется.
+#
+# Запуск:
+#   cd /home/roman/broker-report
+#   docker compose -f docker-compose.server.yml up -d --build
+#   docker compose -f docker-compose.server.yml --profile tunnel up -d
+#
+# Секреты берутся из .env (см. deploy/README.md), в образ не попадают.
+#
+# ВНИМАНИЕ: Docker Compose разворачивает знак $ в значениях из .env как
+# подстановку переменной. Поэтому хеш пароля (а в нём есть знак $) лежит
+# в отдельном файле secrets/password_hash.txt, а не в .env — иначе хеш
+# портится и вход в веб-интерфейс молча перестаёт работать.
+
+name: broker-report
+
+services:
+  broker-report:
+    build: .
+    image: broker-report:latest
+    container_name: broker-report
+    hostname: broker-report
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # База живёт на отдельном volume — обновление образа её не затрагивает
+      - BROKER_DB_PATH=/app/data/broker.db
+      - DISABLE_DEVICE_AUTH=true          # защита — логин+пароль и токен API
+      - SESSION_COOKIE_SECURE=true        # кука только по HTTPS
+      - TRUSTED_PROXY_COUNT=1             # за Cloudflare Tunnel один прокси
+      - TZ=Europe/Moscow
+    volumes:
+      - broker_data:/app/data                                # SQLite
+      - ./reports:/app/reports                               # отчёты (HTML/XLSX)
+      - ./secrets/firebase-key.json:/app/app/firebase-key.json:ro
+      - ./secrets/password_hash.txt:/app/secrets/password_hash.txt:ro
+      - ./logs:/app/logs
+    expose:
+      - "5000"          # наружу НЕ публикуем — только внутри сети стека
+    networks:
+      - broker-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Cloudflare Tunnel: публикует broker-report по адресу broker.roman-it.dev
+  # Токен туннеля лежит в .env как BROKER_TUNNEL_TOKEN.
+  # В панели Cloudflare для туннеля должен быть Public hostname:
+  #   broker.roman-it.dev  ->  http://broker-report:5000
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: broker-cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${BROKER_TUNNEL_TOKEN}
+    depends_on:
+      - broker-report
+    networks:
+      - broker-net
+    profiles: ["tunnel"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  broker_data:
+
+networks:
+  broker-net:
+    driver: bridge

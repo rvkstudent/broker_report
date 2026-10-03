@@ -2,6 +2,7 @@
 
 import os
 import glob
+import secrets
 import threading
 import time
 from functools import wraps
@@ -25,9 +26,34 @@ from app.allowed_devices import (is_device_allowed, add_pending_device,
                                   approve_device, reject_device, remove_device,
                                   get_all_devices, toggle_device, get_pending_count,
                                   get_admin_token, DISABLE_AUTH)
+from app.auth import register_auth, auth_enabled
 
 flask_app = Flask(__name__, template_folder='templates')
-flask_app.secret_key = os.environ.get('FLASK_SECRET', 'broker-report-secret-key')
+
+
+def _resolve_secret_key() -> str:
+    """Ключ подписи сессионной куки.
+
+    Историческое значение по умолчанию лежит в публичном репозитории, поэтому
+    с включённой авторизацией его использовать нельзя: зная ключ, можно
+    подделать куку и войти без пароля. Если FLASK_SECRET не задан, генерируем
+    случайный ключ — сессии не переживут перезапуск, но подделать их нельзя.
+    """
+    secret = os.environ.get('FLASK_SECRET')
+    if secret:
+        return secret
+    if auth_enabled():
+        print('  [WARN] FLASK_SECRET не задан — сгенерирован временный ключ: '
+              'сессии сбросятся при перезапуске. Задайте FLASK_SECRET в .env')
+        return secrets.token_urlsafe(48)
+    return 'broker-report-secret-key'
+
+
+flask_app.secret_key = _resolve_secret_key()
+
+# Авторизацию подключаем ДО middleware устройств, чтобы проверка входа
+# срабатывала первой
+register_auth(flask_app)
 
 REPORTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'reports')
 os.makedirs(REPORTS_DIR, exist_ok=True)

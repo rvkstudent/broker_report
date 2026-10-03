@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Вход — BrokerReport{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-12 col-sm-9 col-md-6 col-lg-4">
+        <div class="card">
+            <div class="card-body p-4">
+                <div class="text-center mb-4">
+                    <i class="bi bi-graph-up-arrow" style="font-size: 2.2rem; color:#2563eb;"></i>
+                    <h1 class="h4 mt-2 mb-1">BrokerReport</h1>
+                    <div class="text-muted small">Вход в систему</div>
+                </div>
+
+                {% if message %}
+                <div class="alert alert-warning py-2 small">{{ message }}</div>
+                {% endif %}
+                {% if error %}
+                <div class="alert alert-danger py-2 small">{{ error }}</div>
+                {% endif %}
+
+                <form method="post" action="{{ url_for('auth.login') }}" autocomplete="on">
+                    {# CSRF-токен создаётся функцией csrf_token() из app/auth.py #}
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <input type="hidden" name="next" value="{{ next or '/' }}">
+
+                    <div class="mb-3">
+                        <label class="form-label" for="username">Логин</label>
+                        <input class="form-control form-control-lg" id="username" name="username"
+                               type="text" autocapitalize="none" autocorrect="off"
+                               autocomplete="username" required autofocus
+                               inputmode="text" enterkeyhint="next">
+                    </div>
+
+                    <div class="mb-3">
+                        <label class="form-label" for="password">Пароль</label>
+                        <div class="input-group input-group-lg">
+                            <input class="form-control" id="password" name="password"
+                                   type="password" autocomplete="current-password"
+                                   required enterkeyhint="go">
+                            <button class="btn btn-outline-secondary" type="button"
+                                    id="toggle-password" tabindex="-1"
+                                    aria-label="Показать пароль">
+                                <i class="bi bi-eye"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    <button class="btn btn-primary btn-lg w-100" type="submit">Войти</button>
+                </form>
+
+                <p class="text-muted small text-center mt-3 mb-0">
+                    Личный кабинет — доступ по логину и паролю.
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Показать/скрыть пароль — на телефоне это заметно облегчает ввод
+    document.getElementById('toggle-password').addEventListener('click', function () {
+        const input = document.getElementById('password');
+        const icon = this.querySelector('i');
+        const show = input.type === 'password';
+        input.type = show ? 'text' : 'password';
+        icon.className = show ? 'bi bi-eye-slash' : 'bi bi-eye';
+    });
+</script>
+{% endblock %}

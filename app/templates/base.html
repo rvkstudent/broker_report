@@ -2,15 +2,28 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#212529">
+    <meta name="color-scheme" content="light">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="format-detection" content="telephone=no">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>{% block title %}Анализ брокерских отчетов{% endblock %}</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
     <style>
-        body { background: #f5f7fb; }
+        html, body { overflow-x: hidden; }
+        body { background: #f5f7fb; -webkit-text-size-adjust: 100%; }
         .card { box-shadow: 0 2px 8px rgba(0,0,0,.08); border: none; margin-bottom: 1.5rem; }
         .card-header { font-weight: 600; }
         .table th { white-space: nowrap; }
+        /* Плавная прокрутка широких таблиц пальцем + липкая шапка */
+        .table-responsive { -webkit-overflow-scrolling: touch; }
+        .table-responsive > .table > thead > tr > th {
+            position: sticky; top: 0; z-index: 2; background: #fff;
+        }
+        .table-responsive > .table > tbody > tr > th { background: #fff; }
         .profit-positive { color: #198754; font-weight: 600; }
         .profit-negative { color: #dc3545; font-weight: 600; }
         .bg-profit-positive { background-color: #d1fae5; }
@@ -29,19 +42,53 @@
         .tkr { display: inline-flex; align-items: center; gap: 4px; }
         .tkr-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
         .tkr-logo { width: 16px; height: 16px; border-radius: 4px; vertical-align: middle; flex-shrink: 0; object-fit: contain; }
+
+        /* ── Мобильная адаптация (телефоны и планшеты) ─────────── */
+        @media (max-width: 991.98px) {
+            .navbar-nav .nav-link { padding: .7rem 1rem; border-radius: .375rem; }
+            .navbar-nav .nav-link.active { background: rgba(255,255,255,.12); }
+            .navbar .container { flex-wrap: nowrap; }
+        }
+        @media (max-width: 767.98px) {
+            .container { padding-left: .75rem; padding-right: .75rem; }
+            .card-body { padding: 1rem; }
+            h1, .h1 { font-size: 1.4rem; }
+            h2, .h2 { font-size: 1.2rem; }
+            .display-6 { font-size: 1.5rem; }
+            .fs-3 { font-size: 1.2rem !important; }
+            /* Крупные зоны нажатия — попадать пальцем проще */
+            .btn { min-height: 44px; }
+            .btn-sm { min-height: 36px; }   /* кнопки в строках таблиц: выше уже мешают */
+            .form-control, .form-select { min-height: 44px; font-size: 1rem; }
+            .pagination .page-link { min-height: 40px; min-width: 40px;
+                                     display: flex; align-items: center; justify-content: center; }
+            /* Ссылки в таблицах тоже должны ловиться пальцем */
+            .table td a { display: inline-block; padding: .35rem 0; }
+            /* Таблицы: чуть компактнее, но прокручиваются по горизонтали */
+            .table td, .table th { padding: .45rem .5rem; font-size: .875rem; }
+            /* Поля фильтров — на всю ширину, друг под другом */
+            .filter-row > [class*='col-'] { flex: 0 0 100%; max-width: 100%; margin-bottom: .5rem; }
+            .offcanvas-mobile { width: 100% !important; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            * { transition: none !important; animation: none !important; }
+        }
     </style>
 </head>
 <body>
-    <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-3 mb-md-4">
         <div class="container">
-            <a class="navbar-brand" href="/">
+            <a class="navbar-brand" href="{{ url_for('index') }}">
                 <i class="bi bi-graph-up-arrow"></i> BrokerReport
             </a>
-            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+            {% if current_user() %}
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse"
+                    data-bs-target="#navbarNav" aria-controls="navbarNav"
+                    aria-expanded="false" aria-label="Меню">
                 <span class="navbar-toggler-icon"></span>
             </button>
             <div class="collapse navbar-collapse" id="navbarNav">
-                <ul class="navbar-nav ms-auto">
+                <ul class="navbar-nav ms-auto align-items-lg-center">
                     <li class="nav-item">
                         <a class="nav-link {% if request.path == '/' %}active{% endif %}" href="/">
                             <i class="bi bi-speedometer2"></i> Дашборд
@@ -53,17 +100,29 @@
                         </a>
                     </li>
                     <li class="nav-item">
-                        <a class="nav-link {% if request.path == '/admin' %}active{% endif %}" href="/admin">
-                            <i class="bi bi-shield-lock"></i> Админ
-                        </a>
-                    </li>
-                    <li class="nav-item">
                         <a class="nav-link {% if request.path == '/nalog' %}active{% endif %}" href="/nalog">
                             <i class="bi bi-file-earmark-text"></i> Налоги
                         </a>
                     </li>
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.path == '/admin' %}active{% endif %}" href="/admin">
+                            <i class="bi bi-shield-lock"></i> Админ
+                        </a>
+                    </li>
+                    <li class="nav-item d-none d-lg-block">
+                        <span class="navbar-text small px-2 text-white-50">{{ current_user() }}</span>
+                    </li>
+                    <li class="nav-item">
+                        <form method="post" action="{{ url_for('auth.logout') }}" class="d-inline">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <button class="nav-link border-0 bg-transparent" type="submit">
+                                <i class="bi bi-box-arrow-right"></i> Выход
+                            </button>
+                        </form>
+                    </li>
                 </ul>
             </div>
+            {% endif %}
         </div>
     </nav>
 
@@ -82,6 +141,37 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Подставляем CSRF-токен во все POST-формы, где его ещё нет.
+        // Токен лежит в мета-теге и недоступен сторонним сайтам (same-origin policy).
+        (function () {
+            const meta = document.querySelector('meta[name="csrf-token"]');
+            if (!meta || !meta.content) return;
+            document.querySelectorAll('form').forEach(function (form) {
+                const method = (form.getAttribute('method') || 'get').toLowerCase();
+                if (method !== 'post') return;
+                if (form.querySelector('input[name="csrf_token"]')) return;
+                const input = document.createElement('input');
+                input.type = 'hidden';
+                input.name = 'csrf_token';
+                input.value = meta.content;
+                form.appendChild(input);
+            });
+        })();
+
+        // Широкие таблицы оборачиваем в прокручиваемый контейнер.
+        // На телефоне таблица иначе вылезает за экран, а overflow-x: hidden
+        // у body её просто обрезает — до правых колонок не добраться.
+        (function () {
+            document.querySelectorAll('table').forEach(function (table) {
+                if (table.closest('.table-responsive')) return;
+                const wrap = document.createElement('div');
+                wrap.className = 'table-responsive';
+                table.parentNode.insertBefore(wrap, table);
+                wrap.appendChild(table);
+            });
+        })();
+    </script>
     {% block scripts %}{% endblock %}
 </body>
 </html>

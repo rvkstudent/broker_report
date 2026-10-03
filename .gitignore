@@ -8,9 +8,24 @@ build/
 
 # Environments
 .env
+.env.*
 .venv/
 venv/
 env/
+
+# ── Секреты: НИКОГДА не коммитить (репозиторий публичный!) ──
+app/firebase-key.json
+app/allowed_devices.json
+lua/config.local.lua
+*.pem
+secrets/
+
+# ── Данные ──
+*.db
+*.sqlite
+*.sqlite3
+app/.broker_sync_state
+logs/*.log
 
 # IDE
 .vscode/settings.json
