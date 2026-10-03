@@ -2,6 +2,7 @@
 import sqlite3
 import os
 import sys
+import math
 from datetime import datetime
 
 def _get_db_dir() -> str:
@@ -245,6 +246,14 @@ def init_db():
             total_income    REAL DEFAULT 0,
             total_taxable   REAL DEFAULT 0,
             source_file     TEXT
+        )""",
+        # Код инструмента в отчёте брокера ≠ код в QUIK (Сбер: «MTSI-12.26»
+        # ↔ QUIK «MTZ6»). Таблица хранит сопоставление, чтобы сделки/позиции
+        # одного контракта не разъезжались по двум кодам.
+        """CREATE TABLE IF NOT EXISTS instrument_alias (
+            report_code TEXT PRIMARY KEY,
+            sec_code    TEXT NOT NULL,
+            updated_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
         )""",
     ]
     for d in ddl:
@@ -684,6 +693,13 @@ def get_open_trades(report_id=None, date_from=None, date_to=None, broker=None):
     """
     _, unmatched = _match_trades_lifo(report_id, date_from, date_to, broker)
 
+    # В этом блоке показываем только позиции, открытые В ПЕРИОДЕ (позиция до
+    # начала периода — не результат периода). Лоты, купленные до date_from,
+    # уже участвуют в LIFO выше как входящая позиция и закрывают продажи.
+    if date_from:
+        d_from = _norm_date(date_from)
+        unmatched = [u for u in unmatched if _norm_date(u['buy_date']) >= d_from]
+
     # Merge consecutive lots with same code, date, and price
     merged = []
     for u in unmatched:
@@ -708,6 +724,11 @@ def get_instrument_summary(report_id=None, date_from=None, date_to=None, broker=
     """
     from collections import defaultdict
     _, unmatched = _match_trades_lifo(report_id, date_from, date_to, broker)
+
+    # Как и в get_open_trades: только позиции, открытые в выбранном периоде.
+    if date_from:
+        d_from = _norm_date(date_from)
+        unmatched = [u for u in unmatched if _norm_date(u['buy_date']) >= d_from]
 
     by_sec = defaultdict(lambda: {'qty': 0, 'cost': 0.0, 'name': ''})
     for u in unmatched:
@@ -1093,7 +1114,11 @@ def _match_trades_lifo(report_id=None, date_from=None, date_to=None, broker=None
     name_map = {}
 
     for src_group in source_groups:
-        where_clauses, params = _date_where('trade', date_from, date_to)
+        # ВАЖНО: при фильтре «с даты» грузим и сделки ДО date_from — иначе продажи
+        # в периоде не находят свои покупки (позиция, открытая до периода, искажает
+        # результат: закрытые сделки недосчитываются, а продажи остаются «висячими»).
+        # Реализованные лоты фильтруются по дате продажи в конце функции.
+        where_clauses, params = _date_where('trade', None, date_to)
 
         # Группа источников, которые матчатся вместе (один брокер)
         placeholders = ','.join('?' * len(src_group))
@@ -1160,6 +1185,12 @@ def _match_trades_lifo(report_id=None, date_from=None, date_to=None, broker=None
             q_lots, q_unmatched = _run_lifo(q_trades, name_map)
             all_lots.extend(q_lots)
             all_unmatched.extend(q_unmatched)
+
+    # Реализованный результат за период = лоты, закрытые (продажа) внутри периода.
+    # Лоты, проданные до date_from, в отчёт периода не попадают.
+    if date_from:
+        d_from = _norm_date(date_from)
+        all_lots = [l for l in all_lots if _norm_date(l['sell_date']) >= d_from]
 
     conn.close()
     return all_lots, all_unmatched
@@ -1335,6 +1366,10 @@ def save_price(sec_code: str, price: float, qty: int = 0, value: float = 0, clas
     # Convert bond % price to ruble price
     if _is_bond_class(class_code):
         price = _bond_price_ruble(price, qty, value)
+    elif class_code == 'SPBFUT':
+        # Фьючерсы: цена может прийти «за единицу» (×множитель контракта) или
+        # сразу стоимостью контракта — выравниваем масштаб по сделкам.
+        price = normalize_futures_price(sec_code, price)
     conn.execute("""
         INSERT INTO current_price (sec_code, class_code, price, qty, value, timestamp)
         VALUES (?, ?, ?, ?, ?, datetime('now', 'localtime'))
@@ -1366,6 +1401,7 @@ def save_prices_batch(prices: list):
         "UNIQUE(sec_code, class_code))")
     cur = conn.cursor()
     cur.execute("BEGIN")
+    fut_ref = {}  # кэш эталонных цен контрактов (для фьючерсов)
     for p in prices:
         price = p['price']
         class_code = p.get('class_code', '')
@@ -1373,6 +1409,11 @@ def save_prices_batch(prices: list):
         value = p.get('value', 0)
         if _is_bond_class(class_code):
             price = _bond_price_ruble(price, qty, value)
+        elif class_code == 'SPBFUT':
+            code = p['sec_code']
+            if code not in fut_ref:
+                fut_ref[code] = _ref_contract_price(cur, code)
+            price = _scale_to_contract(price, fut_ref[code])
         cur.execute("""
             INSERT INTO current_price (sec_code, class_code, price, qty, value, timestamp)
             VALUES (?, ?, ?, ?, ?, datetime('now', 'localtime'))
@@ -1551,6 +1592,19 @@ def save_quik_trades(trades: list):
         deal_number = str(t.get('trade_num', ''))
         side_ru = 'Покупка' if side == 'buy' else 'Продажа'
 
+        # Номер сделки — первичный ключ сделки (одна сделка = одна строка).
+        # Если эта сделка уже заведена из отчёта брокера (source != 'quik'),
+        # живой QUIK-фид НЕ должен создавать её дубль под source='quik' —
+        # отчёт авторитетнее (иначе сделки ВТБ, присланные QUIK, задваивались
+        # с теми же из отчёта ВТБ и ломали остаток/прибыль).
+        if deal_number:
+            dup = cur.execute(
+                "SELECT id FROM trade WHERE source != 'quik' AND deal_number=? "
+                "AND security_code=? LIMIT 1",
+                (deal_number, sec_code)).fetchone()
+            if dup:
+                continue
+
         # ── Пишем в trade (единая таблица) ──
         cur.execute(f"""
             INSERT INTO trade
@@ -1713,6 +1767,122 @@ def get_instrument_lotsize(sec_code: str, class_code: str = '') -> int:
     if r and r['lotsize'] and r['lotsize'] > 1:
         return r['lotsize']
     return 1
+
+
+# ── Фьючерсы: единицы цены и коды контрактов ──────────────────
+#
+# Отчёты и QUIK дают цену фьючерса в РАЗНЫХ единицах:
+#   SBERF — цена за акцию (278.31 ₽), стоимость контракта = ×100 = 27 831 ₽
+#   MTZ6  — сразу стоимость контракта (18 176 ₽), множитель = 1
+# В trade/current_price единица всегда одна — стоимость контракта в рублях.
+# Эталон масштаба — цена последней сделки по инструменту.
+
+def _ref_contract_price(cur, sec_code: str) -> float:
+    """Эталонная цена контракта (₽) — последняя цена сделки по инструменту."""
+    if not sec_code:
+        return 0.0
+    r = cur.execute("""
+        SELECT price FROM trade
+        WHERE security_code=? AND price > 0
+        ORDER BY substr(trade_date,7,4)||substr(trade_date,4,2)||substr(trade_date,1,2) DESC, id DESC
+        LIMIT 1
+    """, (sec_code,)).fetchone()
+    if not r or not r[0]:
+        return 0.0
+    return float(r[0])
+
+
+def _scale_to_contract(price: float, ref: float) -> float:
+    """Выровнять цену по эталону: убрать (или добавить) лишний множитель 10^k.
+
+    Только выравнивание масштаба (×/÷ 10, 100, 1000) — иначе цена не меняется:
+    реальная цена контракта не может отличаться от эталона в разы.
+    """
+    if not price or price <= 0 or not ref or ref <= 0:
+        return price
+    ratio = price / ref
+    if ratio >= 8:
+        k = 10 ** int(round(math.log10(ratio)))
+        return round(price / k, 2) if k > 1 else price
+    if ratio <= 0.125:
+        k = 10 ** int(round(-math.log10(ratio)))
+        return round(price * k, 2) if k > 1 else price
+    return price
+
+
+def normalize_futures_price(sec_code: str, price: float) -> float:
+    """Привести цену фьючерса (из QUIK/отчёта) к стоимости контракта."""
+    conn = get_connection()
+    try:
+        ref = _ref_contract_price(conn.cursor(), sec_code)
+    finally:
+        conn.close()
+    return _scale_to_contract(price, ref)
+
+
+def resolve_report_code(cur, report_code: str) -> str:
+    """Сопоставить код инструмента из отчёта с кодом QUIK (инструмент = PK).
+
+    Сбер пишет контракт как «MTSI-12.26», а в QUIK он же — «MTZ6».
+    Соответствие берётся из instrument_alias (обучается по номерам сделок).
+    """
+    if not report_code:
+        return report_code
+    r = cur.execute("SELECT sec_code FROM instrument_alias WHERE report_code=?",
+                    (report_code,)).fetchone()
+    return r[0] if r else report_code
+
+
+def learn_instrument_alias(cur, report_code: str, sec_code: str):
+    """Запомнить сопоставление «код отчёта → код QUIK»."""
+    if not report_code or not sec_code or report_code == sec_code:
+        return
+    cur.execute("""
+        INSERT INTO instrument_alias(report_code, sec_code, updated_at)
+        VALUES (?, ?, datetime('now', 'localtime'))
+        ON CONFLICT(report_code) DO UPDATE SET
+            sec_code=excluded.sec_code, updated_at=excluded.updated_at
+    """, (report_code, sec_code))
+
+
+def learn_aliases_by_deals(cur, pairs) -> dict:
+    """Обучить алиасы «код отчёта → код QUIK» по номерам сделок.
+
+    pairs — список (report_code, deal_number). Если сделка с таким номером уже
+    есть в БД под другим кодом (QUIK-фид или другой отчёт) — это тот же контракт
+    под другим именем, запоминаем соответствие для всего импорта.
+    """
+    pairs = [(c, d) for c, d in pairs if c and d]
+    if not pairs:
+        return {}
+    nums = sorted({d for _, d in pairs})
+    found = {}
+    chunk = 500
+    for i in range(0, len(nums), chunk):
+        part = nums[i:i + chunk]
+        ph = ','.join('?' * len(part))
+        rows = cur.execute(f"""
+            SELECT CAST(trade_num AS TEXT) AS num, sec_code AS code, 1 AS prio
+            FROM quik_trade WHERE CAST(trade_num AS TEXT) IN ({ph})
+            UNION ALL
+            SELECT deal_number AS num, security_code AS code,
+                   CASE WHEN source='quik' THEN 1 ELSE 2 END AS prio
+            FROM trade
+            WHERE deal_number IN ({ph})
+              AND security_code IS NOT NULL AND security_code != ''
+        """, part + part).fetchall()
+        for num, code, prio in rows:
+            prev = found.get(num)
+            if code and (prev is None or prio < prev[1]):
+                found[num] = (code, prio)
+    learned = {}
+    for report_code, deal in pairs:
+        hit = found.get(deal)
+        if hit and hit[0] and hit[0] != report_code:
+            learned[report_code] = hit[0]
+    for report_code, code in learned.items():
+        learn_instrument_alias(cur, report_code, code)
+    return learned
 
 
 def get_quik_positions(broker=None):
