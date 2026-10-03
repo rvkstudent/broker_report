@@ -17,10 +17,15 @@ local share_path = modules_path .. "\\share\\lua\\5.3"
 package.path  = share_path .. "\\?.lua;" .. share_path .. "\\?\\init.lua;" .. package.path
 package.cpath = lib_path .. "\\?.dll;" .. lib_path .. "\\?\\core.dll;" .. package.cpath
 
+-- ВАЖНО: здесь НЕ вызываем модульную функцию socket.settimeout — в этой
+-- сборке LuaSocket её нет (есть только метод сокета sock:settimeout), из-за
+-- чего все запросы к API падали с ошибкой "attempt to call a nil value
+-- (field 'settimeout')". Таймаут задаётся через http.TIMEOUT в api_request().
+local socket = require("socket")
+
 local http = require("socket.http")
 local ltn12 = require("ltn12")
 local json = require("cjson")
-local socket = require("socket")
 
 -- HTTPS через luasec (модуль уже лежит в lua_modules рядом со скриптом)
 local https_ok, https = pcall(require, "ssl.https")
@@ -124,7 +129,15 @@ local function api_request(opts)
         req.source = ltn12.source.string(body)
     end
 
-    socket.settimeout(HTTP_TIMEOUT)
+    -- В этой сборке LuaSocket модульной функции socket.settimeout НЕТ (есть
+    -- только метод сокета) — именно на ней падали все запросы с ошибкой
+    -- "attempt to call a nil value (field 'settimeout')". Таймаут задаём через
+    -- http.TIMEOUT / https.TIMEOUT: socket.http сам применяет его к сокету.
+    if type(socket.settimeout) == "function" then
+        socket.settimeout(HTTP_TIMEOUT)
+    end
+    http.TIMEOUT = HTTP_TIMEOUT
+    if https then https.TIMEOUT = HTTP_TIMEOUT end
 
     if opts.url:lower():sub(1, 6) == "https:" then
         if not https then
@@ -267,8 +280,12 @@ local function send_prices()
 
     local ok, res, code, resp_body = api_request{ url = API_URL, body = body }
 
-    if not ok then
-        log_error("send_prices HTTP error: " .. tostring(res))
+    -- code == nil означает, что запрос не дошёл (нет соединения / таймаут):
+    -- socket.http возвращает nil и текст ошибки вместо HTTP-кода. Раньше это
+    -- считалось успехом, и в лог писалось «Sent N prices» при пустом ответе.
+    if not ok or code == nil then
+        log_error("send_prices HTTP error: " .. tostring(res)
+            .. " (code=" .. tostring(code) .. ", url=" .. API_URL .. ")")
         return
     end
 
@@ -745,10 +762,14 @@ function main()
     log_info("Refresh instruments: every " .. REFRESH_INSTRUMENTS .. "s")
     log_info("Log file: " .. tostring(LOG_FILE))
     log_info("Lua version: " .. tostring(_VERSION))
+    log_info("Socket: " .. tostring(socket._VERSION)
+        .. (socket.settimeout and "" or " (без socket.settimeout, таймаут через http.TIMEOUT)"))
 
     -- Загружаем список инструментов с API при старте
-    pcall(fetch_instruments)
-    pcall(send_instrument_params)
+    local oki, erri = pcall(fetch_instruments)
+    if not oki then log_error("fetch_instruments crashed: " .. tostring(erri)) end
+    local oks, errs = pcall(send_instrument_params)
+    if not oks then log_error("send_instrument_params crashed: " .. tostring(errs)) end
     if #INSTRUMENTS == 0 then
         log_info("No instruments from API, fallback to class filter: "
             .. table.concat(FILTER_CLASS_CODES, ", "))
@@ -757,7 +778,8 @@ function main()
     end
 
     -- Загружаем историю сделок из QUIK
-    pcall(load_existing_trades)
+    local oke, erre = pcall(load_existing_trades)
+    if not oke then log_error("load_existing_trades crashed: " .. tostring(erre)) end
 
     local last_log_time = 0
     local last_heartbeat = 0
@@ -770,8 +792,10 @@ function main()
 
         -- Периодическое обновление списка инструментов
         if now - last_refresh >= REFRESH_INSTRUMENTS then
-            pcall(fetch_instruments)
-            pcall(send_instrument_params)
+            local okr, errr = pcall(fetch_instruments)
+            if not okr then log_error("fetch_instruments crashed: " .. tostring(errr)) end
+            local okp, errp = pcall(send_instrument_params)
+            if not okp then log_error("send_instrument_params crashed: " .. tostring(errp)) end
             last_refresh = now
             if #INSTRUMENTS > 0 then
                 log_info("Instruments refreshed: " .. #INSTRUMENTS .. " items")
@@ -782,14 +806,17 @@ function main()
         if now - last_send_time >= SEND_INTERVAL then
             -- Для фьючерсов (SPBFUT) рыночная цена берётся из getParamEx(LAST),
             -- т.к. OnAllTrade для срочного рынка не приходит
-            pcall(refresh_futures_prices)
-            pcall(send_prices)
+            local okf, errf = pcall(refresh_futures_prices)
+            if not okf then log_error("refresh_futures_prices crashed: " .. tostring(errf)) end
+            local okp, errp = pcall(send_prices)
+            if not okp then log_error("send_prices crashed: " .. tostring(errp)) end
             last_send_time = now
         end
 
         -- Отправка пачки сделок по таймеру (реже, чем цены)
         if now - last_send_trades >= SEND_TRADES_INTERVAL then
-            pcall(send_trades)
+            local okt, errt = pcall(send_trades)
+            if not okt then log_error("send_trades crashed: " .. tostring(errt)) end
             last_send_trades = now
         end
 
