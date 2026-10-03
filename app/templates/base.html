@@ -162,15 +162,43 @@
         // Широкие таблицы оборачиваем в прокручиваемый контейнер.
         // На телефоне таблица иначе вылезает за экран, а overflow-x: hidden
         // у body её просто обрезает — до правых колонок не добраться.
-        (function () {
-            document.querySelectorAll('table').forEach(function (table) {
+        //
+        // Часть таблиц появляется уже после загрузки (ответы на fetch),
+        // поэтому одной проверки при разборе HTML мало — следим за DOM.
+        window.brokerWrapTables = function (root) {
+            (root || document).querySelectorAll('table').forEach(function (table) {
                 if (table.closest('.table-responsive')) return;
+                // Таблицу, лежащую внутри своей прокручиваемой обёртки,
+                // не трогаем — иначе получим вложенный скролл.
+                const parent = table.parentElement;
+                if (parent && parent !== document.body) {
+                    const ox = getComputedStyle(parent).overflowX;
+                    if (ox === 'auto' || ox === 'scroll' || ox === 'hidden') return;
+                }
                 const wrap = document.createElement('div');
                 wrap.className = 'table-responsive';
                 table.parentNode.insertBefore(wrap, table);
                 wrap.appendChild(table);
             });
-        })();
+        };
+
+        window.brokerWrapTables();
+
+        // Таблицы, добавленные позже (AJAX), оборачиваются автоматически.
+        if (window.MutationObserver) {
+            const observer = new MutationObserver(function (records) {
+                for (const rec of records) {
+                    for (const node of rec.addedNodes) {
+                        if (node.nodeType !== 1) continue;
+                        if (node.tagName === 'TABLE') window.brokerWrapTables(node.parentElement || document);
+                        else if (node.querySelector && node.querySelector('table')) window.brokerWrapTables(node);
+                    }
+                }
+            });
+            observer.observe(document.body, { childList: true, subtree: true });
+        }
+
+        window.addEventListener('load', function () { window.brokerWrapTables(); });
     </script>
     {% block scripts %}{% endblock %}
 </body>
