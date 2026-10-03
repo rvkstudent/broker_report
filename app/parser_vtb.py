@@ -40,6 +40,16 @@ def parse_int(s):
         return 0
 
 
+def _clean_str(val):
+    """Пустая строка вместо None / float NaN (str(float nan) даёт 'nan')."""
+    if val is None:
+        return ''
+    if isinstance(val, float) and pd is not None and pd.isna(val):
+        return ''
+    s = str(val).strip()
+    return '' if s.lower() == 'nan' else s
+
+
 def _fmt_date(val):
     if val is None or (isinstance(val, float) and pd.isna(val)):
         return ''
@@ -196,6 +206,9 @@ def parse_vtb_report(filepath):
                           'Незавершенные в отчетном периоде сделки с ценными бумагами']:
             _parse_vtb_trade_section(df, cur, report_id, sec_title, sections, max_row, max_col)
 
+        # ── Parse futures (производные инструменты, срочный рынок) ──
+        _parse_vtb_futures_section(df, cur, report_id, sections, max_row, max_col)
+
         # ── Parse REPO ───────────────────────────────────────────
         for sec_title in ['Заключенные в отчетном периоде сделки по переносу открытой позиции Клиента',
                           'Завершенные в отчетном периоде сделки по переносу открытой позиции Клиента']:
@@ -219,6 +232,7 @@ def _find_sections_pd(col_b):
         'Незавершенные в отчетном периоде сделки с ценными бумагами',
         'Заключенные в отчетном периоде сделки по переносу открытой позиции Клиента',
         'Завершенные в отчетном периоде сделки по переносу открытой позиции Клиента',
+        'Сделки с Производными финансовыми инструментами',
         'Отчёт об остатках денежных средств',
         'Отчёт об остатках ценных бумаг',
     ]
@@ -332,7 +346,7 @@ def _parse_vtb_trade_section(df, cur, report_id, section_title, sections, max_ro
         trade_time_str = _fmt_time(date_val)
         settle_date_str = _fmt_date(settle_date) or trade_date_str
         currency_str = str(settle_currency or '').strip() or 'RUR'
-        deal_num_str = str(deal_number or deal_number2 or '').strip()
+        deal_num_str = _clean_str(deal_number or deal_number2)
         # Пропускаем внутренние переводы/трансферы (не биржевые сделки)
         if deal_num_str.startswith(('SR', 'BR')):
             continue
@@ -340,10 +354,18 @@ def _parse_vtb_trade_section(df, cur, report_id, section_title, sections, max_ro
         # чтобы совпадал с номерами из my_trades.xlsx (без префикса)
         if len(deal_num_str) > 1 and deal_num_str[0] in ('B', 'S') and deal_num_str[1:].isdigit():
             deal_num_str = deal_num_str[1:]
-        comment_str = str(comment or '').strip()
-        venue_str = str(venue or '').strip()
+        comment_str = _clean_str(comment)
+        venue_str = _clean_str(venue)
 
         if not trade_date_str or not sec_name:
+            continue
+
+        # Отбрасываем мусорные строки из-за разъехавшихся колонок таблицы
+        # отчёта. У реальной биржевой сделки ВТБ всегда есть № сделки,
+        # положительная сумма и правдоподобный НКД. Если хотя бы одно условие
+        # не выполнено — это служебная/итоговая строка или артефакт разметки
+        # (как «покупка SBERF за 0.50 с НКД 2e18», ломавшая дашборд).
+        if (not deal_num_str) or amount_f <= 0 or nkd_f > 1e9:
             continue
 
         cur.execute("""
@@ -355,6 +377,91 @@ def _parse_vtb_trade_section(df, cur, report_id, section_title, sections, max_ro
               sec_name, sec_code, currency_str, side_str, qty_int, price_f,
               amount_f, nkd_f, broker_fee_f, exchange_fee_f, deal_num_str,
               comment_str[:200], venue_str[:200], 'vtb'))
+
+
+def _parse_vtb_futures_section(df, cur, report_id, sections, max_row, max_col):
+    """Parse VTB futures/derivatives deals (секция «Сделки с Производными…»).
+
+    Раскладка этой секции ОТЛИЧАЕТСЯ от акций:
+      col1  — код контракта (SBERF)
+      col2  — дата и время заключения
+      col5  — вид сделки (Покупка/Продажа)
+      col7  — количество (шт.)
+      col8  — цена контракта в ПУНКТАХ (напр. 276.09)
+      col11 — комиссия Банка за расчёт по сделке
+      col12 — комиссия Банка за заключение сделки
+      col17 — № сделки (с префиксом FB/FS)
+      col30 — место заключения («Срочный рынок …»)
+
+    Раньше эти строки читались как акции → мусор (price=0, amount=0.5,
+    nkd=номер сделки) и реальные сделки SBERF терялись.
+    """
+    start, end = _find_section(sections, 'Сделки с Производными финансовыми инструментами')
+    if start is None:
+        return
+
+    data_start = start + 2  # заголовок таблицы идёт следом за названием секции
+    if data_start >= min(end, max_row):
+        return
+
+    # Множитель «пункты → рубли» для фьючерса (стоимость контракта).
+    # Совпадает с lotsize из QUIK (SBERF = 100): quik хранит цену контракта.
+    fut_mult = {'SBERF': 100}
+
+    for r in range(data_start, min(end, max_row)):
+        code = df.iloc[r, 1]
+        date_val = df.iloc[r, 2]
+        side = df.iloc[r, 5] if max_col >= 6 else None
+        qty = df.iloc[r, 7] if max_col >= 8 else None
+        price_pts = df.iloc[r, 8] if max_col >= 9 else None
+        fee_settle = df.iloc[r, 11] if max_col >= 12 else None  # за расчёт
+        fee_concl = df.iloc[r, 12] if max_col >= 13 else None   # за заключение
+        deal = df.iloc[r, 17] if max_col >= 18 else None
+        venue = df.iloc[r, 30] if max_col >= 31 else None
+
+        if pd.isna(code) or pd.isna(date_val):
+            continue
+
+        code_s = _clean_str(code)
+        side_s = str(side or '').strip()
+        if side_s not in ('Покупка', 'Продажа'):
+            continue
+        qty_i = parse_int(qty)
+        price_pts_f = parse_float(price_pts)
+        if qty_i <= 0 or price_pts_f <= 0:
+            continue
+
+        mult = fut_mult.get(code_s, 100)
+        price_rub = round(price_pts_f * mult, 2)
+        amount_f = round(price_rub * qty_i, 2)
+
+        trade_date_str = _fmt_date(date_val)
+        trade_time_str = _fmt_time(date_val)
+        if not trade_date_str:
+            continue
+
+        broker_fee_f = parse_float(fee_concl)
+        exchange_fee_f = parse_float(fee_settle)
+        deal_num_str = re.sub(r'^[A-Za-z]+', '', _clean_str(deal))
+        venue_str = _clean_str(venue)
+
+        # Номер сделки = первичный ключ. Отчёт — источник истины: если эта же
+        # сделка (тот же № НКЦ) уже записана живым QUIK-фидом как source='quik'
+        # (например, продажи SBERF 04.09 из счёта ВТБ попали в Сбер-фид),
+        # убираем quik-дубль, чтобы сделка осталась ровно в одном источнике — vtb.
+        if deal_num_str:
+            cur.execute("DELETE FROM trade WHERE source='quik' AND deal_number=?",
+                        (deal_num_str,))
+
+        cur.execute("""
+            INSERT OR IGNORE INTO trade(report_id, trade_date, settle_date, trade_time,
+                security_name, security_code, currency, side, quantity, price,
+                amount, nkd, broker_fee, exchange_fee, deal_number, comment, status, source)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (report_id, trade_date_str, trade_date_str, trade_time_str,
+              code_s, code_s, 'RUR', side_s, qty_i, price_rub,
+              amount_f, 0.0, broker_fee_f, exchange_fee_f, deal_num_str,
+              '', venue_str[:200], 'vtb'))
 
 
 def _parse_vtb_repo_section(df, cur, report_id, section_title, sections, max_row, max_col):
