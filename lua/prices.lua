@@ -224,12 +224,54 @@ local function send_prices()
     end
 end
 
+-- Множитель контракта для фьючерсов (SPBFUT).
+-- ВАЖНО: LOTSIZE из QUIK для срочного рынка НЕ подходит — он равен 100 и для
+-- SBERF (котировка за акцию, множитель 100), и для MTZ6/MTSI (котировка уже
+-- за контракт, множитель 1). Из-за этого цена MTZ6 завышалась в 100 раз.
+-- Правильный множитель = STEPPRICE / PRICESTEP (шаг цены в рублях / шаг цены
+-- в пунктах): SBERF 1/0.01 = 100, MTZ6 1/1 = 1.
+-- Дополнительно кэшируем множитель, выведенный из реальной сделки
+-- (value / (price * qty)) — он самый надёжный, т.к. value в QUIK уже
+-- учитывает множитель контракта.
+local FUTURES_MULT_CACHE = {}   -- sec_code => множитель контракта
+
+local function futures_multiplier(class_code, sec_code)
+    if class_code ~= "SPBFUT" then
+        return 1
+    end
+    -- 1) множитель, выведенный из реальной сделки (самый надёжный)
+    local cached = FUTURES_MULT_CACHE[sec_code]
+    if cached and cached > 0 then
+        return cached
+    end
+    -- 2) STEPPRICE / PRICESTEP
+    local ok_s, sp = pcall(getParamEx, class_code, sec_code, "STEPPRICE")
+    local ok_p, ps = pcall(getParamEx, class_code, sec_code, "PRICESTEP")
+    if ok_s and ok_p and sp and ps and sp.param_value and ps.param_value then
+        local stepprice = tonumber(sp.param_value)
+        local pricestep = tonumber(ps.param_value)
+        if stepprice and pricestep and stepprice > 0 and pricestep > 0 then
+            local mult = stepprice / pricestep
+            -- Округляем до целого, если близко (1.0000001 → 1)
+            local rounded = math.floor(mult + 0.5)
+            if math.abs(mult - rounded) < 0.001 and rounded >= 1 then
+                mult = rounded
+            end
+            if mult > 0 then
+                return mult
+            end
+        end
+    end
+    -- 3) fallback: множитель неизвестен, считаем 1 (котировка = стоимость контракта)
+    return 1
+end
+
 -- Обновление текущих цен фьючерсов (SPBFUT) через getParamEx(LAST).
 -- Для срочного рынка QUIK НЕ шлёт OnAllTrade, поэтому рыночная цена
 -- не приходит — берём её из параметра LAST (последняя цена контракта).
 -- LAST для фьючерсов = цена за единицу (пункт/акцию), а стоимость контракта
--- = LAST × lotsize. На сервере фьючерс хранится как price = стоимость контракта
--- и qty = контракты, поэтому здесь умножаем на lotsize для согласованности.
+-- = LAST × множитель. На сервере фьючерс хранится как price = стоимость
+-- контракта и qty = контракты, поэтому здесь умножаем на множитель.
 local FUTURES_LAST_PARAMS = {"LAST", "LASTPRICE", "CURRENTPRICE"}
 local function refresh_futures_prices()
     if #INSTRUMENTS == 0 then
@@ -250,16 +292,9 @@ local function refresh_futures_prices()
                 end
             end
             if price then
-                -- lotsize фьючерса (множитель контракта)
-                local lotsize = 1
-                local ok_l, lp = pcall(getParamEx, cc, sec_code, "LOTSIZE")
-                if ok_l and lp and lp.param_value then
-                    local lv = tonumber(lp.param_value)
-                    if lv and lv > 1 then
-                        lotsize = lv
-                    end
-                end
-                price = price * lotsize
+                -- Множитель контракта (STEPPRICE/PRICESTEP или из сделки)
+                local mult = futures_multiplier(cc, sec_code)
+                price = price * mult
                 price_cache[sec_code] = {
                     price = price,
                     qty = 0,
@@ -416,23 +451,15 @@ local function normalize_trade_datetime(dt)
 end
 
 -- Цена фьючерса (SPBFUT): QUIK отдаёт LAST/цену сделки за единицу (акцию/пункт),
--- а на сервере фьючерс хранится как price = стоимость контракта (LAST × lotsize)
+-- а на сервере фьючерс хранится как price = стоимость контракта (LAST × множитель)
 -- и qty = контракты. Чтобы не сбивать прогноз P&L (иначе ложный убыток -99%,
 -- когда цену за штуку сравнивают с ценой контракта), приводим цену фьючерса
--- к стоимости контракта, умножая на lotsize (как в refresh_futures_prices).
+-- к стоимости контракта, умножая на множитель (как в refresh_futures_prices).
 local function futures_price(price, class_code, sec_code)
     if class_code ~= "SPBFUT" or not price or price <= 0 then
         return price
     end
-    local lotsize = 1
-    local ok, lp = pcall(getParamEx, class_code, sec_code, "LOTSIZE")
-    if ok and lp and lp.param_value then
-        local lv = tonumber(lp.param_value)
-        if lv and lv > 1 then
-            lotsize = lv
-        end
-    end
-    return price * lotsize
+    return price * futures_multiplier(class_code, sec_code)
 end
 
 -- Callback QUIK: обезличенные сделки (для отслеживания цен моих инструментов)
@@ -469,6 +496,22 @@ function OnTrade(trade)
     local price = tonumber(trade.price) or 0
     local qty = tonumber(trade.qty or trade.quantity) or 0
     local value = tonumber(trade.value) or 0
+
+    -- Для фьючерсов выводим множитель контракта из реальной сделки:
+    -- value в QUIK уже учитывает множитель, поэтому mult = value / (price * qty).
+    -- Это самый надёжный источник (SBERF → 100, MTZ6 → 1) и он кэшируется,
+    -- чтобы refresh_futures_prices() использовал верный множитель.
+    if class_code == "SPBFUT" and price > 0 and qty > 0 and value > 0 then
+        local mult = value / (price * qty)
+        local rounded = math.floor(mult + 0.5)
+        if math.abs(mult - rounded) < 0.001 and rounded >= 1 then
+            mult = rounded
+        end
+        if mult > 0 then
+            FUTURES_MULT_CACHE[sec_code] = mult
+        end
+    end
+
     price_cache[sec_code] = {
         -- Для фьючерсов (SPBFUT) цена сделки — за единицу; приводим к стоимости
         -- контракта (× lotsize), иначе прогноз P&L будет показывать ложный -99%.

@@ -2,6 +2,7 @@
 import sqlite3
 import os
 import sys
+import math
 from datetime import datetime
 
 def _get_db_dir() -> str:
@@ -671,15 +672,17 @@ def get_open_trades(report_id=None, date_from=None, date_to=None, broker=None):
     Buys that have NOT been closed by a sell within this period.
     Returns unmatched buy lots, merged by (security_code, buy_date, buy_price).
 
-    Дата: учитывается как для покупок, так и для продаж — открытая позиция
-    показывается только если куплена в выбранном периоде (date_from..date_to).
-    Так блок «Прибыль» по фильтру показывает открытые сделки именно с даты
-    фильтра, а не все исторические (например, MTSS/ОФЗ, купленные до 01.08).
+    ВАЖНО: для ОТКРЫТЫХ ПОЗИЦИЙ date_from ИГНОРИРУЕТСЯ — позиция считается
+    по всей истории до date_to включительно. Иначе позиция, открытая до начала
+    фильтра (например, SBERF 8 контрактов с прошлого месяца), исчезала из
+    отчёта, а сделки внутри периода выглядели полностью закрытыми.
+    Реализованный P&L (get_trade_profit/get_trade_lots) по-прежнему строго
+    фильтруется по периоду.
 
     Все сделки в единой таблице trade (source='sber'/'vtb'/'quik').
     QUIK-трейды участвуют в LIFO-матчинге вместе со своим брокером.
     """
-    _, unmatched = _match_trades_lifo(report_id, date_from, date_to, broker)
+    _, unmatched = _match_trades_lifo(report_id, None, date_to, broker)
 
     # Merge consecutive lots with same code, date, and price
     merged = []
@@ -700,11 +703,11 @@ def get_instrument_summary(report_id=None, date_from=None, date_to=None, broker=
     Aggregate summary per instrument from OPEN (unmatched) buy positions.
     Shows total qty, average price, total cost per security.
 
-    Дата учитывается (как в get_open_trades): открытые позиции показываются
-    только если куплены в выбранном периоде.
+    Как и get_open_trades: date_from ИГНОРИРУЕТСЯ, позиция считается по всей
+    истории до date_to (иначе открытые позиции, купленные до фильтра, пропадали).
     """
     from collections import defaultdict
-    _, unmatched = _match_trades_lifo(report_id, date_from, date_to, broker)
+    _, unmatched = _match_trades_lifo(report_id, None, date_to, broker)
 
     by_sec = defaultdict(lambda: {'qty': 0, 'cost': 0.0, 'name': ''})
     for u in unmatched:
@@ -1631,6 +1634,13 @@ def get_current_prices():
     вместо 80308.34. Чтобы такие строки не ломали P&L (‑99%), при чтении
     самокорректируем: если хранимая цена расходится с value/qty более чем
     на 5% — берём рублёвую цену за бумагу = value/qty.
+
+    Для фьючерсов (SPBFUT) цена должна быть стоимостью контракта в рублях.
+    Старая версия Lua умножала LAST на LOTSIZE (=100) для ВСЕХ фьючерсов,
+    из-за чего MTZ6/MTSI (котировка уже за контракт) завышались в 100 раз
+    (MTZ6 = 1 713 200 вместо 17 132). Самокорректируем: сравниваем хранимую
+    цену с последней известной стоимостью контракта из сделок (amount/qty)
+    и, если расхождение кратно степени 10 (≥8×), делим/умножаем на 10^n.
     """
     conn = get_connection()
     rows = conn.execute("""
@@ -1643,6 +1653,19 @@ def get_current_prices():
         WHERE rn = 1
         ORDER BY sec_code
     """).fetchall()
+    # Эталон стоимости контракта для фьючерсов — из последней сделки (amount/qty)
+    fut_ref = {}
+    for t in conn.execute("""
+        SELECT security_code, quantity, amount
+        FROM trade
+        WHERE class_code = 'SPBFUT' AND quantity > 0 AND amount > 0
+        ORDER BY substr(trade_date,7,4)||substr(trade_date,4,2)||substr(trade_date,1,2) DESC, trade_time DESC
+    """).fetchall():
+        code = t['security_code']
+        if code not in fut_ref:
+            ref = t['amount'] / t['quantity']
+            if ref > 0:
+                fut_ref[code] = ref
     conn.close()
     result = []
     for r in rows:
@@ -1654,6 +1677,18 @@ def get_current_prices():
                 per_qty = round(value / qty, 2)
                 if per_qty > 0 and abs(d['price'] / per_qty - 1) > 0.05:
                     d['price'] = per_qty
+        elif d.get('class_code') == 'SPBFUT':
+            ref = fut_ref.get(d['sec_code'])
+            if ref and ref > 0 and d['price'] > 0:
+                ratio = d['price'] / ref
+                # Расхождение кратно степени 10 (напр. ×100) — исправляем.
+                # Порог 8× отделяет реальный сбой единиц от обычного движения
+                # цены (даже ±50% не даст 8×). Допуск 0.2 — эталон берётся из
+                # сделки, цена которой может отличаться от текущей на несколько %.
+                if ratio >= 8 or ratio <= 0.125:
+                    power = round(math.log10(ratio))
+                    if abs(ratio / (10 ** power) - 1) < 0.2:
+                        d['price'] = round(d['price'] / (10 ** power), 2)
         result.append(d)
     return result
 

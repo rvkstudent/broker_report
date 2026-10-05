@@ -792,7 +792,9 @@ def api_forecast():
 
     prices = get_current_prices()
     price_map = {p['sec_code']: p['price'] for p in prices}
-    open_trades = list(get_open_trades(None, to_dmy(date_from), to_dmy(date_to), broker))
+    # date_from не передаём: открытые позиции считаются по всей истории до
+    # date_to (иначе позиция, открытая до начала фильтра, пропадала из прогноза).
+    open_trades = list(get_open_trades(None, None, to_dmy(date_to), broker))
 
     TRADE_FEE_RATE = 0.000685
     forecast_map = {}
