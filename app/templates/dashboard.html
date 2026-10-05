@@ -874,9 +874,9 @@ async function refreshOpenTrades() {
             let curPrice = pmap[code];
             if (curPrice == null) continue;
 
-            // Update current price cell (col 5)
-            row.cells[5].innerHTML = fmtPrice(curPrice);
-            row.cells[5].className = 'text-end fw-bold';
+            // Update current price cell (col 6)
+            row.cells[6].innerHTML = fmtPrice(curPrice);
+            row.cells[6].className = 'text-end fw-bold';
 
             // Recalc P&L
             let buyFee = totalCost * TRADE_FEE_RATE;
@@ -886,14 +886,14 @@ async function refreshOpenTrades() {
             let plPct = totalCost > 0 ? (netPl / totalCost * 100) : 0;
             let isPos = netPl >= 0;
 
-            // Update P&L cell (col 6)
+            // Update P&L cell (col 7)
             let arrow = isPos ? '<span class="arrow-up">&#9650;</span>' : '<span class="arrow-down">&#9660;</span>';
-            row.cells[6].innerHTML = '<span class="pl-cell">' + arrow + ' ' + netPl.toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2, signDisplay:'always'}) + '</span>';
-            row.cells[6].className = 'text-end ' + (isPos ? 'profit-positive' : 'profit-negative');
-
-            // Update % cell (col 7)
-            row.cells[7].innerHTML = plPct.toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2, signDisplay:'always'}) + '%';
+            row.cells[7].innerHTML = '<span class="pl-cell">' + arrow + ' ' + netPl.toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2, signDisplay:'always'}) + '</span>';
             row.cells[7].className = 'text-end ' + (isPos ? 'profit-positive' : 'profit-negative');
+
+            // Update % cell (col 8)
+            row.cells[8].innerHTML = plPct.toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2, signDisplay:'always'}) + '%';
+            row.cells[8].className = 'text-end ' + (isPos ? 'profit-positive' : 'profit-negative');
 
             // Update row bg
             row.className = isPos ? 'bg-profit-pos' : 'bg-profit-neg';
@@ -933,14 +933,14 @@ async function refreshOpenTrades() {
             let isPos = subNet >= 0;
             let cls = isPos ? 'profit-positive' : 'profit-negative';
 
-            // P&L cell (col 6)
-            srow.cells[6].innerHTML = '<span class="pl-cell">' + (isPos ? '<span class="arrow-up">&#9650;</span>' : '<span class="arrow-down">&#9660;</span>') + ' ' +
+            // P&L cell (col 7)
+            srow.cells[7].innerHTML = '<span class="pl-cell">' + (isPos ? '<span class="arrow-up">&#9650;</span>' : '<span class="arrow-down">&#9660;</span>') + ' ' +
                 subNet.toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2, signDisplay:'always'}) + '</span>';
-            srow.cells[6].className = 'text-end ' + cls;
-
-            // % cell (col 7)
-            srow.cells[7].innerHTML = subPct.toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2, signDisplay:'always'}) + '%';
             srow.cells[7].className = 'text-end ' + cls;
+
+            // % cell (col 8)
+            srow.cells[8].innerHTML = subPct.toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2, signDisplay:'always'}) + '%';
+            srow.cells[8].className = 'text-end ' + cls;
         }
 
         // ── Recalculate total (ИТОГО ПОРТФЕЛЬ) row ──
@@ -958,13 +958,13 @@ async function refreshOpenTrades() {
             if (totalRow) {
                 let isPos = totalNet >= 0;
                 let cls = isPos ? 'profit-positive' : 'profit-negative';
-                // P&L cell (col 6)
-                totalRow.cells[6].innerHTML = (isPos ? '<span class="arrow-up">&#9650;</span>' : '<span class="arrow-down">&#9660;</span>') + ' ' +
+                // P&L cell (col 7)
+                totalRow.cells[7].innerHTML = (isPos ? '<span class="arrow-up">&#9650;</span>' : '<span class="arrow-down">&#9660;</span>') + ' ' +
                     totalNet.toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2, signDisplay:'always'});
-                totalRow.cells[6].className = 'text-end ' + cls;
-                // % cell (col 7)
-                totalRow.cells[7].innerHTML = totalPct.toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2, signDisplay:'always'}) + '%';
                 totalRow.cells[7].className = 'text-end ' + cls;
+                // % cell (col 8)
+                totalRow.cells[8].innerHTML = totalPct.toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2, signDisplay:'always'}) + '%';
+                totalRow.cells[8].className = 'text-end ' + cls;
 
                 // Also update total cost cell (col 4)
                 totalRow.cells[4].innerHTML = totalCost.toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2});
