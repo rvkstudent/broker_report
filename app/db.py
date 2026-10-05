@@ -701,14 +701,12 @@ def get_open_trades(report_id=None, date_from=None, date_to=None, broker=None):
     Все сделки в единой таблице trade (source='sber'/'vtb'/'quik').
     QUIK-трейды участвуют в LIFO-матчинге вместе со своим брокером.
     """
+    # date_from сюда НЕ передаём — см. примечание выше: остаток считается по
+    # всей истории до date_to. Раньше unmatched дополнительно фильтровался по
+    # «куплено не раньше date_from», и позиция, набранная до начала периода
+    # (например, 6 из 9 облигаций Атомэнергопрома, купленные в 2025-м),
+    # просто исчезала: в отчёте оставались только 3 штуки, купленные 19.08.2026.
     _, unmatched = _match_trades_lifo(report_id, None, date_to, broker)
-
-    # В этом блоке показываем только позиции, открытые В ПЕРИОДЕ (позиция до
-    # начала периода — не результат периода). Лоты, купленные до date_from,
-    # уже участвуют в LIFO выше как входящая позиция и закрывают продажи.
-    if date_from:
-        d_from = _norm_date(date_from)
-        unmatched = [u for u in unmatched if _norm_date(u['buy_date']) >= d_from]
 
     # Merge consecutive lots with same code, date, and price
     merged = []
@@ -733,12 +731,9 @@ def get_instrument_summary(report_id=None, date_from=None, date_to=None, broker=
     истории до date_to (иначе открытые позиции, купленные до фильтра, пропадали).
     """
     from collections import defaultdict
+    # Как и в get_open_trades: date_from не фильтруем — сводка показывает
+    # фактический остаток на конец периода, а не только то, что куплено внутри.
     _, unmatched = _match_trades_lifo(report_id, None, date_to, broker)
-
-    # Как и в get_open_trades: только позиции, открытые в выбранном периоде.
-    if date_from:
-        d_from = _norm_date(date_from)
-        unmatched = [u for u in unmatched if _norm_date(u['buy_date']) >= d_from]
 
     by_sec = defaultdict(lambda: {'qty': 0, 'cost': 0.0, 'name': ''})
     for u in unmatched:
