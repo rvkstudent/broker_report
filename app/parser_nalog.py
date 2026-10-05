@@ -19,6 +19,7 @@
 import re
 import os
 import sqlite3
+import time
 from datetime import datetime
 from app.db import get_connection
 
@@ -26,6 +27,32 @@ try:
     import pandas as pd
 except ImportError:
     pd = None
+
+
+# ── Кэш агрегатов ─────────────────────────────────────────────
+# Таблица nalog крупная (сотни тысяч строк), а страница «Налоги» группирует
+# её целиком несколько раз за заход. Каждая группировка — полный скан около
+# 300 мс, поэтому результат держим в памяти. Данные меняются только при
+# импорте отчёта, и импорт кэш сбрасывает, а TTL ловит изменения снаружи
+# (например, подтянутые из Firebase строки).
+_AGG_CACHE: dict = {}
+_AGG_TTL = 60.0
+
+
+def invalidate_nalog_cache():
+    """Сбросить кэш агрегатов (вызывается после импорта отчёта)."""
+    _AGG_CACHE.clear()
+
+
+def _cached_agg(key, producer):
+    now = time.monotonic()
+    hit = _AGG_CACHE.get(key)
+    if hit is not None and now - hit[0] < _AGG_TTL:
+        return hit[1]
+    value = producer()
+    _AGG_CACHE[key] = (now, value)
+    return value
+
 
 
 def parse_float(s):
@@ -384,14 +411,19 @@ def parse_nalog_report(filepath):
     conn.close()
 
     print(f'[nalog] {filename}: {cnt} записей, доход={total_income:.2f}')
+    invalidate_nalog_cache()
     return year
 
 
 def get_nalog_summary():
     """Get all summary data flat — instrument × year × metrics.
-    
+
     Returns list of dicts, one per (instrument, year) combination.
     """
+    return _cached_agg('summary', _load_nalog_summary)
+
+
+def _load_nalog_summary():
     conn = get_connection()
     rows = conn.execute("""
         SELECT n.instrument_name, n.instrument_code, n.year,
@@ -442,6 +474,10 @@ def get_nalog_tax_summary_by_year():
 
 def get_nalog_group_summary():
     """Get totals grouped by ОФЗ / Прочие per year."""
+    return _cached_agg('group', _load_nalog_group_summary)
+
+
+def _load_nalog_group_summary():
     conn = get_connection()
     rows = conn.execute("""
         SELECT 

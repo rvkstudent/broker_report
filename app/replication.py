@@ -59,6 +59,14 @@ logger = logging.getLogger(__name__)
 
 SYNC_STATE_PATH = os.path.join(_get_db_dir(), '.broker_sync_state')
 
+# Предел размера узла, который забираем из Firebase за один pull.
+# Firebase отдаёт узлы целиком, поэтому крупный узел — это и десятки
+# мегабайт трафика, и рост SQLite. Превышение — пропуск с предупреждением.
+PULL_MAX_ROWS = int(os.environ.get('BROKER_PULL_MAX_ROWS', '200000'))
+
+# Узлы, пропущенные из-за размера: не дёргаем их повторно в этом процессе
+_pull_skipped_tables = set()
+
 # Firebase Admin SDK инициализируется лениво (lazy)
 _firebase_initialized = False
 _firebase_lock = threading.Lock()
@@ -375,21 +383,59 @@ def _write_table_firebase(table_name: str, data: dict):
 
 
 def _push_table(table_name: str, key_fn, sql: str):
-    """Прочитать таблицу из SQLite и записать в Firebase (append)."""
+    """Прочитать таблицу из SQLite и записать в Firebase (append).
+
+    Пишем через update() — только свои ключи, ничего не удаляя. Раньше для
+    trade стоял set() (перезапись узла целиком), но теперь в облаке два
+    экземпляра приложения — сервер и рабочая машина с QUIK. Перезапись узла
+    означала бы, что экземпляр с неполной базой затирает данные второго.
+    Дубликаты, которые раньше вычищал set(), отсекаются при pull()
+    по паре (source, deal_number).
+    """
     data = _read_table(table_name, key_fn, sql)
     if not data:
         logger.debug(f'Table {table_name}: no rows to push')
         return
-    # Для trade таблицы используем set() вместо update() —
-    # перезаписываем весь узел, чтобы удалить дубликаты
-    # с устаревшими ключами (например, S/B-префиксы).
-    if table_name == 'trade':
-        ref = _rtdb_root.child(table_name)
-        ref.set(data)
-        logger.debug(f'Pushed {len(data)} rows to Firebase/{table_name} (overwrite)')
-    else:
-        _write_table_firebase(table_name, data)
-        logger.debug(f'Pushed {len(data)} rows to Firebase/{table_name}')
+    _write_table_firebase(table_name, data)
+    logger.debug(f'Pushed {len(data)} rows to Firebase/{table_name}')
+
+
+def _read_cloud_node(table_name: str, ref):
+    """Прочитать узел RTDB как словарь {ключ: строка}.
+
+    Firebase отдаёт массив (list), если все ключи узла — целые числа подряд:
+    так происходит, когда ключом выбрано числовое поле (id строки).
+    Обычный код с .items() на таком узле падает с
+    «'list' object has no attribute 'items'», поэтому приводим список
+    к словарю.
+
+    Перед полным чтением делается «мелкий» запрос — только ключи: так
+    узел на миллион записей не тянется в память и не кладётся в SQLite.
+    """
+    if table_name in _pull_skipped_tables:
+        return None
+
+    node_keys = ref.get(shallow=True)
+    if not node_keys:
+        return {}
+
+    if len(node_keys) > PULL_MAX_ROWS:
+        _pull_skipped_tables.add(table_name)
+        logger.warning(
+            'Узел %s содержит %d записей — больше лимита %d. Пропускаю узел: '
+            'это десятки мегабайт трафика и рост базы. Проверьте, нет ли там '
+            'дублей от повторных импортов; лимит меняется переменной '
+            'BROKER_PULL_MAX_ROWS', table_name, len(node_keys), PULL_MAX_ROWS)
+        return None
+
+    cloud_data = ref.get()
+    if not cloud_data:
+        return {}
+    if isinstance(cloud_data, list):
+        logger.info('%s: узел пришёл массивом (%d элементов) — читаю по индексам',
+                    table_name, len(cloud_data))
+        return {str(i): row for i, row in enumerate(cloud_data) if row is not None}
+    return cloud_data
 
 
 def _pull_table(table_name: str, insert_sql: str, insert_params_template: tuple):
@@ -400,7 +446,7 @@ def _pull_table(table_name: str, insert_sql: str, insert_params_template: tuple)
     """
     import sqlite3 as _sqlite3
     ref = _rtdb_root.child(table_name)
-    cloud_data = ref.get()
+    cloud_data = _read_cloud_node(table_name, ref)
     if not cloud_data:
         return 0
 

@@ -3,7 +3,9 @@
 import os
 import re
 from bs4 import BeautifulSoup
-from app.db import get_connection, init_db, get_instrument_lotsize
+from app.db import (get_connection, init_db, get_instrument_lotsize,
+                    resolve_report_code, learn_aliases_by_deals,
+                    _ref_contract_price, _scale_to_contract)
 from app.parser_vtb import parse_vtb_report
 from app.parser_mytrades import parse_mytrades
 from app.parser_openbroker import parse_openbroker_report
@@ -41,8 +43,13 @@ def extract_text(cell):
     return cell.get_text(strip=True)
 
 
-def parse_report(filepath):
-    """Main entry: parse a broker report (HTML for Sber, XLSX for VTB) and persist to DB."""
+def parse_report(filepath, force=False):
+    """Main entry: parse a broker report (HTML for Sber, XLSX for VTB) and persist to DB.
+
+    force=True — перепарсить отчёт, даже если он уже загружен (например, после
+    правок парсера/справочника инструментов). Строки отчёта перезаписываются,
+    сделки с теми же номерами корректируются, дублей не появляется.
+    """
     init_db()
 
     # ── Skip already-processed reports ───────────────────────
@@ -55,12 +62,12 @@ def parse_report(filepath):
         has_data = conn.execute(
             "SELECT COUNT(*) AS cnt FROM trade WHERE report_id=?", (rid,)
         ).fetchone()['cnt']
-        if has_data > 0:
+        if has_data > 0 and not force:
             conn.close()
             print(f'  [skip] {fname} уже обработан (report_id={rid}, сделок={has_data})')
             return rid
         # Если сделок 0 — предыдущий парсинг упал, перезаписываем
-        print(f'  [retry] {fname}: перепарсинг (report_id={rid}, предыдущих сделок=0)')
+        print(f'  [retry] {fname}: перепарсинг (report_id={rid}, предыдущих сделок={has_data})')
     conn.close()
 
     # Detect file type by extension, name, and content
@@ -209,6 +216,25 @@ def _parse_trades(soup, cur, report_id):
             return  # нет таблиц сделок
 
     for kind, table in tables.items():
+        if kind == 'futures':
+            # Код контракта в отчёте может отличаться от кода в QUIK
+            # (Сбер: «MTSI-12.26» ↔ QUIK «MTZ6»). Обучаем алиасы по номерам
+            # сделок ДО импорта, чтобы строки без совпадения по номеру тоже
+            # попали в правильный инструмент (иначе часть позиции теряется).
+            pairs = []
+            for r in table.find_all('tr'):
+                cs = r.find_all('td')
+                if len(cs) < 11:
+                    continue
+                code = extract_text(cs[3])
+                num = extract_text(cs[10])
+                if code and num:
+                    pairs.append((code, num))
+            if pairs:
+                learned = learn_aliases_by_deals(cur, pairs)
+                if learned:
+                    print(f'  [parser] futures code aliases: {learned}')
+
         for row in table.find_all('tr'):
             cells = row.find_all('td')
             if not cells:
@@ -234,9 +260,11 @@ def _parse_trades(soup, cur, report_id):
                     trade_date = extract_text(cells[0])
                     settle_date = extract_text(cells[1])
                     trade_time = extract_text(cells[2])
-                    sec_code = extract_text(cells[3])
-                    # Импортируем только фьючерсы с известным коду кодом (как в QUIK/справочнике),
-                    # чтобы не плодить дубли под другим кодом (отчёт: MIX-9.26, QUIK: MXU6).
+                    report_code = extract_text(cells[3])
+                    # Код из отчёта → код QUIK (инструмент — первичный ключ).
+                    # Если сопоставления нет — работаем с кодом как есть; при
+                    # отсутствии его в справочнике строку пропускаем (как раньше).
+                    sec_code = resolve_report_code(cur, report_code)
                     if not cur.execute(
                         "SELECT 1 FROM instrument WHERE sec_code=? AND class_code='SPBFUT'",
                         (sec_code,)).fetchone():
@@ -247,12 +275,11 @@ def _parse_trades(soup, cur, report_id):
                     broker_fee = parse_float(extract_text(cells[8])) if len(cells) > 8 else 0
                     exchange_fee = parse_float(extract_text(cells[9])) if len(cells) > 9 else 0
                     deal_number = extract_text(cells[10]) if len(cells) > 10 else ''
-                    # Для согласованности с QUIK (price = стоимость контракта, qty = контракты)
-                    # умножаем цену за единицу на lotsize (для MXU6 lotsize=1 — цена не меняется).
-                    lotsize = get_instrument_lotsize(sec_code, 'SPBFUT')
-                    if lotsize <= 1:
-                        lotsize = 1
-                    price = round(price_unit * lotsize, 2)
+                    # Цена — стоимость контракта в рублях (как в trade/QUIK).
+                    # Отчёты дают её по-разному: SBERF — за акцию (×100),
+                    # MTSI-12.26/MTZ6 — сразу за контракт. Выравниваем масштаб
+                    # по последним сделкам инструмента.
+                    price = _scale_to_contract(price_unit, _ref_contract_price(cur, sec_code))
                     amount = round(qty * price, 2)
                     sec_name, currency = sec_code, 'RUB'
                     nkd, comment, status = 0, '', ''

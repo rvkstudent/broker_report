@@ -17,16 +17,48 @@ local share_path = modules_path .. "\\share\\lua\\5.3"
 package.path  = share_path .. "\\?.lua;" .. share_path .. "\\?\\init.lua;" .. package.path
 package.cpath = lib_path .. "\\?.dll;" .. lib_path .. "\\?\\core.dll;" .. package.cpath
 
+-- ВАЖНО: здесь НЕ вызываем модульную функцию socket.settimeout — в этой
+-- сборке LuaSocket её нет (есть только метод сокета sock:settimeout), из-за
+-- чего все запросы к API падали с ошибкой "attempt to call a nil value
+-- (field 'settimeout')". Таймаут задаётся через http.TIMEOUT в api_request().
+local socket = require("socket")
+
 local http = require("socket.http")
 local ltn12 = require("ltn12")
 local json = require("cjson")
-local socket = require("socket")
+
+-- HTTPS через luasec (модуль уже лежит в lua_modules рядом со скриптом)
+local https_ok, https = pcall(require, "ssl.https")
+if not https_ok then https = nil end
 
 -- ==================== НАСТРОЙКИ ====================
-local API_BASE = "http://127.0.0.1:5000"
+-- Адрес сервера и токен берутся из lua/config.local.lua, который НЕ хранится
+-- в репозитории (он публичный). Если файла нет — работаем локально, как раньше.
+local CONFIG = { api_base = "http://127.0.0.1:5000", api_token = "" }
+do
+    local conf_path = script_dir .. "\\config.local.lua"
+    local f = io.open(conf_path, "r")
+    if f then
+        f:close()
+        local ok, loaded = pcall(dofile, conf_path)
+        if ok and type(loaded) == "table" then
+            for k, v in pairs(loaded) do CONFIG[k] = v end
+            print("BrokerReport: загружен config.local.lua -> " .. tostring(CONFIG.api_base))
+        else
+            print("BrokerReport: НЕ удалось прочитать config.local.lua: " .. tostring(loaded))
+        end
+    else
+        print("BrokerReport: config.local.lua не найден, работаем с " .. tostring(CONFIG.api_base))
+    end
+end
+
+local API_BASE = CONFIG.api_base
+local API_TOKEN = CONFIG.api_token or ""
 local API_URL = API_BASE .. "/api/price"
 local API_TRADES = API_BASE .. "/api/trade"
 local API_INSTRUMENTS = API_BASE .. "/api/instruments"
+local HTTP_TIMEOUT = tonumber(CONFIG.timeout) or 15   -- секунд на один запрос
+local CA_FILE = CONFIG.ca_file or (share_path .. "\\ssl\\cacert.pem")
 local SEND_INTERVAL = 1        -- секунд между отправками цен (пачками)
 local SEND_TRADES_INTERVAL = 3 -- секунд между отправками сделок
 local REFRESH_INSTRUMENTS = 300 -- секунд между обновлением списка инструментов (5 мин)
@@ -69,17 +101,76 @@ end
 local function log_info(msg)  log_msg("INFO", msg)  end
 local function log_error(msg) log_msg("ERROR", msg) end
 
+-- Единая отправка запроса к API.
+-- Сама выбирает http или https по схеме URL, подставляет X-API-Token,
+-- таймаут и (для HTTPS) проверку сертификата сервера по CA-бандлу.
+-- Возвращает: ok, сообщение_об_ошибке, http_код, тело_ответа
+local function api_request(opts)
+    local body = opts.body
+    local resp = {}
+
+    local headers = {
+        ["Accept"] = "application/json",
+        ["X-API-Token"] = API_TOKEN,
+        ["Connection"] = "close",
+    }
+    if body then
+        headers["Content-Type"] = "application/json"
+        headers["Content-Length"] = tostring(#body)
+    end
+
+    local req = {
+        url = opts.url,
+        method = opts.method or (body and "POST" or "GET"),
+        headers = headers,
+        sink = ltn12.sink.table(resp),
+    }
+    if body then
+        req.source = ltn12.source.string(body)
+    end
+
+    -- В этой сборке LuaSocket модульной функции socket.settimeout НЕТ (есть
+    -- только метод сокета) — именно на ней падали все запросы с ошибкой
+    -- "attempt to call a nil value (field 'settimeout')". Таймаут задаём через
+    -- http.TIMEOUT / https.TIMEOUT: socket.http сам применяет его к сокету.
+    if type(socket.settimeout) == "function" then
+        socket.settimeout(HTTP_TIMEOUT)
+    end
+    http.TIMEOUT = HTTP_TIMEOUT
+    if https then https.TIMEOUT = HTTP_TIMEOUT end
+
+    if opts.url:lower():sub(1, 6) == "https:" then
+        if not https then
+            return false, "HTTPS недоступен: в lua_modules нет модуля ssl (luasec)", nil, ""
+        end
+        if CONFIG.verify_tls ~= false then
+            local cafile = io.open(CA_FILE, "r")
+            if cafile then
+                cafile:close()
+                req.cafile = CA_FILE
+                req.verify = "peer"
+            else
+                -- Без CA-бандла проверка невозможна: сообщаем и продолжаем,
+                -- чтобы поток данных не останавливался
+                print("BrokerReport: нет файла " .. CA_FILE ..
+                      " — TLS без проверки сертификата (положите cacert.pem)")
+                req.verify = "none"
+            end
+        else
+            req.verify = "none"
+        end
+        req.protocol = "tlsv1_2"
+        local ok, res, code = pcall(https.request, req)
+        return ok, res, code, table.concat(resp)
+    end
+
+    local ok, res, code = pcall(http.request, req)
+    return ok, res, code, table.concat(resp)
+end
+
 -- Загрузка списка моих инструментов с API
 local function fetch_instruments()
-    local resp = {}
-    local ok, res, code = pcall(function()
-        return http.request{
-            url = API_INSTRUMENTS,
-            method = "GET",
-            headers = { ["Accept"] = "application/json" },
-            sink = ltn12.sink.table(resp)
-        }
-    end)
+    local ok, res, code, resp_body = api_request{ url = API_INSTRUMENTS, method = "GET" }
 
     if not ok then
         log_error("fetch_instruments HTTP error: " .. tostring(res))
@@ -88,11 +179,14 @@ local function fetch_instruments()
 
     local ncode = tonumber(code)
     if not ncode or ncode >= 400 then
-        log_error("fetch_instruments returned code " .. tostring(code))
+        log_error("fetch_instruments returned code " .. tostring(code) .. ": " .. tostring(resp_body))
+        if ncode == 401 then
+            log_error("Отказано в доступе: проверьте api_token в lua/config.local.lua")
+        end
         return false
     end
 
-    local body = table.concat(resp)
+    local body = resp_body or ""
     local okj, data = pcall(function() return json.decode(body) end)
     if not okj or type(data) ~= "table" then
         log_error("fetch_instruments: invalid JSON response")
@@ -152,24 +246,13 @@ local function send_instrument_params()
     end
 
     local body = json.encode({ instruments = batch })
-    local resp = {}
-    local ok, res, code = pcall(function()
-        return http.request{
-            url = API_INSTRUMENTS,
-            method = "POST",
-            headers = {
-                ["Content-Type"] = "application/json",
-                ["Content-Length"] = tostring(#body)
-            },
-            source = ltn12.source.string(body),
-            sink = ltn12.sink.table(resp)
-        }
-    end)
+    local ok, res, code, resp_body = api_request{ url = API_INSTRUMENTS, body = body }
     if not ok then
         log_error("send_instrument_params HTTP error: " .. tostring(res))
+    elseif tonumber(code) and tonumber(code) >= 400 then
+        log_error("send_instrument_params returned code " .. tostring(code) .. ": " .. tostring(resp_body))
     else
-        local resp_body = table.concat(resp)
-        log_info(string.format("Sent %d instrument params, response: %s", #batch, resp_body))
+        log_info(string.format("Sent %d instrument params, response: %s", #batch, tostring(resp_body)))
     end
 end
 
@@ -194,31 +277,26 @@ local function send_prices()
     end
 
     local body = json.encode({ prices = prices })
-    local resp = {}
 
-    local ok, res, code = pcall(function()
-        return http.request{
-            url = API_URL,
-            method = "POST",
-            headers = {
-                ["Content-Type"] = "application/json",
-                ["Content-Length"] = tostring(#body)
-            },
-            source = ltn12.source.string(body),
-            sink = ltn12.sink.table(resp)
-        }
-    end)
+    local ok, res, code, resp_body = api_request{ url = API_URL, body = body }
 
-    if not ok then
-        log_error("HTTP error: " .. tostring(res))
+    -- code == nil означает, что запрос не дошёл (нет соединения / таймаут):
+    -- socket.http возвращает nil и текст ошибки вместо HTTP-кода. Раньше это
+    -- считалось успехом, и в лог писалось «Sent N prices» при пустом ответе.
+    if not ok or code == nil then
+        log_error("send_prices HTTP error: " .. tostring(res)
+            .. " (code=" .. tostring(code) .. ", url=" .. API_URL .. ")")
         return
     end
 
     local ncode = tonumber(code)
     if ncode and ncode >= 400 then
-        log_error("API returned code " .. tostring(code) .. ": " .. table.concat(resp))
+        log_error("API returned code " .. tostring(code) .. ": " .. tostring(resp_body))
+        if ncode == 401 then
+            log_error("Отказано в доступе: проверьте api_token в lua/config.local.lua")
+        end
     else
-        log_info(string.format("Sent %d prices, response: %s", #prices, table.concat(resp)))
+        log_info(string.format("Sent %d prices, response: %s", #prices, tostring(resp_body)))
         -- Очищаем кеш после успешной отправки (оставляем только неподтверждённые)
         price_cache = {}
     end
@@ -332,20 +410,8 @@ local function send_trades()
     end
 
     local body = json.encode({ trades = batch })
-    local resp = {}
 
-    local ok, res, code = pcall(function()
-        return http.request{
-            url = API_TRADES,
-            method = "POST",
-            headers = {
-                ["Content-Type"] = "application/json",
-                ["Content-Length"] = tostring(#body)
-            },
-            source = ltn12.source.string(body),
-            sink = ltn12.sink.table(resp)
-        }
-    end)
+    local ok, res, code, resp_body = api_request{ url = API_TRADES, body = body }
 
     if not ok then
         log_error("send_trades HTTP error: " .. tostring(res))
@@ -364,7 +430,10 @@ local function send_trades()
 
     local ncode = tonumber(code)
     if ncode and ncode >= 400 then
-        log_error("send_trades API returned code " .. tostring(code) .. ": " .. table.concat(resp))
+        log_error("send_trades API returned code " .. tostring(code) .. ": " .. tostring(resp_body))
+        if ncode == 401 then
+            log_error("Отказано в доступе: проверьте api_token в lua/config.local.lua")
+        end
         -- возврат в очередь при ошибке, но не больше 2000
         if #trade_cache + batch_size <= 2000 then
             for _, t in ipairs(batch) do
@@ -729,16 +798,21 @@ end
 function main()
     log_info("BrokerReport Price Sender started")
     log_info("API: " .. API_URL)
+    log_info("API token: " .. (API_TOKEN ~= "" and "задан" or "НЕ ЗАДАН (см. lua/config.local.lua)"))
     log_info("Instruments API: " .. API_INSTRUMENTS)
     log_info("Send interval: " .. SEND_INTERVAL .. "s")
     log_info("Send trades interval: " .. SEND_TRADES_INTERVAL .. "s")
     log_info("Refresh instruments: every " .. REFRESH_INSTRUMENTS .. "s")
     log_info("Log file: " .. tostring(LOG_FILE))
     log_info("Lua version: " .. tostring(_VERSION))
+    log_info("Socket: " .. tostring(socket._VERSION)
+        .. (socket.settimeout and "" or " (без socket.settimeout, таймаут через http.TIMEOUT)"))
 
     -- Загружаем список инструментов с API при старте
-    pcall(fetch_instruments)
-    pcall(send_instrument_params)
+    local oki, erri = pcall(fetch_instruments)
+    if not oki then log_error("fetch_instruments crashed: " .. tostring(erri)) end
+    local oks, errs = pcall(send_instrument_params)
+    if not oks then log_error("send_instrument_params crashed: " .. tostring(errs)) end
     if #INSTRUMENTS == 0 then
         log_info("No instruments from API, fallback to class filter: "
             .. table.concat(FILTER_CLASS_CODES, ", "))
@@ -747,7 +821,8 @@ function main()
     end
 
     -- Загружаем историю сделок из QUIK
-    pcall(load_existing_trades)
+    local oke, erre = pcall(load_existing_trades)
+    if not oke then log_error("load_existing_trades crashed: " .. tostring(erre)) end
 
     local last_log_time = 0
     local last_heartbeat = 0
@@ -760,8 +835,10 @@ function main()
 
         -- Периодическое обновление списка инструментов
         if now - last_refresh >= REFRESH_INSTRUMENTS then
-            pcall(fetch_instruments)
-            pcall(send_instrument_params)
+            local okr, errr = pcall(fetch_instruments)
+            if not okr then log_error("fetch_instruments crashed: " .. tostring(errr)) end
+            local okp, errp = pcall(send_instrument_params)
+            if not okp then log_error("send_instrument_params crashed: " .. tostring(errp)) end
             last_refresh = now
             if #INSTRUMENTS > 0 then
                 log_info("Instruments refreshed: " .. #INSTRUMENTS .. " items")
@@ -772,14 +849,17 @@ function main()
         if now - last_send_time >= SEND_INTERVAL then
             -- Для фьючерсов (SPBFUT) рыночная цена берётся из getParamEx(LAST),
             -- т.к. OnAllTrade для срочного рынка не приходит
-            pcall(refresh_futures_prices)
-            pcall(send_prices)
+            local okf, errf = pcall(refresh_futures_prices)
+            if not okf then log_error("refresh_futures_prices crashed: " .. tostring(errf)) end
+            local okp, errp = pcall(send_prices)
+            if not okp then log_error("send_prices crashed: " .. tostring(errp)) end
             last_send_time = now
         end
 
         -- Отправка пачки сделок по таймеру (реже, чем цены)
         if now - last_send_trades >= SEND_TRADES_INTERVAL then
-            pcall(send_trades)
+            local okt, errt = pcall(send_trades)
+            if not okt then log_error("send_trades crashed: " .. tostring(errt)) end
             last_send_trades = now
         end
 
