@@ -3,9 +3,11 @@
 import os
 import glob
 import mimetypes
+import re
 import secrets
 import threading
 import time
+from datetime import date, timedelta
 from functools import wraps
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, Response, make_response
 
@@ -85,6 +87,60 @@ def format_money(value):
         return f'{value:,.2f}'.replace(',', ' ')
     except (ValueError, TypeError):
         return str(value)
+
+
+@flask_app.template_filter('basename')
+def filename_only(value):
+    """Только имя файла, без пути и каталогов.
+
+    В отчётах QUIK в поле filename встречается полный путь
+    (/Users/.../reports/foo.html). В списке отчётов каталог — шум, а на
+    телефоне он ещё и съедает всю ширину строки под многоточие, поэтому
+    в шаблоне показываем имя, а полный путь — в атрибуте title.
+    """
+    name = str(value or '').replace('\\', '/')
+    return name.rsplit('/', 1)[-1]
+
+
+@flask_app.template_filter('pl_total')
+def format_pl_total(value):
+    """Итого P&L («финрез»): прибыль — числом, убыток — в скобках.
+
+    В отчётности убыток принято брать в скобки, а не писать минус. Плюс
+    тоже не пишем: знак и так виден по цвету (см. .profit-positive /
+    .profit-negative в base.html). Скобка не должна отрываться от числа —
+    за это отвечает .finrez-cell в base.html.
+    """
+    try:
+        num = float(value or 0)
+    except (TypeError, ValueError):
+        return '—'
+    if num < 0:
+        return f'({-num:,.2f})'
+    return f'{num:,.2f}'
+
+
+@flask_app.template_filter('short_date')
+def format_short_date(value):
+    """Короткая дата: 2026-09-01 и 01.09.2026 → 01.09.26.
+
+    В карточном виде на телефоне подпись «Дата покупки» и значение делят
+    около 160 px. Полный год — лишние два символа, из-за которых значение
+    уезжало на вторую строку обрывком, поэтому год — двумя цифрами.
+    """
+    raw = str(value or '').strip().replace('\u00a0', ' ')
+    if not raw:
+        return '—'
+    # Брокерские отчёты отдают dd.mm.yyyy, налоговая и парсеры — yyyy-mm-dd
+    match = re.match(r'^(\d{4})-(\d{2})-(\d{2})', raw)
+    if match:
+        year, month, day = match.groups()
+        return f'{day}.{month}.{year[2:]}'
+    match = re.match(r'^(\d{1,2})\.(\d{1,2})\.(\d{4})$', raw)
+    if match:
+        day, month, year = match.groups()
+        return f'{day.zfill(2)}.{month.zfill(2)}.{year[2:]}'
+    return raw
 
 
 def ticker_color(sec_code):
@@ -481,10 +537,37 @@ def nalog_view():
                            groups=groups)
 
 
+def _default_period():
+    """Период по умолчанию: с 1-го числа прошлого месяца по сегодня.
+
+    Без фильтра дашборд тянул всю историю сделок — лишние мегабайты разметки
+    и сотни миллисекунд на агрегаты. На практике смотрят текущий и предыдущий
+    месяц, поэтому при первом заходе показываем именно их.
+    """
+    today = date.today()
+    first_of_prev_month = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
+    return first_of_prev_month.isoformat(), today.isoformat()
+
+
+def _period_args():
+    """Период из query-строки с учётом значения по умолчанию.
+
+    Различаем два случая:
+      * параметров в адресе нет вовсе — первый заход, берём период по умолчанию;
+      * параметры пришли пустыми (?date_from=&date_to=) — пользователь очистил
+        поля и хочет видеть всё; пустая строка и означает «без фильтра».
+
+    Без этого различия кнопка «сбросить» возвращала бы период по умолчанию
+    и показать всю историю было бы нельзя.
+    """
+    if 'date_from' not in request.args and 'date_to' not in request.args:
+        return _default_period()
+    return request.args.get('date_from', ''), request.args.get('date_to', '')
+
+
 @flask_app.route('/')
 def index():
-    date_from = request.args.get('date_from', '')
-    date_to = request.args.get('date_to', '')
+    date_from, date_to = _period_args()
     broker = request.args.get('broker', 'all')
 
     # Convert HTML date input (YYYY-MM-DD) to DD.MM.YYYY for DB

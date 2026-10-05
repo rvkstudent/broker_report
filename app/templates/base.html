@@ -21,6 +21,11 @@
         body { background: #f5f7fb; -webkit-text-size-adjust: 100%; }
         .card { box-shadow: 0 2px 8px rgba(0,0,0,.08); border: none; margin-bottom: 1.5rem; }
         .card-header { font-weight: 600; }
+        /* Кнопки в шапке страницы всегда в одну строку: без этого текст
+           внутри кнопки переносится и кнопка становится двухэтажной. */
+        .page-actions { flex-wrap: nowrap; }
+        .page-actions > * { flex: 0 0 auto; }
+        .page-actions .btn { white-space: nowrap; }
         .table th { white-space: nowrap; }
         /* Плавная прокрутка широких таблиц пальцем + липкая шапка */
         .table-responsive { -webkit-overflow-scrolling: touch; }
@@ -28,12 +33,68 @@
             position: sticky; top: 0; z-index: 2; background: #fff;
         }
         .table-responsive > .table > tbody > tr > th { background: #fff; }
-        .profit-positive { color: #198754; font-weight: 600; }
-        .profit-negative { color: #dc3545; font-weight: 600; }
-        .bg-profit-positive { background-color: #d1fae5; }
-        .bg-profit-negative { background-color: #fee2e2; }
-        .bg-profit-pos { background-color: #d1e7dd; }
-        .bg-profit-neg { background-color: #f8d7da; }
+        /* Цвета прибыли/убытка.
+
+           Bootstrap красит ячейки не напрямую, а через свои переменные:
+             .table > :not(caption) > * > * {
+                 color: var(--bs-table-color-state, var(--bs-table-color-type, var(--bs-table-color)));
+                 background-color: var(--bs-table-bg);
+                 box-shadow: inset 0 0 0 9999px var(--bs-table-accent-bg); }
+           Селектор весит больше, чем .profit-positive / .bg-profit-pos, поэтому
+           один только color / background-color этими правилами перебивался —
+           зелёные и красные строки на дашборде не выделялись вообще. Задаём
+           переменные вместе с цветом: var() раскрывается на самом элементе,
+           и от специфичности это уже не зависит.
+
+           Сами оттенки взяты темнее стандартных #198754 / #dc3545: те на белом
+           дают 4.5:1 впритык, а на жёлтой строке table-warning (4.1:1) и серой
+           итоговой (4.0:1) уже не проходят. */
+        .profit-positive { color: #157347; font-weight: 600; --bs-table-color: #157347; }
+        .profit-negative { color: #b02a37; font-weight: 600; --bs-table-color: #b02a37; }
+        .bg-profit-positive { background-color: #d1fae5; --bs-table-bg: #d1fae5; }
+        .bg-profit-negative { background-color: #fee2e2; --bs-table-bg: #fee2e2; }
+        .bg-profit-pos { background-color: #d1e7dd; --bs-table-bg: #d1e7dd; }
+        .bg-profit-neg { background-color: #f8d7da; --bs-table-bg: #f8d7da; }
+        /* Финрез: у убытка число в скобках, и скобка не должна отрываться
+           от числа (в карточке на телефоне это особенно заметно). */
+        .finrez-cell { white-space: nowrap; }
+        /* А вот текст в этих строках и ячейках: обычные #198754 / #dc3545 на
+           своей же подложке дают контраст 3.4–4.0:1 — цифры сливаются с фоном,
+           ради которого строка и красилась. Берём затемнённые оттенки Bootstrap
+           (emphasis) — на #d1e7dd/#f8d7da у них около 10:1. */
+        .bg-profit-pos .profit-positive,
+        .bg-profit-neg .profit-positive,
+        .bg-profit-positive.profit-positive { color: #0a3622; --bs-table-color: #0a3622; }
+        .bg-profit-pos .profit-negative,
+        .bg-profit-neg .profit-negative,
+        .bg-profit-negative.profit-negative { color: #58151c; --bs-table-color: #58151c; }
+
+        /* Утилиты Bootstrap .text-success / .text-danger — стандартные
+           #198754 / #dc3545; на цветных подложках дашборда (серая строка
+           итогов 3.5:1, жёлтая «нет цены» 4.1:1, светло-серая итоговая
+           4.0:1) по контрасту не проходят.
+
+           Перебить их цветом нельзя: утилиты объявлены с !important,
+           поэтому подменяем сами каналы RGB, из которых утилита собирает
+           цвет. */
+        .table .text-success { --bs-success-rgb: 21, 115, 71; }
+        .table .text-danger { --bs-danger-rgb: 176, 42, 55; }
+        /* Класс на строке (‹tr class="text-danger"› — «Расходы на РЕПО») сам
+           по себе не работает: Bootstrap задаёт цвет каждой ячейке через
+           переменную, поэтому переносим его на ячейки явно. */
+        .table tbody > tr.text-success > *,
+        .table tfoot > tr.text-success > * { color: #157347; --bs-table-color: #157347; }
+        .table tbody > tr.text-danger > *,
+        .table tfoot > tr.text-danger > * { color: #b02a37; --bs-table-color: #b02a37; }
+
+        /* А на тёмной итоговой строке (table-dark) тёмные оттенки не видны
+           совсем — 2.4:1; там нужны светлые, как в тёмной теме Bootstrap.
+           Селектор без .table в начале — чтобы его можно было перебить
+           в карточном виде, где tfoot становится светлым. */
+        .table-dark .profit-positive,
+        .table-dark .text-success { color: #75b798; --bs-table-color: #75b798; --bs-success-rgb: 117, 183, 152; }
+        .table-dark .profit-negative,
+        .table-dark .text-danger { color: #ea868f; --bs-table-color: #ea868f; --bs-danger-rgb: 234, 134, 143; }
         .table td, .table th { white-space: nowrap; }
         .arrow-up { color: #198754; font-size: 14px; display: inline-block; vertical-align: middle; line-height: 1; }
         .arrow-down { color: #dc3545; font-size: 14px; display: inline-block; vertical-align: middle; line-height: 1; }
@@ -68,11 +129,192 @@
                                      display: flex; align-items: center; justify-content: center; }
             /* Ссылки в таблицах тоже должны ловиться пальцем */
             .table td a { display: inline-block; padding: .35rem 0; }
-            /* Таблицы: чуть компактнее, но прокручиваются по горизонтали */
+            /* Таблицы: компактнее */
             .table td, .table th { padding: .45rem .5rem; font-size: .875rem; }
+            /* Карточки: на телефоне стандартный padding съедает заметную долю
+               ширины, а страница и так длинная */
+            .card-body { padding: .75rem; }
             /* Поля фильтров — на всю ширину, друг под другом */
             .filter-row > [class*='col-'] { flex: 0 0 100%; max-width: 100%; margin-bottom: .5rem; }
+            /* Кнопки шапки ужимаем, чтобы Фильтр/Загрузить/Сбросить точно
+               поместились в одну строку на 390 px. */
+            .page-actions .btn { padding-left: .45rem; padding-right: .45rem; font-size: .8rem; }
             .offcanvas-mobile { width: 100% !important; }
+        }
+
+        /* ── На телефоне строка таблицы превращается в карточку ────
+           Таблицы в 6–11 колонок («Прибыль по инструментам», «Открытые
+           сделки», позиции QUIK, цены, детали) в 390 px не помещаются.
+           От горизонтальной прокрутки толку мало: справа данные есть,
+           но об этом не видно, приходится «двигать» таблицу наугад.
+           Поэтому на узком экране разворачиваем каждую строку в блок
+           «подпись → значение»: видно все колонки сразу, прокрутка
+           остаётся только вертикальная.
+
+           Подписи проставляет brokerFitTables() из <thead> — в разметку
+           их не пишем: в таблице деталей 3000 строк × 11 ячеек, а строки
+           цен и деталей приезжают после загрузки страницы (fetch).
+           Класс table-stack вешается только на таблицы от 5 колонок,
+           мелкие (2–4 колонки) и так помещаются. */
+        @media (max-width: 767.98px) {
+            table.table-stack { display: block; width: 100%; margin-bottom: 0; }
+            table.table-stack thead { display: none; }
+            table.table-stack tbody,
+            table.table-stack tfoot { display: block; }
+
+            /* Ячейки раскладываем в две колонки сеткой. В одну колонку
+               карточка из девяти ячеек занимает девять строк — на телефоне
+               это превращало страницу в 27 тысяч пикселей прокрутки
+               (32 экрана). Две колонки режут высоту почти вдвое.
+
+               Фон самой строки не задаём: у строк прибыли/убытка он свой
+               (bg-profit-pos / bg-profit-neg) и должен остаться виден. */
+            table.table-stack tbody tr,
+            table.table-stack tfoot tr {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                column-gap: .75rem;
+                border: 1px solid #d8dde5;
+                border-radius: .4rem;
+                padding: .25rem .5rem;
+                margin-bottom: .3rem;
+                box-shadow: 0 1px 2px rgba(16, 24, 40, .05);
+            }
+            /* tfoot идёт с классом table-dark: в карточном виде тёмная
+               плашка смотрится чужеродно, а вокруг ячеек оставалась светлая
+               рамка от padding строки. Переводим итог на светлый фон —
+               кружным путём через те же переменные Bootstrap, иначе
+               background-color у .table-dark выигрывает. */
+            table.table-stack tfoot tr {
+                --bs-table-bg: #eef1f5;
+                --bs-table-color: #212529;
+                background-color: #eef1f5;
+                color: #212529;
+            }
+            /* Раз итоговая строка здесь светлая, светлые «тёмные» оттенки из
+               основного блока тут не нужны — селекторы длиннее, поэтому
+               перебивают .table-dark .profit-positive. */
+            table.table-stack tfoot tr .profit-positive { color: #157347; --bs-table-color: #157347; }
+            table.table-stack tfoot tr .profit-negative { color: #b02a37; --bs-table-color: #b02a37; }
+            table.table-stack tfoot tr .text-success { --bs-success-rgb: 21, 115, 71; }
+            table.table-stack tfoot tr .text-danger { --bs-danger-rgb: 176, 42, 55; }
+
+            table.table-stack tbody td,
+            table.table-stack tfoot td {
+                display: flex;
+                justify-content: space-between;
+                align-items: baseline;
+                gap: .4rem;
+                /* без этого длинный токен (ISIN, путь к файлу) не даёт
+                   grid/flex-элементу сжаться и распирает карточку */
+                min-width: 0;
+                border: 0;
+                padding: .08rem 0;
+                white-space: normal;
+                overflow-wrap: anywhere;
+                text-align: right;
+            }
+            table.table-stack tbody td::before,
+            table.table-stack tfoot td::before {
+                content: attr(data-label);
+                /* Подпись не переносим: «Дата покупки», разорванная на две
+                   строки, разъезжается с соседней ячейкой. Если места
+                   в половине карточки не хватает — многоточие. */
+                flex: 0 1 auto;
+                min-width: 0;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+                font-size: .7rem;
+                font-weight: 600;
+                color: #495057;
+                text-align: left;
+            }
+            /* Первая ячейка работает заголовком карточки — во всю ширину.
+               Подпись ей не нужна: «Ценная бумага» / «Код» только съедают
+               строку, а значение и так стоит первым. */
+            table.table-stack tbody tr > td:first-child,
+            table.table-stack tfoot tr > td:first-child {
+                grid-column: 1 / -1;
+                font-weight: 600;
+                color: #212529;
+                border-bottom: 1px solid #eef1f5;
+                padding-bottom: .2rem;
+                margin-bottom: .05rem;
+            }
+            table.table-stack tbody tr > td:first-child::before,
+            table.table-stack tfoot tr > td:first-child::before { display: none; }
+            /* Пустые ячейки (в итоговых строках их много) давали бы подпись
+               без значения — половину карточки мусора. */
+            table.table-stack td:empty { display: none; }
+            /* Даты: «01.09.26» (фильтр short_date) — чтобы значение умещалось
+               в свою половину карточки и не разрывалось. */
+            table.table-stack tbody td.date-cell,
+            table.table-stack tfoot td.date-cell { white-space: nowrap; }
+            /* Финрез — главная цифра карточки: во всю ширину и без переносов,
+               иначе закрывающая скобка уезжает на вторую строку. */
+            table.table-stack tbody tr > td.finrez-cell,
+            table.table-stack tfoot tr > td.finrez-cell {
+                grid-column: 1 / -1;
+                white-space: nowrap;
+                border-top: 1px solid #eef1f5;
+                margin-top: .1rem;
+                padding-top: .2rem;
+            }
+            /* Ячейка-заглушка («Загрузка…», «Нет данных») — тоже во всю ширину */
+            table.table-stack tbody td[colspan] {
+                grid-column: 1 / -1;
+                justify-content: center;
+                text-align: center;
+                padding: .5rem 0;
+            }
+            table.table-stack tbody td[colspan]::before { display: none; }
+            /* Длинные имена файлов и полные пути — один непереносимый токен,
+               из-за него строка в списке отчётов уезжала под горизонтальную
+               прокрутку. Разрешаем разрыв внутри токена. */
+            table.table-stack tbody td a { max-width: 100%; overflow-wrap: anywhere; }
+
+            /* Мелкие таблицы (2–4 колонки) в карточки не разворачиваем: они и так
+               читаются, а карточка из четырёх полей на каждую из полусотни бумаг
+               получилась бы неоправданно длинной. Но ужать их надо — в столбце
+               «Код» вместе с тикерами живут длинные ISIN облигаций
+               (RU000A0JP773), и таблица цен не влезала в экран: 384 px при
+               доступных 335, лишнее уезжало под внутреннюю прокрутку. */
+            .table:not(.table-stack) th,
+            .table:not(.table-stack) td {
+                padding: .3rem .25rem;
+                font-size: .8rem;
+                white-space: normal;
+                overflow-wrap: anywhere;
+            }
+            .table:not(.table-stack) img.tkr-logo { width: 14px; height: 14px; }
+
+            /* Кнопки и значки внутри карточек: у кнопки удаления в списке
+               отчётов min-height 36 px растягивал строку сетки до 39 px.
+               Строк в списках десятки, так что каждый пиксель на счету. */
+            table.table-stack .btn-sm { min-height: 30px; padding: .1rem .4rem; }
+            table.table-stack .badge { font-size: .68rem; padding: .25em .45em; }
+
+            /* Список отчётов карточками не раскладываем: 49 строк по 7 полей
+               давали 8 400 px — половину высоты страницы. Оставляем компактную
+               таблицу из трёх колонок: файл, брокер и кнопка удаления. Тип,
+               договор, период и дата загрузки — второстепенное, на телефоне
+               прячем. Полный путь к файлу уходит в title, а само имя режется
+               многоточием — иначе оно вытесняет всё остальное. */
+            #reportsTable { table-layout: fixed; }
+            #reportsTable th:nth-child(1) { width: auto; }
+            #reportsTable th:nth-child(3) { width: 68px; }
+            #reportsTable th:nth-child(7) { width: 44px; }
+            #reportsTable th:nth-child(2), #reportsTable td:nth-child(2),
+            #reportsTable th:nth-child(4), #reportsTable td:nth-child(4),
+            #reportsTable th:nth-child(5), #reportsTable td:nth-child(5),
+            #reportsTable th:nth-child(6), #reportsTable td:nth-child(6) { display: none; }
+            #reportsTable td:nth-child(1) a {
+                display: block;
+                overflow: hidden;
+                white-space: nowrap;
+                text-overflow: ellipsis;
+            }
         }
         @media (prefers-reduced-motion: reduce) {
             * { transition: none !important; animation: none !important; }
@@ -185,18 +427,74 @@
                 table.parentNode.insertBefore(wrap, table);
                 wrap.appendChild(table);
             });
+            window.brokerFitTables(root);
+        };
+
+        // Подписи колонок для «карточного» вида на телефоне (см. CSS .table-stack).
+        // Берём их из шапки и раскладываем по ячейкам: писать data-label прямо
+        // в шаблон нельзя — в таблице деталей 3000 строк × 11 ячеек, а строки
+        // цен и деталей вообще приезжают после загрузки страницы (fetch).
+        const STACK_MIN_COLS = 5;
+
+        window.brokerFitTables = function (root) {
+            const scope = root || document;
+            // root может быть и самой таблицей: так её зовёт наблюдатель за DOM,
+            // когда приехали одни строки (ответ /api/lots). querySelectorAll
+            // сам элемент не возвращает, поэтому добавляем его вручную —
+            // иначе подписи в таблице деталей не появлялись вовсе.
+            const tables = [];
+            if (scope.tagName === 'TABLE') tables.push(scope);
+            scope.querySelectorAll('table').forEach(function (table) { tables.push(table); });
+
+            tables.forEach(function (table) {
+                // data-no-stack — таблица остаётся таблицей и на узком экране
+                // (часть колонок у неё просто скрыта стилями)
+                if (table.hasAttribute('data-no-stack')) {
+                    table.classList.remove('table-stack');
+                    return;
+                }
+                const heads = table.querySelectorAll('thead th');
+                if (heads.length < STACK_MIN_COLS) {
+                    table.classList.remove('table-stack');
+                    return;
+                }
+                table.classList.add('table-stack');
+                const labels = [];
+                heads.forEach(function (th) { labels.push(th.textContent.trim()); });
+                table.querySelectorAll('tbody tr, tfoot tr').forEach(function (tr) {
+                    for (let i = 0; i < tr.children.length; i++) {
+                        const cell = tr.children[i];
+                        // Заглушка на всю ширину («Загрузка…») подписи не требует
+                        const label = cell.hasAttribute('colspan') ? '' : (labels[i] || '');
+                        if (cell.getAttribute('data-label') !== label) {
+                            cell.setAttribute('data-label', label);
+                        }
+                    }
+                });
+            });
         };
 
         window.brokerWrapTables();
 
-        // Таблицы, добавленные позже (AJAX), оборачиваются автоматически.
+        // Таблицы и строки, добавленные позже (AJAX), обрабатываются автоматически:
+        // refreshPrices() каждые 3 секунды пересобирает tbody таблицы цен,
+        // /api/lots отдаёт строки деталей уже после загрузки страницы.
         if (window.MutationObserver) {
             const observer = new MutationObserver(function (records) {
                 for (const rec of records) {
+                    let wrapRoot = null;
                     for (const node of rec.addedNodes) {
                         if (node.nodeType !== 1) continue;
-                        if (node.tagName === 'TABLE') window.brokerWrapTables(node.parentElement || document);
-                        else if (node.querySelector && node.querySelector('table')) window.brokerWrapTables(node);
+                        if (node.tagName === 'TABLE') wrapRoot = node.parentElement || document;
+                        else if (node.querySelector && node.querySelector('table')) wrapRoot = node;
+                    }
+                    if (wrapRoot) {
+                        window.brokerWrapTables(wrapRoot);
+                    } else {
+                        // Приехали только строки — обновляем подписи у их таблицы
+                        const target = rec.target;
+                        const table = target && target.closest ? target.closest('table') : null;
+                        if (table) window.brokerFitTables(table);
                     }
                 }
             });

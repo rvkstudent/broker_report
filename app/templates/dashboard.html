@@ -12,8 +12,8 @@
     </div>
 </div>
 
-<div class="row mb-3">
-    <div class="col">
+<div class="row mb-3 g-2">
+    <div class="col-12 col-lg">
         <h4><i class="bi bi-speedometer2"></i> Сводная аналитика</h4>
         <p class="text-muted small mb-0">
             Данные из всех загруженных отчётов
@@ -25,23 +25,32 @@
                 {% if date_from %}с {{ date_from }}{% endif %}
                 {% if date_to %}по {{ date_to }}{% endif %}
             {% endif %}
-            {% if date_from or date_to or (broker and broker != 'all') %}
-                <a href="/" class="btn btn-sm btn-outline-secondary ms-2">✕ сбросить</a>
-            {% endif %}
         </p>
     </div>
-    <div class="col-auto">
-        <button class="btn btn-outline-primary btn-sm" data-bs-toggle="collapse" data-bs-target="#filterPanel">
-            <i class="bi bi-funnel"></i> Фильтр
-        </button>
-        <button class="btn btn-outline-secondary btn-sm" data-bs-toggle="modal" data-bs-target="#uploadModal">
-            <i class="bi bi-upload"></i> Загрузить
-        </button>
+    {# Все три кнопки в одном блоке и в одну строку: раньше «сбросить» стояла
+       в абзаце выше и на телефоне уезжала на отдельную строку. #}
+    <div class="col-12 col-lg-auto">
+        <div class="page-actions d-flex gap-1">
+            <button class="btn btn-outline-primary btn-sm" data-bs-toggle="collapse" data-bs-target="#filterPanel">
+                <i class="bi bi-funnel"></i> Фильтр
+            </button>
+            <button class="btn btn-outline-secondary btn-sm" data-bs-toggle="modal" data-bs-target="#uploadModal">
+                <i class="bi bi-upload"></i> Загрузить
+            </button>
+            {% if date_from or date_to or (broker and broker != 'all') %}
+                {# Пустые параметры вместо href="/": иначе сервер снова подставит
+                   период по умолчанию и «сбросить» ничего не сбросит. #}
+                <a href="/?date_from=&date_to=&broker=all" class="btn btn-sm btn-outline-secondary">✕ сбросить</a>
+            {% endif %}
+        </div>
     </div>
 </div>
 
 <!-- Filter panel -->
-<div class="collapse {% if date_from or date_to or (broker and broker != 'all') %}show{% endif %}" id="filterPanel">
+{# Свёрнута по умолчанию: на телефоне раскрытая панель занимает 220 px —
+   это четверть экрана перед и без того длинной страницей. На широком
+   экране скрипт ниже раскрывает её сразу, там фильтры идут в одну строку. #}
+<div class="collapse" id="filterPanel">
     <div class="card card-body mb-3 py-2">
         <form method="get" class="row g-2 align-items-end">
             <div class="col-auto">
@@ -73,7 +82,9 @@
             </div>
             {% if date_from or date_to or (broker and broker != 'all') %}
             <div class="col-auto">
-                <a href="/" class="btn btn-sm btn-outline-secondary">✕ сбросить</a>
+                {# Пустые параметры вместо href="/": иначе сервер снова подставит
+                   период по умолчанию и «сбросить» ничего не сбросит. #}
+                <a href="/?date_from=&date_to=&broker=all" class="btn btn-sm btn-outline-secondary">✕ сбросить</a>
             </div>
             {% endif %}
         </form>
@@ -115,42 +126,42 @@
         {% if profit %}
         <table class="table table-sm table-hover mb-0" id="profitTable">
             <thead class="table-light">
+                {# Прод. убрано: Куп. и Прод. всегда равны. Чист.приб. убрано —
+                   дублирует результат. Прогноз и Итого P&L сведены в одну
+                   колонку «Финрез»: для закрытой позиции это реализованный
+                   результат, для открытой — он же плюс прогноз.
+                   Комис. больше не красим в красный. #}
                 <tr>
                     <th>Ценная бумага</th>
                     <th class="text-end">Куп.</th>
-                    <th class="text-end">Прод.</th>
                     <th class="text-end">Вал.приб.</th>
                     <th class="text-end">Комис.</th>
-                    <th class="text-end">Чист.приб.</th>
                     <th class="text-end">Тек.цена</th>
-                    <th class="text-end">Прогноз</th>
-                    <th class="text-end">Итого P&amp;L</th>
+                    <th class="text-end">Финрез</th>
                 </tr>
             </thead>
             <tbody>
             {% for p in profit %}
                 {% set cur_price = price_map.get(p.security_code, 0) %}
-                <tr data-has-open="{{ 'true' if p.security_code in open_codes else 'false' }}" data-code="{{ p.security_code }}" data-price="{{ cur_price }}" data-is-open="{{ 'true' if p.is_open else 'false' }}" {% if p.is_open %}class="table-warning"{% endif %}>
+                {# data-net — чистая прибыль нужна скрипту (пересчёт прогноза),
+                   хотя отдельной колонки у неё больше нет. По ней же видно
+                   строку, которая не закрыта. #}
+                <tr data-has-open="{{ 'true' if p.security_code in open_codes else 'false' }}" data-code="{{ p.security_code }}" data-price="{{ cur_price }}" data-is-open="{{ 'true' if p.is_open else 'false' }}" data-net="{{ '{:.2f}'.format(p.net_profit or 0) }}" {% if p.is_open %}class="table-warning"{% endif %}>
                     <td>
                         {{ p.security_name }} <small class="text-muted">({{ p.security_code }})</small>
                         {% if p.is_open %}<span class="badge bg-warning text-dark ms-1">открытая</span>{% endif %}
                     </td>
                     <td class="text-end">{{ p.buy_qty }}</td>
-                    <td class="text-end">{{ p.sell_qty }}</td>
                     <td class="text-end {{ 'profit-positive' if p.gross_profit >= 0 else 'profit-negative' }}">
                         {% if p.is_open %}—{% else %}{{ '{:+,.2f}'.format(p.gross_profit) }}{% endif %}</td>
-                    <td class="text-end text-danger">{% if p.is_open %}—{% else %}{{ '{:,.2f}'.format(p.total_fees) }}{% endif %}</td>
-                    <td class="text-end {{ 'profit-positive' if p.net_profit >= 0 else 'profit-negative' }} fw-bold">
-                        {% if p.is_open %}—{% else %}{{ '{:+,.2f}'.format(p.net_profit) }}{% endif %}
-                    </td>
+                    <td class="text-end">{% if p.is_open %}—{% else %}{{ '{:,.2f}'.format(p.total_fees) }}{% endif %}</td>
                     <td class="text-end price-cell">
                         {{ '{:,.4f}'.format(cur_price) if cur_price and cur_price < 10 else '{:,.2f}'.format(cur_price) if cur_price else '—' }}
                     </td>
-                    <td class="text-end {{ 'profit-positive' if p.forecast_pl >= 0 else 'profit-negative' }}">
-                        {{ '{:+,.2f}'.format(p.forecast_pl) if p.is_open else '—' }}
-                    </td>
-                    <td class="text-end fw-bold {{ 'profit-positive bg-profit-positive' if p.total_pl >= 0 else 'profit-negative bg-profit-negative' }}">
-                        {{ '{:+,.2f}'.format(p.total_pl) }}
+                    {# Финрез: убыток — одно число в скобках, прибыль — без них.
+                       Скобка не должна отрываться от числа (см. .finrez-cell). #}
+                    <td class="text-end fw-bold finrez-cell {{ 'profit-positive bg-profit-positive' if p.total_pl >= 0 else 'profit-negative bg-profit-negative' }}">
+                        {{ p.total_pl | pl_total }}
                     </td>
                 </tr>
             {% endfor %}
@@ -158,41 +169,36 @@
             <tfoot class="table-light fw-bold" id="profitTfoot">
                 {% set total_gross = profit | sum(attribute='gross_profit') %}
                 {% set total_ftrade = profit | sum(attribute='total_fees') %}
-                {% set total_net = profit | sum(attribute='net_profit') %}
                 {% set repo_cost = repo_total.total %}
-                {% set total_forecast = profit | sum(attribute='forecast_pl') %}
                 {% set total_totalpl = profit | sum(attribute='total_pl') %}
+                {# Колонок шесть: ЦБ, Куп., Вал.приб., Комис., Тек.цена, Финрез. #}
                 <tr>
                     <td>ПРИБЫЛЬ/УБЫТОК ПО ТРЕЙДАМ</td>
                     <td class="text-end">{{ profit | sum(attribute='buy_qty') }}</td>
-                    <td class="text-end">{{ profit | sum(attribute='sell_qty') }}</td>
                     <td class="text-end {{ 'profit-positive' if total_gross >= 0 else 'profit-negative' }}">
                         {{ '{:+,.2f}'.format(total_gross) }}</td>
-                    <td class="text-end text-danger">{{ '{:,.2f}'.format(total_ftrade) }}</td>
-                    <td class="text-end {{ 'profit-positive' if total_net >= 0 else 'profit-negative' }}">
-                        {{ '{:+,.2f}'.format(total_net) }}
-                    </td>
+                    <td class="text-end">{{ '{:,.2f}'.format(total_ftrade) }}</td>
                     <td></td>
-                    <td class="text-end {{ 'profit-positive' if total_forecast >= 0 else 'profit-negative' }}">
-                        {{ '{:+,.2f}'.format(total_forecast) }}
-                    </td>
-                    <td class="text-end fw-bold {{ 'profit-positive bg-profit-positive' if total_totalpl >= 0 else 'profit-negative bg-profit-negative' }}">
-                        {{ '{:+,.2f}'.format(total_totalpl) }}
+                    <td class="text-end finrez-cell {{ 'profit-positive bg-profit-positive' if total_totalpl >= 0 else 'profit-negative bg-profit-negative' }}">
+                        {{ total_totalpl | pl_total }}
                     </td>
                 </tr>
                 <tr class="text-danger">
                     <td>РАСХОДЫ НА РЕПО</td>
-                    <td></td><td></td><td></td><td></td>
+                    <td></td>
+                    <td></td>
                     <td class="text-end">{{ '{:,.2f}'.format(repo_cost) }}</td>
-                    <td></td><td></td><td>−{{ '{:,.2f}'.format(repo_cost) }}</td>
+                    <td></td>
+                    <td class="text-end finrez-cell">−{{ '{:,.2f}'.format(repo_cost) }}</td>
                 </tr>
                 <tr class="table-dark">
                     <td>ИТОГОВЫЙ РЕЗУЛЬТАТ (с учётом РЕПО)</td>
-                    <td></td><td></td><td></td><td></td>
-                    <td class="text-end text-danger">{{ '{:,.2f}'.format(total_ftrade + repo_cost) }}</td>
                     <td></td>
-                    <td class="text-end {{ 'profit-positive' if (total_totalpl - repo_cost) >= 0 else 'profit-negative' }}">
-                        {{ '{:+,.2f}'.format(total_totalpl - repo_cost) }}
+                    <td></td>
+                    <td class="text-end">{{ '{:,.2f}'.format(total_ftrade + repo_cost) }}</td>
+                    <td></td>
+                    <td class="text-end finrez-cell {{ 'profit-positive' if (total_totalpl - repo_cost) >= 0 else 'profit-negative' }}">
+                        {{ (total_totalpl - repo_cost) | pl_total }}
                     </td>
                 </tr>
             </tfoot>
@@ -318,7 +324,7 @@
                                     data-total-cost="{{ o.total_cost }}">
                                     <td><small><img class="tkr-logo" src="/api/logo/{{ o.security_code }}" alt="" loading="lazy" onerror="this.style.display='none'" /></small> <small>{{ o.security_name }} ({{ o.security_code }})</small></td>
                                     <td class="text-end">{{ o.qty }}</td>
-                                    <td><small>{{ o.buy_date }}</small></td>
+                                    <td class="date-cell"><small>{{ o.buy_date | short_date }}</small></td>
                                     <td class="text-end">{{ '{:,.2f}'.format(o.buy_price) }}</td>
                                     <td class="text-end">{{ '{:,.2f}'.format(o.total_cost) }}</td>
                                     <td class="text-end text-danger">{{ '{:,.2f}'.format(o.get('fees', 0)) }}</td>
@@ -582,6 +588,9 @@
 function parseNum(s) {
     if (s == null || s === '') return 0;
     let str = String(s).replace(/\s/g, '');
+    // Убыток в Итого P&L пишется в скобках: "(1 234,56)" — это −1234,56
+    const bracketed = /^\(.*\)$/.test(str);
+    if (bracketed) str = str.replace(/[()]/g, '');
     // Формат может быть RU ("1 234,56" — запятая = десятичная) или US ("1,234.56" — запятая = тысячи).
     if (str.includes('.') && str.includes(',')) {
         // US: "1,234,567.89" — запятые только разделитель тысяч
@@ -590,7 +599,15 @@ function parseNum(s) {
         // RU: "1 234,56" — запятая это десятичный разделитель
         str = str.replace(',', '.');
     }
-    return parseFloat(str) || 0;
+    const num = parseFloat(str) || 0;
+    return bracketed ? -num : num;
+}
+
+// Итого P&L: прибыль — просто число, убыток — в скобках (как на сервере,
+// см. фильтр pl_total). Плюс не пишем: знак и так виден по цвету.
+function fmtPlTotal(v) {
+    const s = Math.abs(v).toLocaleString('ru', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return v >= 0 ? s : '(' + s + ')';
 }
 
 function toggleOpenOnly() {
@@ -611,18 +628,18 @@ function toggleOpenOnly() {
     if (checked) {
         tfoot.style.display = 'none';
         // Пересчитать по видимым строкам
-        let buyQty = 0, sellQty = 0, gross = 0, fees = 0, net = 0, forecast = 0, totalPl = 0;
+        // Колонок шесть: 2 — Куп., 3 — Вал.приб., 4 — Комис.,
+        // 5 — Тек.цена, 6 — Финрез. Чистая прибыль отдельной колонки
+        // не имеет и лежит в data-net на строке.
+        let buyQty = 0, gross = 0, fees = 0, totalPl = 0;
         tbody.querySelectorAll('tr').forEach(tr => {
             if (tr.style.display === 'none') return;
             const cells = tr.querySelectorAll('td');
-            if (cells.length < 9) return;
+            if (cells.length < 6) return;
             buyQty += parseInt(parseNum(cells[1]?.textContent));
-            sellQty += parseInt(parseNum(cells[2]?.textContent));
-            gross += parseNum(cells[3]?.textContent);
-            fees += parseNum(cells[4]?.textContent);
-            net += parseNum(cells[5]?.textContent);
-            forecast += parseNum(cells[7]?.textContent);
-            totalPl += parseNum(cells[8]?.textContent);
+            gross += parseNum(cells[2]?.textContent);
+            fees += parseNum(cells[3]?.textContent);
+            totalPl += parseNum(cells[5]?.textContent);
         });
         let el = document.getElementById('profitFilteredTotal');
         if (!el) {
@@ -632,11 +649,9 @@ function toggleOpenOnly() {
             tfoot.parentElement.after(el);
         }
         el.innerHTML = `Показаны только открытые позиции: ` +
-            `${buyQty.toLocaleString()} / ${sellQty.toLocaleString()} шт, ` +
-            `чист.приб. <b>${net >= 0 ? '+' : ''}${net.toFixed(2)}</b>` +
-            `, прогноз ${forecast >= 0 ? '+' : ''}${forecast.toFixed(2)}` +
-            `, итого P&amp;L <b>${totalPl >= 0 ? '+' : ''}${totalPl.toFixed(2)}</b>` +
-            ` (вал.${gross.toFixed(2)}, ком.${fees.toFixed(2)})`;
+            `${buyQty.toLocaleString()} шт, ` +
+            `финрез <b>${fmtPlTotal(totalPl)}</b>` +
+            ` (вал.${fmtPlTotal(gross)}, ком.${fees.toFixed(2)})`;
         el.style.display = '';
     } else {
         tfoot.style.display = '';
@@ -785,6 +800,7 @@ async function refreshForecast() {
         let tb = document.querySelector('#profitTable tbody');
         if (!tb) return;
 
+        let totalFinrez = 0;
         for (let tr of tb.querySelectorAll('tr[data-code]')) {
             let code = tr.dataset.code;
             let info = data[code];
@@ -792,11 +808,10 @@ async function refreshForecast() {
 
             let isOpen = tr.dataset.isOpen === 'true';
 
-            let netText = tr.querySelector('td:nth-child(6)');
-            let priceCell = tr.querySelector('td:nth-child(7)');
-            let forecastCell = tr.querySelector('td:nth-child(8)');
-            let totalCell = tr.querySelector('td:nth-child(9)');
-            if (!forecastCell || !totalCell || !priceCell || !netText) continue;
+            // Колонок шесть: 5 — Тек.цена, 6 — Финрез
+            let priceCell = tr.querySelector('td:nth-child(5)');
+            let finrezCell = tr.querySelector('td:nth-child(6)');
+            if (!finrezCell || !priceCell) continue;
 
             let cur = info.current_price || 0;
 
@@ -804,49 +819,26 @@ async function refreshForecast() {
             priceCell.textContent = cur ? (cur < 10 ? cur.toFixed(4) : cur.toFixed(2)) : '—';
             priceCell.className = 'text-end price-cell';
 
-            // Закрытая сделка: прогноз не показываем, итого = чист.приб.
-            if (!isOpen) {
-                forecastCell.textContent = '—';
-                forecastCell.className = 'text-end';
-                let net = parseNum(netText.textContent);
-                totalCell.textContent = (net >= 0 ? '+' : '') + net.toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2});
-                totalCell.className = 'text-end fw-bold ' + (net >= 0 ? 'profit-positive' : 'profit-negative');
-                continue;
-            }
+            // Чистая прибыль колонки больше не имеет — берём из data-net.
+            // У открытой позиции финрез = реализованное + прогноз.
+            let net = parseNum(tr.dataset.net);
+            let tVal = isOpen ? net + (info.forecast || 0) : net;
 
-            let net = parseNum(netText.textContent);
-            let fVal = info.forecast || 0;
-            let tVal = net + fVal;
+            finrezCell.textContent = fmtPlTotal(tVal);
+            finrezCell.className = 'text-end fw-bold finrez-cell ' +
+                (tVal >= 0 ? 'profit-positive bg-profit-positive' : 'profit-negative bg-profit-negative');
 
-            // Прогноз
-            forecastCell.textContent = (fVal >= 0 ? '+' : '') + fVal.toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2});
-            forecastCell.className = 'text-end ' + (fVal >= 0 ? 'profit-positive' : 'profit-negative');
-
-            // Итого P&L
-            totalCell.textContent = (tVal >= 0 ? '+' : '') + tVal.toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2});
-            totalCell.className = 'text-end fw-bold ' + (tVal >= 0 ? 'profit-positive' : 'profit-negative');
+            totalFinrez += tVal;
         }
 
         // Обновить итоговую строку (tfoot)
         let tfoot = document.querySelector('#profitTable tfoot');
         if (tfoot) {
-            let rows = tb.querySelectorAll('tr[data-code]');
-            let totalForecast = 0, totalTotal = 0;
-            for (let tr of rows) {
-                let fCell = tr.querySelector('td:nth-child(8)');
-                let tCell = tr.querySelector('td:nth-child(9)');
-                if (fCell) totalForecast += parseNum(fCell.textContent);
-                if (tCell) totalTotal += parseNum(tCell.textContent);
-            }
-            let fc = tfoot.querySelector('td:nth-child(8)');
-            let tc = tfoot.querySelector('td:nth-child(9)');
-            if (fc) {
-                fc.textContent = (totalForecast >= 0 ? '+' : '') + totalForecast.toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2});
-                fc.className = 'text-end ' + (totalForecast >= 0 ? 'profit-positive' : 'profit-negative');
-            }
+            let tc = tfoot.querySelector('td:nth-child(6)');
             if (tc) {
-                tc.textContent = (totalTotal >= 0 ? '+' : '') + totalTotal.toLocaleString('ru', {minimumFractionDigits:2,maximumFractionDigits:2});
-                tc.className = 'text-end fw-bold ' + (totalTotal >= 0 ? 'profit-positive' : 'profit-negative');
+                tc.textContent = fmtPlTotal(totalFinrez);
+                tc.className = 'text-end finrez-cell ' +
+                    (totalFinrez >= 0 ? 'profit-positive bg-profit-positive' : 'profit-negative bg-profit-negative');
             }
         }
 
@@ -874,7 +866,7 @@ async function refreshOpenTrades() {
             let curPrice = pmap[code];
             if (curPrice == null) continue;
 
-            // Update current price cell (col 6)
+            // Update current price cell (col 6 — колонки: ЦБ, Кол-во, Дата, Цена, Стоимость, Комиссия, Тек.цена, Прогноз P&L, %)
             row.cells[6].innerHTML = fmtPrice(curPrice);
             row.cells[6].className = 'text-end fw-bold';
 
@@ -1046,7 +1038,10 @@ document.getElementById('pricesShowAll').addEventListener('change', applyPriceFi
     <div class="card-body p-0">
         {% if reports %}
         <div class="table-responsive">
-        <table class="table table-sm table-hover mb-0">
+        {# data-no-stack: на телефоне это остаётся таблицей — 49 отчётов карточками
+           по 7 полей давали 8 400 px высоты, половину всей страницы. Лишние
+           колонки скрыты на узком экране (см. CSS #reportsTable). #}
+        <table class="table table-sm table-hover mb-0" id="reportsTable" data-no-stack>
             <thead class="table-light">
                 <tr>
                     <th>Файл</th><th>Тип</th><th>Брокер</th><th>Договор</th><th>Период</th><th>Загружен</th><th></th>
@@ -1055,7 +1050,8 @@ document.getElementById('pricesShowAll').addEventListener('change', applyPriceFi
             <tbody>
             {% for r in reports %}
                 <tr>
-                    <td><a href="{{ url_for('report_view', report_id=r.id) }}">{{ r.filename }}</a></td>
+                    <td><a href="{{ url_for('report_view', report_id=r.id) }}"
+                           title="{{ r.filename }}">{{ r.filename | basename }}</a></td>
                     <td><span class="badge {% if r.source_type == 'broker_report' %}bg-primary{% elif r.source_type == 'nalog_report' %}bg-warning text-dark{% elif r.source_type == 'quik' %}bg-secondary{% else %}bg-light text-dark{% endif %}">{{ {'broker_report': 'Брокерский', 'nalog_report': 'Налоговый', 'quik': 'QUIK'}.get(r.source_type, r.source_type) }}</span></td>
                     <td>{% if r.broker %}<span class="badge {% if r.broker == 'sber' %}bg-primary{% elif r.broker == 'vtb' %}bg-success{% elif r.broker == 'gazprombank' %}bg-info{% else %}bg-secondary{% endif %}">{{ {'sber': 'Сбер', 'vtb': 'ВТБ', 'gazprombank': 'Газпромбанк'}.get(r.broker, r.broker) }}</span>{% endif %}</td>
                     <td>{{ r.contract }}</td>
@@ -1077,4 +1073,18 @@ document.getElementById('pricesShowAll').addEventListener('change', applyPriceFi
         {% endif %}
     </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Панель фильтров свёрнута по умолчанию (см. #filterPanel): на телефоне
+// раскрытая панель занимает ~220 px — четверть первого экрана перед и без
+// того длинной страницей. На широком экране фильтры умещаются в одну
+// строку, поэтому там раскрываем их сразу, как было раньше.
+(function () {
+    const panel = document.getElementById('filterPanel');
+    if (!panel || window.innerWidth < 768) return;
+    bootstrap.Collapse.getOrCreateInstance(panel, { toggle: false }).show();
+})();
+</script>
 {% endblock %}

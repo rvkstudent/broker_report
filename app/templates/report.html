@@ -119,10 +119,10 @@
                         <tr>
                             <td><small>{{ lot.security_code }}</small></td>
                             <td>{{ lot.qty }}</td>
-                            <td><small>{{ lot.buy_date }}</small></td>
+                            <td class="date-cell"><small>{{ lot.buy_date | short_date }}</small></td>
                             <td class="text-end">{{ '{:,.2f}'.format(lot.buy_price) }}</td>
                             <td class="text-end">{{ '{:,.2f}'.format(lot.buy_amount) }}</td>
-                            <td><small>{{ lot.sell_date }}</small></td>
+                            <td class="date-cell"><small>{{ lot.sell_date | short_date }}</small></td>
                             <td class="text-end">{{ '{:,.2f}'.format(lot.sell_price) }}</td>
                             <td class="text-end">{{ '{:,.2f}'.format(lot.sell_amount) }}</td>
                             <td class="text-end {{ 'profit-positive' if lot.profit >= 0 else 'profit-negative' }}">
@@ -160,7 +160,7 @@
                             <tr>
                                 <td><small>{{ o.security_name }} ({{ o.security_code }})</small></td>
                                 <td class="text-end">{{ o.qty }}</td>
-                                <td><small>{{ o.buy_date }}</small></td>
+                                <td class="date-cell"><small>{{ o.buy_date | short_date }}</small></td>
                                 <td class="text-end">{{ '{:,.2f}'.format(o.buy_price) }}</td>
                                 <td class="text-end">{{ '{:,.2f}'.format(o.total_cost) }}</td>
                             </tr>
