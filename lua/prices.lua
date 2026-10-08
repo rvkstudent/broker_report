@@ -531,6 +531,24 @@ local function futures_price(price, class_code, sec_code)
     return price * futures_multiplier(class_code, sec_code)
 end
 
+-- Сторона сделки по флагам QUIK (tables.trades.flags).
+-- Проверено по ~30 сделкам, сверенным с отчётами брокера (наблюдаемые значения
+-- 32/33/36/64/65/68): бит 0x04 — ПРОДАЖА, иначе ПОКУПКА. Значения 32 и 64 (без
+-- бита стороны) — промежуточный «снимок» сделки от QUIK, и это ПОКУПКА, а не
+-- продажа: прежнее правило («нечётный флаг → покупка, иначе продажа») помечало
+-- покупки MTZ6/SBERF/LQDT продажами и занижало открытую позицию.
+-- В Lua 5.1 нет побитовых операций, поэтому используем арифметику:
+--   бит n установлен  ⇔  floor(flags / 2^n) % 2 == 1
+local function side_from_flags(flags, operation)
+    if operation == "B" then return "buy" end
+    if operation == "S" then return "sell" end
+    if flags and flags > 0 then
+        if math.floor(flags / 4) % 2 == 1 then return "sell" end
+        return "buy"
+    end
+    return nil
+end
+
 -- Callback QUIK: обезличенные сделки (для отслеживания цен моих инструментов)
 function OnAllTrade(alltrade)
     local sec_code = alltrade.sec_code
@@ -591,26 +609,13 @@ function OnTrade(trade)
         time = os.time()
     }
 
-    -- Определяем сторону сделки:
-    -- Приоритет 1: trade.operation ("B"/"S") — надёжный признак из QUIK.
-    -- Приоритет 2: flags — бит 0 (0x01) установлен = покупка (в Lua 5.1 нет &
-    --              используем % 2: нечётное = бит 0 установлен).
-    -- ВАЖНО: QUIK вызывает OnTrade для одной сделки несколько раз, и в первый
-    -- раз флаги могут не содержать бит стороны (flags=32/64) → неверная сторона.
-    -- На сервере при конфликте по trade_num сторона перезаписывается последней,
-    -- поэтому здесь важно передавать trade.operation, если он доступен.
+    -- Определяем сторону сделки (см. side_from_flags).
     local raw_flags = tonumber(trade.flags) or 0
     local trade_operation = tostring(trade.operation or "")
-    local side
-    if trade_operation == "B" then
-        side = "buy"
-    elseif trade_operation == "S" then
+    local side = side_from_flags(raw_flags, trade_operation)
+    if not side then
+        -- Флагов нет (старый QUIK/необычная сделка) — прежнее поведение.
         side = "sell"
-    else
-        side = "sell"
-        if raw_flags > 0 and raw_flags % 2 == 1 then
-            side = "buy"
-        end
     end
 
     -- Диагностика: если flags=0, дамп всех полей для анализа
@@ -724,20 +729,13 @@ local function load_existing_trades()
             if #INSTRUMENTS > 0 and not should_track(sec_code, class_code) then
                 -- не логируем каждый пропуск, только счётчик
             else
-                -- Определяем сторону сделки:
-                -- Приоритет: trade.operation ("B"/"S"), затем flags (бит 0 = покупка)
+                -- Определяем сторону сделки (см. side_from_flags).
                 local trade_raw_flags = tonumber(trade.flags) or 0
                 local trade_operation = tostring(trade.operation or "")
-                local trade_side
-                if trade_operation == "B" then
-                    trade_side = "buy"
-                elseif trade_operation == "S" then
+                local trade_side = side_from_flags(trade_raw_flags, trade_operation)
+                if not trade_side then
+                    -- Флагов нет — прежнее поведение.
                     trade_side = "sell"
-                else
-                    trade_side = "sell"
-                    if trade_raw_flags > 0 and trade_raw_flags % 2 == 1 then
-                        trade_side = "buy"
-                    end
                 end
 
                 -- Размер лота из QUIK

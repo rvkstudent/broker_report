@@ -1538,42 +1538,41 @@ def save_quik_trades(trades: list):
         if not trade_time:
             trade_time = t.get('trade_time')
 
-        # Определяем сторону сделки: приоритет — явная операция из JSON,
-        #   затем side от Lua (OnTrade уже определил по trade.operation/flags),
-        #   затем operation_type / flags как fallback (OnAllTrade, старые клиенты).
+        # Определяем сторону сделки.
         #
-        # ВАЖНО: для фьючерсов (SPBFUT) QUIK шлёт operation_type=0 и для покупки,
-        #   и для продажи, поэтому operation_type НЕЛЬЗЯ использовать как признак
-        #   стороны, если есть валидный side от Lua.
+        # Флаги QUIK (trade.flags) кодируют сторону так (проверено ~30 сделками,
+        # сверенными с отчётами брокера; наблюдаемые значения 32/33/36/64/65/68):
+        #   бит 0x04 — ПРОДАЖА;
+        #   иначе     — ПОКУПКА.
+        # Значения 32 и 64 (без бита стороны) — промежуточный «снимок» сделки от
+        # QUIK: прежняя логика («бит 0 не выставлен → продажа») помечала покупки
+        # MTZ6/SBERF/LQDT продажами и занижала открытую позицию.
+        # operation_type для фьючерсов (SPBFUT) бесполезен: QUIK шлёт 0 и для
+        # покупки, и для продажи.
         flags = t.get('flags', 0) or 0
         operation = t.get('operation', '') or ''
-        side = t.get('side', '')
+        side = (t.get('side', '') or '').strip().lower()
+        if side in ('покупка', 'buy', 'b'):
+            side = 'buy'
+        elif side in ('продажа', 'sell', 's'):
+            side = 'sell'
+        op_type = t.get('operation_type', -1)
         if operation == 'B':
             side = 'buy'
         elif operation == 'S':
             side = 'sell'
+        elif flags:
+            # Флаги есть — сторона определяется только битами (авторитетно).
+            side = 'sell' if (flags & 0x04) else 'buy'
         elif side in ('buy', 'sell'):
-            # side от Lua уже определён (OnTrade: operation → flags) — доверяем
+            # Флагов нет — доверяем стороне, которую определил клиент (Lua).
             pass
-        else:
-            # Приоритет для старых/сторонних клиентов: operation_type → flags
-            # operation_type: 0 = покупка, 1 = продажа, -1 = неизвестно
-            op_type = t.get('operation_type', -1)
-            if op_type == 0:
-                side = 'buy'
-            elif op_type == 1:
-                side = 'sell'
-            elif flags:
-                # OnTrade: бит 0 (0x01) = 1 → покупка, 0 → продажа
-                # Проверяем, что flags содержит хотя бы один стандартный бит
-                # (0x01-0x20). Если только нестандартные (0x40+), как у SBMM
-                # при неторговых операциях — не доверяем, оставляем side от Lua.
-                if flags & 0x3F:
-                    if flags & 0x01:
-                        side = 'buy'
-                    else:
-                        side = 'sell'
-                # иначе флаги нестандартные — оставляем side от Lua как есть
+        elif op_type == 0:
+            side = 'buy'
+        elif op_type == 1:
+            side = 'sell'
+        elif not side:
+            side = 'sell'
 
         # QUIK OnTrade передаёт qty в лотах. Для акций фактическое количество
         # = value / price (price — за 1 акцию в рублях). Для облигаций цена
@@ -1641,7 +1640,11 @@ def save_quik_trades(trades: list):
                     0, 0, ?, 'quik', ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source, deal_number) WHERE source='quik' AND deal_number IS NOT NULL AND deal_number != ''
             DO UPDATE SET
-                side=excluded.side,
+                -- Сторона: если у сделки нет бита стороны (flags=32/64 — промежуточный
+                -- «снимок» от QUIK), уже известную сторону не перезаписываем
+                -- (например, исправленную отчётом брокера или вручную).
+                side=CASE WHEN excluded.flags > 0 AND (excluded.flags & 5) = 0
+                          THEN trade.side ELSE excluded.side END,
                 price=excluded.price, quantity=excluded.quantity, amount=excluded.amount,
                 trade_date=excluded.trade_date, trade_time=excluded.trade_time,
                 broker=excluded.broker,
