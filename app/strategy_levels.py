@@ -39,6 +39,8 @@ PARAMS = [
     {'key': 'min_hold_rate', 'label': 'Мин. hold rate зоны', 'default': 0.0, 'min': 0.0, 'max': 1.0, 'step': 0.05},
     {'key': 'max_zone_width_pct', 'label': 'Макс. ширина зоны, %', 'default': 0.25, 'min': 0.02, 'max': 2.0, 'step': 0.01},
     {'key': 'cooldown_min', 'label': 'Пауза между сигналами, минут', 'default': 30, 'min': 0, 'max': 240, 'step': 5},
+    {'key': 'min_rr', 'label': 'Мин. R:R (цель / стоп)', 'default': 1.5, 'min': 0.5, 'max': 5.0, 'step': 0.1},
+    {'key': 'atr_mult', 'label': 'Стоп в ATR, ×', 'default': 1.0, 'min': 0.0, 'max': 5.0, 'step': 0.1},
     {'key': 'take_profit_pct', 'label': 'Тейк-профит, %', 'default': 0.4, 'min': 0.05, 'max': 5.0, 'step': 0.05},
     {'key': 'stop_loss_pct', 'label': 'Стоп-лосс, %', 'default': 0.25, 'min': 0.05, 'max': 5.0, 'step': 0.05},
     # Для дивидендных бумаг стоп часто вреден: выбивает из позиции на шуме,
@@ -205,6 +207,9 @@ def simulate(bars: list[dict], zone_signals: list[dict], params: dict, *,
     fee_rate = fee_pct / 100
     decimals = _decimals(bars)
     # Стоп либо выключен явно, либо не применяется к дивидендным бумагам
+    atr_series = _atr_series(bars)
+    skipped_rr = 0
+    rr_values: list[float] = []
     stop_enabled = bool(params.get('use_stop', 1)) if use_stop is None else bool(use_stop)
     if ticker and ticker.upper() in no_stop_tickers():
         stop_enabled = False
@@ -255,6 +260,7 @@ def simulate(bars: list[dict], zone_signals: list[dict], params: dict, *,
                     'reason': reason, 'kind': position['kind'],
                     'kind_label': position['kind_label'],
                     'zone_price': position['zone_price'],
+                    'stop': position['stop'], 'target': position['target'],
                     'gross': round(gross, 2), 'fees': round(fees, 2),
                     'pnl': round(pnl, 2),
                     'pnl_pct': round(pnl / notional * 100, 3),
@@ -267,18 +273,57 @@ def simulate(bars: list[dict], zone_signals: list[dict], params: dict, *,
         if position is None and pending is None and index in signal_index and index < len(bars) - 1:
             item = signal_index[index]
             zone = item['zone']
-            stop = (round(zone['low'] * (1 - params['stop_loss_pct'] / 100), decimals)
-                    if stop_enabled else -1.0)
-            target = next_zone_above(bar['close'], zone)
-            cap = round(bar['close'] * (1 + params['take_profit_pct'] / 100), decimals)
+            entry_ref = bar['close']
+            # Стоп: не ближе ATR — иначе шум выбивает из позиции. Плюс запас
+            # под границей зоны, если зона ниже.
+            atr = atr_series[index] if index < len(atr_series) else 0.0
+            stop_by_pct = entry_ref * (1 - params['stop_loss_pct'] / 100)
+            stop_by_atr = entry_ref - params['atr_mult'] * atr
+            stop_by_zone = zone['low'] * (1 - 0.1 / 100)
+            stop = min(stop_by_pct, stop_by_atr, stop_by_zone) if stop_enabled else -1.0
+
+            target = next_zone_above(entry_ref, zone)
+            cap = entry_ref * (1 + params['take_profit_pct'] / 100)
             if target is None or target > cap:
                 target = cap
+
+            # Отсекаем сделки, где цель ближе min_rr стопов: именно из них
+            # получались «+58 при −958».
+            risk = entry_ref - stop if stop_enabled else None
+            reward = (target - entry_ref) if target else 0.0
+            if stop_enabled and risk and risk > 0:
+                rr = reward / risk
+                rr_values.append(rr)
+                if rr < params['min_rr']:
+                    skipped_rr += 1
+                    continue
+
+            stop = round(stop, decimals) if stop_enabled else -1.0
+            target = round(target, decimals) if target else None
             pending = {'stop': stop, 'target': target, 'kind': item['kind'],
                        'kind_label': item['kind_label'], 'zone_price': zone['price']}
 
     metrics = _metrics(trades, running, notional)
+    metrics['skipped_rr'] = skipped_rr
+    metrics['avg_rr'] = round(sum(rr_values) / len(rr_values), 2) if rr_values else 0.0
     return {'trades': trades, 'equity': equity, 'metrics': metrics,
             'markers': _markers(trades), 'stop_enabled': stop_enabled}
+
+
+def _atr_series(bars: list[dict], window: int = 14) -> list[float]:
+    """ATR по истинному диапазону — база для стопа, не зависящая от «шума»."""
+    result = []
+    ranges = []
+    prev_close = None
+    for bar in bars:
+        high, low = bar['high'], bar['low']
+        true_range = high - low if prev_close is None else max(
+            high - low, abs(high - prev_close), abs(low - prev_close))
+        ranges.append(true_range)
+        prev_close = bar['close']
+        window_values = ranges[-window:]
+        result.append(sum(window_values) / len(window_values))
+    return result
 
 
 def _decimals(bars: list[dict]) -> int:

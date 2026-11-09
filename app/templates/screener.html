@@ -128,10 +128,13 @@
                     title="Оборот относительно среднего дневного — аномалия объёма">Активн.</th>
                 <th class="text-end d-none d-md-table-cell">Оценка</th>
                 <th>Сигнал</th>
+                <th class="text-end" id="scr-signals-head" style="cursor:pointer"
+                    title="Сигналы стратегии «покупка от уровней» за сегодня. Клик — сменить порядок">
+                    Сигн. <span class="text-muted" id="scr-signals-dir">↓</span></th>
             </tr>
             </thead>
             <tbody id="scr-body">
-            <tr><td colspan="12" class="text-center text-muted py-4">Загрузка…</td></tr>
+            <tr><td colspan="13" class="text-center text-muted py-4">Загрузка…</td></tr>
             </tbody>
         </table>
     </div>
@@ -210,10 +213,15 @@
                 </div>`;
     }
 
+    let signalSortAsc = false;
+
     function renderRows(rows) {
         const body = document.getElementById('scr-body');
+        if (signalSortAsc) {
+            rows = [...rows].sort((a, b) => (a.signal_count || 0) - (b.signal_count || 0));
+        }
         if (!rows.length) {
-            body.innerHTML = '<tr><td colspan="12" class="text-center text-muted py-4">' +
+            body.innerHTML = '<tr><td colspan="13" class="text-center text-muted py-4">' +
                 'Нет данных. Сборщик только запустился или сделок за окно не было.</td></tr>';
             return;
         }
@@ -236,8 +244,21 @@
                 <td class="text-end d-none d-lg-table-cell ${r.activity_ratio >= 1.5 ? 'fw-semibold' : 'text-muted'}">${r.activity_ratio.toFixed(2)}×</td>
                 <td class="text-end d-none d-md-table-cell">${scoreBar(r.score)}</td>
                 <td><span class="badge ${badge}">${r.signal_label}</span></td>
+                <td class="text-end" title="${(r.signal_kinds || []).join(', ') || 'сигналов не было'}">
+                    ${r.signal_count
+                        ? `<span class="badge bg-success">${r.signal_count}</span>`
+                        : '<span class="text-muted">—</span>'}</td>
             </tr>`;
         }).join('');
+    }
+
+    const signalsHead = document.getElementById('scr-signals-head');
+    if (signalsHead) {
+        signalsHead.addEventListener('click', () => {
+            signalSortAsc = !signalSortAsc;
+            document.getElementById('scr-signals-dir').textContent = signalSortAsc ? '↑' : '↓';
+            if (window.__lastScreenerRows) renderRows(window.__lastScreenerRows);
+        });
     }
 
     function renderStatus(status) {
@@ -269,7 +290,8 @@
                                      { headers: { 'Accept': 'application/json' } });
             if (!resp.ok) throw new Error('HTTP ' + resp.status);
             const data = await resp.json();
-            renderRows(data.rows || []);
+            window.__lastScreenerRows = data.rows || [];
+            renderRows(window.__lastScreenerRows);
             renderStatus(data.status || {});
             document.getElementById('scr-updated').textContent =
                 'обновлено ' + new Date().toLocaleTimeString('ru-RU');

@@ -93,7 +93,8 @@ class SimulateTests(unittest.TestCase):
         bars = self._bars_for_trade()
         signal = {'time': bars[0]['minute_ns'], 'price': 100.0, 'zone': support(),
                   'kind': 'reversal', 'kind_label': 'разворот'}
-        result = sl.simulate(bars, [signal], PARAMS, zones=[support()], ticker='TEST')
+        result = sl.simulate(bars, [signal], dict(PARAMS, min_rr=0.0), zones=[support()],
+                             ticker='TEST')
         self.assertEqual(len(result['trades']), 1)
         self.assertEqual(result['trades'][0]['reason'], 'stop')
         self.assertTrue(result['stop_enabled'])
@@ -102,8 +103,8 @@ class SimulateTests(unittest.TestCase):
         bars = self._bars_for_trade()
         signal = {'time': bars[0]['minute_ns'], 'price': 100.0, 'zone': support(),
                   'kind': 'reversal', 'kind_label': 'разворот'}
-        result = sl.simulate(bars, [signal], dict(PARAMS, use_stop=0), zones=[support()],
-                             ticker='TEST')
+        result = sl.simulate(bars, [signal], dict(PARAMS, use_stop=0, min_rr=0.0),
+                             zones=[support()], ticker='TEST')
         self.assertFalse(result['stop_enabled'])
         self.assertEqual(len(result['trades']), 1)
         self.assertNotEqual(result['trades'][0]['reason'], 'stop')
@@ -124,7 +125,8 @@ class SimulateTests(unittest.TestCase):
         bars = self._bars_for_trade()
         signal = {'time': bars[0]['minute_ns'], 'price': 100.0, 'zone': support(),
                   'kind': 'reversal', 'kind_label': 'разворот'}
-        result = sl.simulate(bars, [signal], PARAMS, zones=[support()], ticker='TEST')
+        result = sl.simulate(bars, [signal], dict(PARAMS, min_rr=0.0), zones=[support()],
+                             ticker='TEST')
         self.assertTrue(all(m['position'] == 'belowBar' for m in result['markers'][:1]))
         self.assertEqual(len(result['markers']), 2 * len(result['trades']))
 
@@ -132,7 +134,8 @@ class SimulateTests(unittest.TestCase):
         bars = self._bars_for_trade()
         signal = {'time': bars[0]['minute_ns'], 'price': 100.0, 'zone': support(),
                   'kind': 'reversal', 'kind_label': 'разворот'}
-        result = sl.simulate(bars, [signal], PARAMS, zones=[support()], ticker='TEST')
+        result = sl.simulate(bars, [signal], dict(PARAMS, min_rr=0.0), zones=[support()],
+                             ticker='TEST')
         metrics = result['metrics']
         self.assertEqual(metrics['trades'], len(result['trades']))
         self.assertAlmostEqual(metrics['net_pnl'],
@@ -156,3 +159,54 @@ class CatalogTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class RiskRewardTests(unittest.TestCase):
+    def _bars(self):
+        # вход по 100, стоп далеко (98), цель очень близко (100.2)
+        bars = [bar(i, 100.0, low=99.9, high=100.1) for i in range(5)]
+        bars += [bar(i, 100.0, low=99.9, high=100.1) for i in range(5, 12)]
+        return bars
+
+    def test_trade_skipped_when_target_too_close(self):
+        bars = self._bars()
+        near_resistance = {'price': 100.2, 'low': 100.15, 'high': 100.25,
+                           'side': 'resistance', 'hold_rate': 0.5, 'touches': 3,
+                           'volume_rub': 1e8}
+        signal = {'time': bars[0]['minute_ns'], 'price': 100.0, 'zone': support(),
+                  'kind': 'reversal', 'kind_label': 'разворот'}
+        params = dict(PARAMS, min_rr=1.5, atr_mult=0.0, take_profit_pct=0.1)
+        result = sl.simulate(bars, [signal], params, zones=[support(), near_resistance],
+                             ticker='TEST')
+        self.assertEqual(len(result['trades']), 0)
+        self.assertEqual(result['metrics']['skipped_rr'], 1)
+
+    def test_trade_taken_with_good_rr(self):
+        bars = [bar(i, 100.0, low=99.9, high=100.1) for i in range(5)]
+        bars += [bar(i, 100.4, low=100.0, high=100.5) for i in range(5, 12)]
+        far_resistance = {'price': 102.0, 'low': 101.9, 'high': 102.1,
+                          'side': 'resistance', 'hold_rate': 0.5, 'touches': 3,
+                          'volume_rub': 1e8}
+        signal = {'time': bars[0]['minute_ns'], 'price': 100.0, 'zone': support(),
+                  'kind': 'reversal', 'kind_label': 'разворот'}
+        params = dict(PARAMS, min_rr=1.5, atr_mult=0.0, take_profit_pct=5.0)
+        result = sl.simulate(bars, [signal], params,
+                             zones=[support(), far_resistance], ticker='TEST')
+        self.assertEqual(len(result['trades']), 1)
+        self.assertEqual(result['metrics']['skipped_rr'], 0)
+
+    def test_atr_stop_wider_than_percent(self):
+        # волатильные бары: ATR больше 0.25 % от цены
+        bars = [bar(i, 100.0, low=99.0, high=101.0) for i in range(20)]
+        bars += [bar(i, 100.0, low=99.0, high=101.0) for i in range(20, 24)]
+        signal = {'time': bars[0]['minute_ns'], 'price': 100.0, 'zone': support(),
+                  'kind': 'reversal', 'kind_label': 'разворот'}
+        # цель далеко (тейк 10 %), чтобы сделка прошла фильтр R:R
+        result = sl.simulate(bars, [signal],
+                             dict(PARAMS, atr_mult=1.0, min_rr=0.5, take_profit_pct=10.0,
+                                  max_hold_min=3),
+                             zones=[support()], ticker='TEST')
+        self.assertTrue(result['trades'])
+        trade = result['trades'][0]
+        # стоп шире 0.25 % от входа, потому что ATR = 2 ₽
+        self.assertGreaterEqual(trade['entry_price'] - trade['stop'], 1.5)

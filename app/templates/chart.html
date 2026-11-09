@@ -914,16 +914,20 @@
     function renderBacktest(res) {
         const m = res.metrics;
         const gross = m.gross_pnl ?? 0;
+        const skipped = m.skipped_rr || 0;
         const diag = document.getElementById('bt-diagnosis');
         if (m.trades === 0) {
             diag.className = 'mb-2 alert alert-secondary py-1 px-2';
-            diag.textContent = 'Сделок нет: порог входа не достигнут. Уменьшите «Порог × издержки», '
-                + 'σ или минимальное отклонение.';
+            diag.textContent = skipped
+                ? `Сигналы были (${skipped}), но все отсеяны: цель ближе стопа — `
+                  + `средний R:R ${m.avg_rr}. Такой вход не окупает проигрыш.`
+                : 'Сделок нет: порог входа не достигнут.';
             diag.classList.remove('d-none');
         } else if (gross <= 0) {
             diag.className = 'mb-2 alert alert-warning py-1 px-2';
-            diag.textContent = 'Валовой результат ≤ 0: у сигнала нет перевеса, дело не в комиссиях. '
-                + 'Меняйте логику входа/выхода.';
+            diag.textContent = `Валовой результат ≤ 0: у сигнала нет перевеса, дело не в комиссиях. `
+                + `Средний R:R ${m.avg_rr}, винрейт ${m.win_rate}% — при таком соотношении `
+                + `нужен винрейт ≥ ${m.avg_rr > 0 ? Math.round(100 / (1 + m.avg_rr)) : 50}%.`;
             diag.classList.remove('d-none');
         } else if (m.net_pnl < 0) {
             diag.className = 'mb-2 alert alert-warning py-1 px-2';
@@ -947,6 +951,8 @@
             metric('просадка', money(m.max_drawdown), 'text-danger'),
             metric('комиссии', money(m.fees)),
             metric('средний бар', m.avg_bars),
+            metric('R:R', m.avg_rr ?? 0),
+            metric('отсеяно', m.skipped_rr ?? 0),
             metric('шарп', m.sharpe),
         ].join('');
 

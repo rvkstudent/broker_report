@@ -25,7 +25,8 @@ from app.parser_nalog import (parse_nalog_report, get_nalog_summary,
                                get_nalog_tax_summary_by_year,
                                get_nalog_group_summary)
 from app.replication import push_async as push_to_cloud
-from app import screener, chartdata, backtest, volatility, levels, strategy_levels
+from app import (screener, chartdata, backtest, volatility, levels,
+                strategy_levels, signals_cache)
 from app.allowed_devices import (is_device_allowed, add_pending_device,
                                   approve_device, reject_device, remove_device,
                                   get_all_devices, toggle_device, get_pending_count,
@@ -1040,17 +1041,34 @@ def api_screener():
         vols = volatility.universe(vol_from, vol_to, interval=1)
     except Exception:
         vols = {}
+    # Сигналы стратегии за сегодня — из фонового кэша (тяжёлый расчёт)
+    try:
+        signal_map, signals_at = signals_cache.snapshot()
+    except Exception:
+        signal_map, signals_at = {}, 0.0
+    for row in rows:
+        info = signal_map.get(row['ticker'], {})
+        row['signal_count'] = int(info.get('count', 0))
+        row['signal_last'] = info.get('last')
+        row['signal_kinds'] = info.get('kinds', [])
+
     for row in rows:
         vol = vols.get(row['ticker'], {})
         row['vol_day_pct'] = vol.get('sigma_day_pct', 0.0)
         row['vol_range_rub'] = vol.get('range_rub', 0.0)
         row['vol_atr_rub'] = vol.get('atr_rub', 0.0)
         row['vol_range_pct'] = vol.get('range_pct', 0.0)
+
+    # Бумаги с сигналами стратегии — наверху, внутри группы по оценке
+    rows.sort(key=lambda r: (-r.get('signal_count', 0), -r.get('score', 0)))
+
     return jsonify({
         'window': rows[0]['window'] if rows else window,
         'count': len(rows),
         'rows': rows[:limit],
         'status': screener.collector_status(),
+        'signals_at': signals_at,
+        'signals_total': sum(r.get('signal_count', 0) for r in rows),
     })
 
 
