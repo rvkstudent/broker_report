@@ -161,6 +161,16 @@
                 <label class="form-check-label" for="ch-vwap" style="font-size:.72rem">VWAP</label>
             </div>
             <div class="form-check form-check-inline mb-0">
+                <input class="form-check-input" type="checkbox" id="ch-signals" checked>
+                <label class="form-check-label" for="ch-signals" style="font-size:.72rem"
+                       title="Сигналы на покупку по уровням">сигналы</label>
+            </div>
+            <div class="form-check form-check-inline mb-0">
+                <input class="form-check-input" type="checkbox" id="ch-nostop">
+                <label class="form-check-label" for="ch-nostop" style="font-size:.72rem"
+                       title="Без стоп-лосса: выход по цели или времени (для дивидендных бумаг)">без стопа</label>
+            </div>
+            <div class="form-check form-check-inline mb-0">
                 <input class="form-check-input" type="checkbox" id="ch-pct" checked>
                 <label class="form-check-label" for="ch-pct" style="font-size:.72rem"
                        title="Колонка процентов справа">%</label>
@@ -229,6 +239,23 @@
                     <tbody id="lv-rows"></tbody>
                 </table>
             </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header d-flex justify-content-between">
+            <span><i class="bi bi-lightning-charge"></i> Сигналы на покупку</span>
+            <span class="text-muted fw-normal" style="font-size:.68rem" id="sig-count"></span>
+        </div>
+        <div class="table-responsive" style="max-height:170px;overflow:auto">
+            <table class="table table-sm mb-0" data-no-stack>
+                <thead class="table-light"><tr>
+                    <th class="ps-2">время</th><th>тип</th>
+                    <th class="text-end">зона</th><th class="text-end">цена</th>
+                    <th class="text-end">дельта</th><th class="text-end">объём</th>
+                </tr></thead>
+                <tbody id="sig-rows"></tbody>
+            </table>
         </div>
     </div>
 
@@ -554,10 +581,48 @@
     let currentRange = 'today';
     let priceMarkers = [];
     let backtestMarkers = [];
+    let signalMarkers = [];
 
     function applyMarkers() {
-        const list = backtestMarkers.length ? backtestMarkers : priceMarkers;
+        // Приоритет: результат бэктеста → сигналы стратегии → сделки из ленты
+        const list = backtestMarkers.length ? backtestMarkers
+            : (signalMarkers.length ? signalMarkers : priceMarkers);
         candleSeries.setMarkers([...list].sort((a, b) => a.time - b.time));
+    }
+
+    function renderSignalRows(rows) {
+        const body = document.getElementById('sig-rows');
+        document.getElementById('sig-count').textContent = rows.length ? `за период: ${rows.length}` : '';
+        body.innerHTML = rows.map((row) => `<tr>
+            <td class="ps-2 text-muted">${hhmm(row.time)}</td>
+            <td class="${row.kind === 'breakout' ? 'text-success' : 'text-primary'}">${row.kind_label}</td>
+            <td class="text-end">${Number(row.zone_price).toFixed(3)}</td>
+            <td class="text-end">${Number(row.price).toFixed(3)}</td>
+            <td class="text-end ${row.delta >= 0 ? 'text-success' : 'text-danger'}">${row.delta >= 0 ? '+' : ''}${row.delta}</td>
+            <td class="text-end text-muted">×${row.volume_ratio}</td>
+        </tr>`).join('') || '<tr><td colspan="6" class="text-muted">сигналов нет</td></tr>';
+    }
+
+    async function loadSignals() {
+        if (!document.getElementById('ch-signals').checked) {
+            signalMarkers = [];
+            renderSignalRows([]);
+            applyMarkers();
+            return;
+        }
+        try {
+            const query = new URLSearchParams({range: currentRange, interval: currentInterval});
+            const resp = await fetch(`/api/signals/${TICKER}?` + query);
+            const data = await resp.json();
+            if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+            signalMarkers = data.markers || [];
+            renderSignalRows(data.signals || []);
+            applyMarkers();
+        } catch (e) {
+            signalMarkers = [];
+            renderSignalRows([]);
+            applyMarkers();
+        }
     }
 
     function tradeMarkers(items) {
@@ -628,6 +693,7 @@
             loadTape();
             await loadMarkers();
             await loadLevels();
+            await loadSignals();
         } catch (e) {
             err.textContent = 'Не удалось загрузить график: ' + e.message;
             err.classList.remove('d-none');
@@ -920,7 +986,8 @@
                 headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
                 body: JSON.stringify({
                     strategy: document.getElementById('bt-strategy').value,
-                    params,
+                    params: {...params,
+                             use_stop: document.getElementById('ch-nostop').checked ? 0 : 1},
                     range: currentRange,
                     interval: currentInterval,
                     notional: document.getElementById('bt-notional').value,
@@ -970,7 +1037,8 @@
                 headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
                 body: JSON.stringify({
                     strategy: document.getElementById('bt-strategy').value,
-                    params,
+                    params: {...params,
+                             use_stop: document.getElementById('ch-nostop').checked ? 0 : 1},
                     range: currentRange,
                     interval: currentInterval,
                     notional: document.getElementById('bt-notional').value,
@@ -999,6 +1067,7 @@
         loadChart();
     });
     document.getElementById('ch-markers').addEventListener('change', loadMarkers);
+    document.getElementById('ch-signals').addEventListener('change', loadSignals);
     document.getElementById('ch-min-value').addEventListener('change', loadMarkers);
     document.getElementById('ch-vwap').addEventListener('change', loadChart);
     function applyAxisMode() {
@@ -1031,6 +1100,7 @@
         document.getElementById('bt-results').classList.add('d-none');
         document.getElementById('bt-diagnosis').classList.add('d-none');
         equitySeries.setData([]);
+        applyMarkers();
     });
 
     window.addEventListener('resize', () => {

@@ -25,7 +25,7 @@ from app.parser_nalog import (parse_nalog_report, get_nalog_summary,
                                get_nalog_tax_summary_by_year,
                                get_nalog_group_summary)
 from app.replication import push_async as push_to_cloud
-from app import screener, chartdata, backtest, volatility, levels
+from app import screener, chartdata, backtest, volatility, levels, strategy_levels
 from app.allowed_devices import (is_device_allowed, add_pending_device,
                                   approve_device, reject_device, remove_device,
                                   get_all_devices, toggle_device, get_pending_count,
@@ -1094,7 +1094,7 @@ def chart_view(ticker=None):
         return redirect(url_for('chart_view', ticker=first))
     return render_template('chart.html',
                            ticker=ticker.upper(),
-                           strategies=backtest.strategy_catalog())
+                           strategies=strategy_levels.catalog())
 
 
 def _chart_range():
@@ -1117,6 +1117,30 @@ def api_chart(ticker):
         return jsonify({'error': str(exc)}), 400
     data['range'] = range_key
     return jsonify(data)
+
+
+@flask_app.route('/api/signals/<ticker>')
+def api_signals(ticker):
+    """Сигналы на покупку по уровням за выбранный диапазон."""
+    from_ns, to_ns, range_key, interval = _chart_range()
+    payload = {k: request.args.get(k) for k in
+               ('warmup_min', 'approach_pct', 'break_margin_pct', 'confirm_delta',
+                'volume_factor', 'take_profit_pct', 'stop_loss_pct', 'max_hold_min')}
+    try:
+        data = strategy_levels.analyze_range(ticker, from_ns, to_ns, payload,
+                                             interval=interval)
+    except levels.LevelsError as exc:
+        return jsonify({'error': str(exc)}), 400
+    return jsonify({
+        'ticker': data['ticker'],
+        'params': data['params'],
+        'signals': data['signals'],
+        'markers': strategy_levels.signal_markers(data['signals']),
+        'zones': [{'price': z['price'], 'low': z['low'], 'high': z['high'],
+                   'side': z['side'], 'origin': z.get('origin')} for z in data['zones']],
+        'count': len(data['signals']),
+        'range_key': range_key,
+    })
 
 
 @flask_app.route('/api/levels/<ticker>')
@@ -1190,7 +1214,7 @@ def api_backtest_scan():
     бумаге»: один набор параметров на всём периоде, сравнение двух половин.
     """
     payload = request.get_json(silent=True) or {}
-    strategy = payload.get('strategy') or 'delta_momentum'
+    strategy = payload.get('strategy') or strategy_levels.KEY
     range_key = payload.get('range') or 'today'
     try:
         interval = int(payload.get('interval', 1))
@@ -1234,7 +1258,7 @@ def api_backtest_scan():
 def api_backtest(ticker):
     """Прогнать intraday-стратегию по минуткам инструмента."""
     payload = request.get_json(silent=True) or {}
-    strategy = payload.get('strategy') or 'delta_momentum'
+    strategy = payload.get('strategy') or strategy_levels.KEY
     range_key = payload.get('range') or request.args.get('range', 'today')
     interval = payload.get('interval', 1)
     try:
@@ -1254,9 +1278,15 @@ def api_backtest(ticker):
     notional = max(1000.0, _num(payload.get('notional'), 100_000.0))
     fee_pct = max(0.0, min(_num(payload.get('fee_pct'), 0.05), 1.0))
     try:
-        result = backtest.run(ticker, from_ns, to_ns, strategy, payload.get('params'),
-                              interval=interval, notional=notional, fee_pct=fee_pct)
-    except (chartdata.ChartError, backtest.BacktestError) as exc:
+        if strategy == strategy_levels.KEY:
+            result = strategy_levels.analyze_range(ticker, from_ns, to_ns, payload.get('params'),
+                                                   interval=interval, notional=notional,
+                                                   fee_pct=fee_pct)
+            result['markers'] = strategy_levels.signal_markers(result['signals'])
+        else:
+            result = backtest.run(ticker, from_ns, to_ns, strategy, payload.get('params'),
+                                  interval=interval, notional=notional, fee_pct=fee_pct)
+    except (chartdata.ChartError, backtest.BacktestError, levels.LevelsError) as exc:
         return jsonify({'error': str(exc)}), 400
     return jsonify(result)
 
