@@ -288,10 +288,12 @@ def simulate(bars: list[dict], zone_signals: list[dict], params: dict, *,
                 target = cap
 
             # Отсекаем сделки, где цель ближе min_rr стопов: именно из них
-            # получались «+58 при −958».
-            risk = entry_ref - stop if stop_enabled else None
+            # получались «+58 при −958». Без стопа (дивидендные бумаги) риск
+            # всё равно оцениваем — по ATR, иначе фильтр не работает вовсе.
+            risk = entry_ref - stop if stop_enabled else max(
+                params['atr_mult'] * atr, entry_ref * params['stop_loss_pct'] / 100)
             reward = (target - entry_ref) if target else 0.0
-            if stop_enabled and risk and risk > 0:
+            if risk > 0:
                 rr = reward / risk
                 rr_values.append(rr)
                 if rr < params['min_rr']:
