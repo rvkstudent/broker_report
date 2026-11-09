@@ -41,7 +41,15 @@ PARAMS = [
     {'key': 'cooldown_min', 'label': 'Пауза между сигналами, минут', 'default': 30, 'min': 0, 'max': 240, 'step': 5},
     {'key': 'min_rr', 'label': 'Мин. R:R (цель / стоп)', 'default': 1.5, 'min': 0.5, 'max': 5.0, 'step': 0.1},
     {'key': 'atr_mult', 'label': 'Стоп в ATR, ×', 'default': 1.0, 'min': 0.0, 'max': 5.0, 'step': 0.1},
-    {'key': 'take_profit_pct', 'label': 'Тейк-профит, %', 'default': 0.4, 'min': 0.05, 'max': 5.0, 'step': 0.05},
+    # Цель — только предохранитель: движение ведёт трейлинг-стоп, иначе
+    # выходим на первом же уровне, не дав тренду раскрыться.
+    # Консервативно по умолчанию: цель близкая, трейлинг выключен. Проверено
+    # на полном дне — широкая цель вместе с трейлом дают хуже (фильтр R:R
+    # перестаёт отсекать слабые входы, и в выборку попадает мусор).
+    # Для трендовых дней трейлинг включается параметрами ниже.
+    {'key': 'take_profit_pct', 'label': 'Тейк-профит, %', 'default': 0.4, 'min': 0.05, 'max': 20.0, 'step': 0.05},
+    {'key': 'trail_atr', 'label': 'Трейлинг-стоп, ATR (0 — выкл)', 'default': 0.0, 'min': 0.0, 'max': 6.0, 'step': 0.25},
+    {'key': 'breakeven_atr', 'label': 'Безубыток после, ATR (0 — выкл)', 'default': 0.0, 'min': 0.0, 'max': 6.0, 'step': 0.25},
     {'key': 'stop_loss_pct', 'label': 'Стоп-лосс, %', 'default': 0.25, 'min': 0.05, 'max': 5.0, 'step': 0.05},
     # Для дивидендных бумаг стоп часто вреден: выбивает из позиции на шуме,
     # а смысл владения — дивиденды и восстановление цены.
@@ -234,7 +242,8 @@ def simulate(bars: list[dict], zone_signals: list[dict], params: dict, *,
                             'shares': shares, 'bars': 0,
                             'stop': pending['stop'], 'target': pending['target'],
                             'kind': pending['kind'], 'kind_label': pending['kind_label'],
-                            'zone_price': pending['zone_price']}
+                            'zone_price': pending['zone_price'], 'best': price,
+                            'stop0': pending['stop']}
             pending = None
 
         if position is not None:
@@ -247,6 +256,25 @@ def simulate(bars: list[dict], zone_signals: list[dict], params: dict, *,
                 exit_price, reason = round(max(bar['open'], position['target']), decimals), 'target'
             elif position['bars'] >= max_hold:
                 exit_price, reason = round(bar['close'], decimals), 'time'
+            # Управление прибылью ведём после закрытия бара: стоп для текущего
+            # бара не должен «подтягиваться» его же максимумом.
+            if position is not None and stop_enabled:
+                position['best'] = max(position['best'], bar['high'])
+                atr_now = atr_series[index] if index < len(atr_series) else 0.0
+                profit = position['best'] - position['entry_price']
+                # 1) как только прибыль перекрыла ATR — стоп в безубыток,
+                #    чтобы хороший вход не превращался в минус;
+                if (params['breakeven_atr'] > 0
+                        and profit >= params['breakeven_atr'] * atr_now):
+                    breakeven = position['entry_price'] * 1.0005
+                    if breakeven > position['stop']:
+                        position['stop'] = round(breakeven, decimals)
+                # 2) дальше ведём трейлинг по ATR
+                if params['trail_atr'] > 0:
+                    trail = position['best'] - params['trail_atr'] * atr_now
+                    if trail > position['stop']:
+                        position['stop'] = round(trail, decimals)
+
             if exit_price is not None:
                 gross = (exit_price - position['entry_price']) * position['shares']
                 fees = (position['entry_price'] + exit_price) * position['shares'] * fee_rate
@@ -261,6 +289,7 @@ def simulate(bars: list[dict], zone_signals: list[dict], params: dict, *,
                     'kind_label': position['kind_label'],
                     'zone_price': position['zone_price'],
                     'stop': position['stop'], 'target': position['target'],
+                    'stop_initial': position['stop0'],
                     'gross': round(gross, 2), 'fees': round(fees, 2),
                     'pnl': round(pnl, 2),
                     'pnl_pct': round(pnl / notional * 100, 3),

@@ -153,7 +153,7 @@ class CatalogTests(unittest.TestCase):
 
     def test_params_have_bounds(self):
         params = sl._resolve({'take_profit_pct': 99, 'cooldown_min': -5})
-        self.assertEqual(params['take_profit_pct'], 5.0)
+        self.assertEqual(params['take_profit_pct'], 20.0)
         self.assertEqual(params['cooldown_min'], 0)
 
 
