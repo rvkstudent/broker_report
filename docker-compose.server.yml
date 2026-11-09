@@ -40,6 +40,10 @@ services:
       - ./reports:/app/reports                               # отчёты (HTML/XLSX)
       - ./secrets/firebase-key.json:/app/app/firebase-key.json:ro
       - ./secrets/password_hash.txt:/app/secrets/password_hash.txt:ro
+      # Корневой сертификат УЦ Минцифры для T-Invest API (скринер): в slim-образе
+      # его нет. Файл создаётся на хосте: sh deploy/export-tinkoff-ca.sh
+      # Путь в контейнере указывается в .env: TINKOFF_CA_BUNDLE=/app/secrets/tinkoff-ca.pem
+      - ./secrets/tinkoff-ca.pem:/app/secrets/tinkoff-ca.pem:ro
       - ./logs:/app/logs
     ports:
       # Порт публикуется ТОЛЬКО на localhost сервера — для SSH-туннеля с машины QUIK:

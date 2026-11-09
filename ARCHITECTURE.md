@@ -112,15 +112,24 @@ BrokerReport/
 │   ├── parser_nalog.py       # Парсинг налоговых отчётов
 │   ├── parser_openbroker.py  # Парсинг OpenBroker
 │   ├── replication.py        # Firebase sync (push_async)
+│   ├── tinkoff_api.py        # Клиент T-Invest API (сделки, свечи, акции)
+│   ├── screener.py           # Скринер: сбор ленты + объёмная аналитика
+│   ├── chartdata.py          # График: свечи, дельта, VWAP, маркеры сделок
+│   ├── backtest.py           # Бэктест intraday-стратегий по минуткам
+│   ├── volatility.py         # Волатильность: ATR, σ, размах (₽ и %)
+│   ├── levels.py             # Профиль объёма по цене, зоны, вердикт по перевесу
 │   ├── firebase_config.py    # Настройки Firebase
 │   ├── allowed_devices.py    # Авторизация устройств
 │   ├── broker.db             # SQLite (создаётся автоматически)
 │   └── templates/            # Bootstrap 5 шаблоны
 │       ├── base.html
 │       ├── dashboard.html    # Дашборд со сводной аналитикой
+│       ├── screener.html     # Скринер акций (объёмный анализ)
+│       ├── chart.html        # График инструмента + панель бэктеста
 │       ├── report.html       # Детальный просмотр отчёта
 │       └── ...
 │
+├── tests/                    # Юнит-тесты (unittest)
 ├── reports/                  # HTML/XLSX-отчёты (входные данные)
 ├── lua/prices.lua            # Lua-скрипт для QUIK
 ├── logs/                     # Логи
@@ -186,6 +195,50 @@ flask_app.run()              # Старт Flask
 
 ---
 
+### 6. `screener.py` + `tinkoff_api.py` — скринер объёмного анализа
+
+Отдельный, независимый от брокерских отчётов контур: данные приходят не из
+отчётов, а прямо из **T-Invest API** (обезличенные сделки MOEX).
+
+**`tinkoff_api.py`** — тонкий REST-клиент (grpc-gateway, только `requests`):
+
+- `MarketDataService/GetLastTrades` — лента обезличенных сделок
+  (`TRADE_SOURCE_EXCHANGE`, чтобы адресные сделки дилера не искажали объём);
+- `MarketDataService/GetCandles` — дневные свечи для среднего дневного оборота;
+- `InstrumentsService/Shares` — список акций;
+- общий `RateLimiter` на 480 запросов/мин (лимит сервиса котировок — 600),
+  ретраи с экспоненциальной паузой на 429/5xx.
+
+**`screener.py`** — фоновый сборщик + аналитика:
+
+```
+раз в 30 с:  GetLastTrades(uid, cursor − 10 мин … now)
+             → INSERT OR IGNORE в market_trade (дедуп по UNIQUE)
+             → курсор last_ts_ns, last_price
+
+GET /screener → compute_metrics() → SQL-агрегаты по market_trade
+                                   → дельта, крупные принты, VWAP, активность
+                                   → _classify() → сигнал
+```
+
+Особенности:
+
+- **Направление сделки.** Берётся из `Trade.direction`; если биржа вернула
+  `TRADE_DIRECTION_UNSPECIFIED`, сторона восстанавливается правилом тика
+  (`_resolve_sides`): выше предыдущей цены — покупка, ниже — продажа, та же
+  цена — как у предыдущей сделки.
+- **Единица объёма.** `Trade.quantity` — лоты. В `shares` пишется
+  `quantity × Share.lot`, в `value` — `price × shares` (рубли).
+- **Нормализация активности.** Оборот сравнивается не с календарным временем
+  с начала сессии, а с фактическим периодом наблюдения (`covered_minutes`):
+  иначе после старта сборщика в середине дня все бумаги выглядели бы
+  «мёртвыми».
+- **Один сборщик на установку.** `start_collector()` берёт `flock` на
+  `broker.db.screener.lock`; второй процесс (например, `run.py` рядом с
+  gunicorn) в сбор не входит.
+
+---
+
 ## База данных SQLite
 
 ### Таблица `trade` — единая для всех сделок
@@ -228,6 +281,33 @@ flask_app.run()              # Старт Flask
 
 `instrument_alias` — локальный справочник соответствия кодов отчёта и QUIK (см. «Коды фьючерсов в отчётах ≠ коды QUIK»).
 `quik_trade` — сохранена для обратной совместимости, но не используется в расчётах.
+
+### Таблицы скринера (отдельная БД `screener.db`)
+
+Тики и минутки **не лежат в `broker.db`**: месяц ленты топ-100 — это десятки
+гигабайт, и они бы раздували бэкап, rsync и репликацию Firebase. Путь —
+`screener_db_path()`, переопределяется `SCREENER_DB_PATH`. При первом запуске
+уже собранные сделки переносятся из `broker.db` (`_migrate_from_report_db`).
+
+| Таблица | Назначение |
+|---------|-----------|
+| `market_trade` | Лента обезличенных сделок: `ts_ns`, `price`, `lots`, `shares`, `value`, `side` (`buy`/`sell`), `direction` (нормализованное направление из API). `UNIQUE(instrument_uid, ts_ns, price, lots)` — дедупликация перекрывающихся окон опроса. Живёт `SCREENER_RETENTION_DAYS` дней (10). |
+| `market_bar_1m` | Минутки: OHLC, VWAP, объём в акциях и ₽, buy/sell отдельно, число сделок, оборот и число крупных принтов. Живут `SCREENER_BAR_RETENTION_DAYS` (365). |
+| `screener_instrument` | Универсум: тикер, лот, `avg_daily_value` (средний дневной оборот по свечам), `rank`, `selected`, курсор `last_ts_ns` и `last_price` для восстановления направления по правилу тика. |
+| `screener_state` | Служебные отметки: `universe_updated_at`, `last_prune_at`, `bar_rollup_ts`, `migrated_from_report_db`. |
+
+Запись в `market_trade` идёт только из фонового сборщика (`screener.py`), чтение —
+из Flask-потоков. WAL-режим SQLite позволяет им работать параллельно.
+
+**Свёртка и чистка.** `rollup_bars()` вызывается каждый цикл и идемпотентно
+пересчитывает завершённые минуты (`INSERT … ON CONFLICT DO UPDATE`).
+`prune_old_trades()` сначала доворачивает минутки до границы хранения, и только
+потом удаляет сырой тик — поэтому история за прошедшие дни остаётся в
+`market_bar_1m`.
+
+**Выгрузка.** `export_trades()` / `export_month()` пишут ленту (или минутки) в
+Parquet+zstd при наличии `pyarrow`, иначе в CSV+zstd (`zstandard`) или CSV+gzip.
+На реальных данных — 10–12 байт на сделку против 342 байт в SQLite.
 
 ---
 
@@ -314,6 +394,31 @@ GET / → get_trade_profit() → _match_trades_lifo() → SQLite trade
   LIFO-матчинг → рендер dashboard.html
 ```
 
+**График и бэктест** строятся поверх `market_bar_1m`:
+
+```
+GET /api/chart/<ticker>  → prepared(): минутки → ресемплинг (1/5/15/60 мин)
+                           → сессионная VWAP → свечи + дельта + маркеры
+POST /api/backtest/<ticker> → signals() → симуляция (вход по след. бару,
+                           стоп раньше тейка) → сделки, equity, метрики
+```
+
+Маркеры сделок берутся из `market_trade` (доступны в пределах срока хранения
+тика), поэтому на графике за старые даты остаются только свечи и дельта.
+
+### Скринер (T-Invest API)
+```
+фоновый поток → GetLastTrades → market_trade (SQLite, дедуп по UNIQUE)
+                                        ↓
+GET /api/screener → compute_metrics() → агрегаты + сигналы → screener.html
+
+каждый цикл: market_trade → rollup_bars() → market_bar_1m (срок хранения 1 год)
+раз в час:   rollup до границы хранения → DELETE старых тиков
+```
+
+Скринер не связан с Firebase-репликацией: поток сделок объёмный и
+восстанавливается с нуля при перезапуске, поэтому в облако не выгружается.
+
 ### Синхронизация хостов
 ```
 Хост A (Сбер) ──push──→ Firebase ──pull──→ Хост B (ВТБ)
@@ -336,6 +441,19 @@ GET / → get_trade_profit() → _match_trades_lifo() → SQLite trade
 | GET | `/api/quik-trades` | Последние QUIK-трейды (из trade) |
 | GET | `/api/quik-connected` | Статус подключения QUIK |
 | GET | `/api/accounts` | Список счетов QUIK для настройки |
+| GET | `/screener` | Скринер акций по объёмному анализу |
+| GET | `/api/screener` | Метрики скринера (`window`, `min_turnover`, `signal`, `limit`) |
+| GET | `/api/screener/<ticker>` | Детализация: метрики, дельта по минутам, лента |
+| GET | `/api/screener/status` | Состояние сборщика сделок |
+| POST | `/api/screener/refresh-universe` | Пересобрать универсум топ-N (в фоне) |
+| GET | `/chart/<ticker>` | График свечей, маркеров сделок и бэктест |
+| GET | `/api/chart/<ticker>` | Свечи, объём, дельта, VWAP (`range`, `interval`) |
+| GET | `/api/chart/<ticker>/markers` | Маркеры сделок (`mode=large|all`) |
+| GET | `/api/chart/<ticker>/tape` | Последние сделки |
+| GET | `/api/volatility/<ticker>` | Волатильность: ATR, σ бара/часа/дня, размах |
+| GET | `/api/levels/<ticker>` | Профиль объёма по цене, зоны, вердикт по перевесу |
+| POST | `/api/backtest/<ticker>` | Прогон intraday-стратегии по минуткам |
+| POST | `/api/backtest/scan` | Проверка стратегии по универсуму (in/out-of-sample) |
 
 ---
 

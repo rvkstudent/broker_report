@@ -112,7 +112,12 @@
         @media (max-width: 991.98px) {
             .navbar-nav .nav-link { padding: .7rem 1rem; border-radius: .375rem; }
             .navbar-nav .nav-link.active { background: rgba(255,255,255,.12); }
-            .navbar .container { flex-wrap: nowrap; }
+            /* Раньше здесь стоял flex-wrap: nowrap — из-за него раскрытое меню
+               не переносилось на новую строку, сжималось по содержимому и
+               превращалось в узкий столбик справа от логотипа. */
+            .navbar .container { flex-wrap: wrap; }
+            .navbar-collapse { flex-basis: 100%; }
+            .navbar-nav { width: 100%; }
         }
         @media (max-width: 767.98px) {
             .container { padding-left: .75rem; padding-right: .75rem; }
@@ -343,6 +348,16 @@
                     <li class="nav-item">
                         <a class="nav-link {% if request.path == '/trades' %}active{% endif %}" href="/trades">
                             <i class="bi bi-list-columns-reverse"></i> Сделки
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.path == '/screener' %}active{% endif %}" href="/screener">
+                            <i class="bi bi-funnel"></i> Скринер
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.path.startswith('/chart') %}active{% endif %}" href="/chart">
+                            <i class="bi bi-candlestick-chart"></i> График
                         </a>
                     </li>
                     <li class="nav-item">

@@ -25,6 +25,7 @@ from app.parser_nalog import (parse_nalog_report, get_nalog_summary,
                                get_nalog_tax_summary_by_year,
                                get_nalog_group_summary)
 from app.replication import push_async as push_to_cloud
+from app import screener, chartdata, backtest, volatility, levels
 from app.allowed_devices import (is_device_allowed, add_pending_device,
                                   approve_device, reject_device, remove_device,
                                   get_all_devices, toggle_device, get_pending_count,
@@ -32,6 +33,9 @@ from app.allowed_devices import (is_device_allowed, add_pending_device,
 from app.auth import register_auth, auth_enabled
 
 flask_app = Flask(__name__, template_folder='templates')
+# Шаблоны перечитываем при изменении файла: правки вёрстки не требуют
+# перезапуска контейнера (в gunicorn debug выключен, auto_reload по умолчанию глушится).
+flask_app.config['TEMPLATES_AUTO_RELOAD'] = True
 
 # Шрифт иконок Bootstrap отдаётся Python'ом как application/octet-stream:
 # файла mimetypes.types_map для .woff2 в slim-образе нет. Если рядом появится
@@ -1003,6 +1007,258 @@ def api_forecast():
             'net_profit': None,  # заполняется на клиенте из HTML
         }
     return jsonify(result), 200
+
+
+@flask_app.route('/screener')
+def screener_view():
+    """Скринер акций по объёмному анализу обезличенных сделок."""
+    return render_template('screener.html',
+                           status=screener.collector_status(),
+                           signals=screener.SIGNAL_LABELS,
+                           universe=screener.universe_snapshot())
+
+
+@flask_app.route('/api/screener')
+def api_screener():
+    """Метрики скринера. Параметры: window, min_turnover, signal, limit."""
+    window = request.args.get('window', 'session')
+    try:
+        min_turnover = float(request.args.get('min_turnover', 0) or 0)
+    except ValueError:
+        min_turnover = 0.0
+    limit = max(1, min(request.args.get('limit', 200, type=int), 500))
+    wanted = {s.strip() for s in (request.args.get('signal') or '').split(',') if s.strip()}
+
+    rows = screener.compute_metrics(window=window, min_turnover=min_turnover)
+    if wanted:
+        rows = [r for r in rows if r['signal'] in wanted]
+
+    # Волатильность считаем по минуткам того же окна: одна SQL-выборка на
+    # весь универсум, поэтому таблица не начинает тормозить.
+    try:
+        vol_from, vol_to, _ = screener._window_bounds(window)
+        vols = volatility.universe(vol_from, vol_to, interval=1)
+    except Exception:
+        vols = {}
+    for row in rows:
+        vol = vols.get(row['ticker'], {})
+        row['vol_day_pct'] = vol.get('sigma_day_pct', 0.0)
+        row['vol_range_rub'] = vol.get('range_rub', 0.0)
+        row['vol_atr_rub'] = vol.get('atr_rub', 0.0)
+        row['vol_range_pct'] = vol.get('range_pct', 0.0)
+    return jsonify({
+        'window': rows[0]['window'] if rows else window,
+        'count': len(rows),
+        'rows': rows[:limit],
+        'status': screener.collector_status(),
+    })
+
+
+@flask_app.route('/api/screener/status')
+def api_screener_status():
+    return jsonify(screener.collector_status())
+
+
+@flask_app.route('/api/screener/<ticker>')
+def api_screener_instrument(ticker):
+    """Детализация: метрики, лента сделок и дельта по минутам."""
+    window = request.args.get('window', 'session')
+    limit = max(10, min(request.args.get('limit', 150, type=int), 500))
+    detail = screener.instrument_detail(ticker, window=window, limit=limit)
+    if detail is None:
+        return jsonify({'error': 'Инструмент не найден в универсуме'}), 404
+    return jsonify(detail)
+
+
+@flask_app.route('/api/screener/refresh-universe', methods=['POST'])
+def api_screener_refresh_universe():
+    """Пересобрать универсум топ-N по обороту (в фоне, до минуты)."""
+    if not screener.is_enabled():
+        return jsonify({'error': 'Скринер выключен: задайте TINKOFF_TOKEN'}), 400
+    if not screener.request_universe_refresh():
+        return jsonify({'ok': False, 'message': 'Обновление уже выполняется'}), 202
+    return jsonify({'ok': True, 'message': 'Обновление универсума запущено'}), 202
+
+
+
+# ── График инструмента и бэктест ─────────────────────────────
+
+
+@flask_app.route('/chart')
+@flask_app.route('/chart/<ticker>')
+def chart_view(ticker=None):
+    """График свечей с маркерами сделок и панелью бэктеста."""
+    if not ticker:
+        rows = screener.universe_snapshot()
+        first = next((r['ticker'] for r in rows if r['selected']), 'SBER')
+        return redirect(url_for('chart_view', ticker=first))
+    return render_template('chart.html',
+                           ticker=ticker.upper(),
+                           strategies=backtest.strategy_catalog())
+
+
+def _chart_range():
+    range_key = request.args.get('range', 'today')
+    interval = request.args.get('interval', 1, type=int)
+    if interval not in chartdata.INTERVALS:
+        interval = 1
+    from_ns, to_ns, _ = chartdata.resolve_range(range_key)
+    return from_ns, to_ns, range_key, interval
+
+
+@flask_app.route('/api/chart/<ticker>')
+def api_chart(ticker):
+    """Свечи, объём, дельта и VWAP за выбранный диапазон."""
+    from_ns, to_ns, range_key, interval = _chart_range()
+    try:
+        data = chartdata.series(ticker, from_ns, to_ns, interval)
+        data['volatility'] = volatility.metrics(ticker, from_ns, to_ns, interval)
+    except chartdata.ChartError as exc:
+        return jsonify({'error': str(exc)}), 400
+    data['range'] = range_key
+    return jsonify(data)
+
+
+@flask_app.route('/api/levels/<ticker>')
+def api_levels(ticker):
+    """Профиль объёма по цене, зоны поддержки/сопротивления и вердикт."""
+    from_ns, to_ns, range_key, _ = _chart_range()
+    try:
+        buckets = int(request.args.get('buckets', 80))
+    except (TypeError, ValueError):
+        buckets = 80
+    try:
+        large = float(request.args.get('large_rub') or 0) or \
+            screener.get_config().large_trade_rub
+    except ValueError:
+        large = screener.get_config().large_trade_rub
+    try:
+        days = max(0, min(int(request.args.get('days', 0) or 0), 180))
+    except (TypeError, ValueError):
+        days = 0
+    try:
+        data = levels.analyze(ticker, from_ns, to_ns, buckets=buckets, large_rub=large,
+                              history_days=days)
+    except levels.LevelsError as exc:
+        return jsonify({'error': str(exc)}), 400
+    data['range_key'] = range_key
+    return jsonify(data)
+
+
+@flask_app.route('/api/volatility/<ticker>')
+def api_volatility(ticker):
+    """Волатильность инструмента: абсолютная (₽) и относительная (%)."""
+    from_ns, to_ns, _, interval = _chart_range()
+    try:
+        data = volatility.metrics(ticker, from_ns, to_ns, interval)
+    except chartdata.ChartError as exc:
+        return jsonify({'error': str(exc)}), 400
+    return jsonify(data)
+
+
+@flask_app.route('/api/chart/<ticker>/markers')
+def api_chart_markers(ticker):
+    """Маркеры сделок: крупные принты или все (с ограничением)."""
+    from_ns, to_ns, _, _ = _chart_range()
+    mode = request.args.get('mode', 'large')
+    if mode not in ('large', 'all'):
+        mode = 'large'
+    try:
+        min_value = float(request.args.get('min_value') or 0)
+    except ValueError:
+        min_value = 0.0
+    if min_value <= 0:
+        min_value = screener.get_config().large_trade_rub
+    try:
+        return jsonify(chartdata.markers(ticker, from_ns, to_ns, min_value, mode))
+    except chartdata.ChartError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+
+@flask_app.route('/api/chart/<ticker>/tape')
+def api_chart_tape(ticker):
+    from_ns, to_ns, _, _ = _chart_range()
+    limit = max(10, min(request.args.get('limit', 100, type=int), 500))
+    return jsonify({'items': chartdata.tape(ticker, from_ns, to_ns, limit)})
+
+
+@flask_app.route('/api/backtest/scan', methods=['POST'])
+def api_backtest_scan():
+    """Проверка стратегии по универсуму: in-sample / out-of-sample.
+
+    Отвечает на вопрос «эффективна ли стратегия», а не «что было по одной
+    бумаге»: один набор параметров на всём периоде, сравнение двух половин.
+    """
+    payload = request.get_json(silent=True) or {}
+    strategy = payload.get('strategy') or 'delta_momentum'
+    range_key = payload.get('range') or 'today'
+    try:
+        interval = int(payload.get('interval', 1))
+    except (TypeError, ValueError):
+        interval = 1
+    if interval not in chartdata.INTERVALS:
+        interval = 1
+    try:
+        top = max(1, min(int(payload.get('top', 20)), 200))
+    except (TypeError, ValueError):
+        top = 20
+
+    def _num(value, default):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    notional = max(1000.0, _num(payload.get('notional'), 100_000.0))
+    fee_pct = max(0.0, min(_num(payload.get('fee_pct'), 0.05), 1.0))
+    try:
+        split = min(0.9, max(0.1, _num(payload.get('split'), 0.6)))
+    except (TypeError, ValueError):
+        split = 0.6
+
+    tickers = [t['ticker'] for t in screener.universe_snapshot() if t['selected']][:top]
+    if not tickers:
+        return jsonify({'error': 'Универсум пуст — сначала соберите данные'}), 400
+
+    from_ns, to_ns, _ = chartdata.resolve_range(range_key)
+    try:
+        result = backtest.scan(tickers, from_ns, to_ns, strategy, payload.get('params'),
+                               interval=interval, notional=notional, fee_pct=fee_pct,
+                               split=split)
+    except (chartdata.ChartError, backtest.BacktestError) as exc:
+        return jsonify({'error': str(exc)}), 400
+    return jsonify(result)
+
+
+@flask_app.route('/api/backtest/<ticker>', methods=['POST'])
+def api_backtest(ticker):
+    """Прогнать intraday-стратегию по минуткам инструмента."""
+    payload = request.get_json(silent=True) or {}
+    strategy = payload.get('strategy') or 'delta_momentum'
+    range_key = payload.get('range') or request.args.get('range', 'today')
+    interval = payload.get('interval', 1)
+    try:
+        interval = int(interval)
+    except (TypeError, ValueError):
+        interval = 1
+    if interval not in chartdata.INTERVALS:
+        interval = 1
+    from_ns, to_ns, _ = chartdata.resolve_range(range_key)
+
+    def _num(value, default):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    notional = max(1000.0, _num(payload.get('notional'), 100_000.0))
+    fee_pct = max(0.0, min(_num(payload.get('fee_pct'), 0.05), 1.0))
+    try:
+        result = backtest.run(ticker, from_ns, to_ns, strategy, payload.get('params'),
+                              interval=interval, notional=notional, fee_pct=fee_pct)
+    except (chartdata.ChartError, backtest.BacktestError) as exc:
+        return jsonify({'error': str(exc)}), 400
+    return jsonify(result)
 
 
 TICKER_LOGO_COLORS = {
