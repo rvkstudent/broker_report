@@ -217,6 +217,7 @@ def simulate(bars: list[dict], zone_signals: list[dict], params: dict, *,
     # Стоп либо выключен явно, либо не применяется к дивидендным бумагам
     atr_series = _atr_series(bars)
     skipped_rr = 0
+    skipped_times: list[int] = []
     rr_values: list[float] = []
     stop_enabled = bool(params.get('use_stop', 1)) if use_stop is None else bool(use_stop)
     if ticker and ticker.upper() in no_stop_tickers():
@@ -327,6 +328,7 @@ def simulate(bars: list[dict], zone_signals: list[dict], params: dict, *,
                 rr_values.append(rr)
                 if rr < params['min_rr']:
                     skipped_rr += 1
+                    skipped_times.append(item['time'])
                     continue
 
             stop = round(stop, decimals) if stop_enabled else -1.0
@@ -338,7 +340,8 @@ def simulate(bars: list[dict], zone_signals: list[dict], params: dict, *,
     metrics['skipped_rr'] = skipped_rr
     metrics['avg_rr'] = round(sum(rr_values) / len(rr_values), 2) if rr_values else 0.0
     return {'trades': trades, 'equity': equity, 'metrics': metrics,
-            'markers': _markers(trades), 'stop_enabled': stop_enabled}
+            'markers': _markers(trades), 'stop_enabled': stop_enabled,
+            'skipped_times': skipped_times}
 
 
 def _atr_series(bars: list[dict], window: int = 14) -> list[float]:
@@ -431,7 +434,9 @@ def analyze_range(ticker: str, from_ns: int, to_ns: int, raw_params: dict | None
     result = simulate(bars, found, params, notional=notional, fee_pct=fee_pct, zones=zones,
                       ticker=ticker)
 
+    skipped = set(result.get('skipped_times', []))
     signal_rows = [{
+        'taken': item['time'] not in skipped,
         'time': item['time'] // 1_000_000_000 + 3 * 3600,
         'price': round(item['price'], 4),
         'kind': item['kind'],
@@ -465,10 +470,17 @@ def analyze_range(ticker: str, from_ns: int, to_ns: int, raw_params: dict | None
 
 
 def signal_markers(rows: list[dict]) -> list[dict]:
-    """Только входы «Покупать» — для отрисовки на графике."""
-    markers = [{'time': row['time'], 'position': 'belowBar', 'color': '#1a7f37',
-                'shape': 'arrowUp',
-                'text': 'Покупка' if row['kind'] == 'breakout' else 'Отскок'}
-               for row in rows]
+    """Входы «Покупать» — принятые зелёным, отсеянные серым (не торгуем)."""
+    markers = []
+    for row in rows:
+        taken = row.get('taken', True)
+        markers.append({
+            'time': row['time'],
+            'position': 'belowBar' if taken else 'aboveBar',
+            'color': '#1a7f37' if taken else '#adb5bd',
+            'shape': 'arrowUp' if taken else 'circle',
+            'text': ('Покупка' if row['kind'] == 'breakout' else 'Отскок') if taken
+                    else 'отсеян',
+        })
     markers.sort(key=lambda m: m['time'])
     return markers

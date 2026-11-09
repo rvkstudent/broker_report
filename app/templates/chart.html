@@ -253,6 +253,7 @@
                     <th class="ps-2">время</th><th>тип</th>
                     <th class="text-end">зона</th><th class="text-end">цена</th>
                     <th class="text-end">дельта</th><th class="text-end">объём</th>
+                    <th class="text-end" title="Принят ли вход фильтром риск/прибыль">вход</th>
                 </tr></thead>
                 <tbody id="sig-rows"></tbody>
             </table>
@@ -592,15 +593,20 @@
 
     function renderSignalRows(rows) {
         const body = document.getElementById('sig-rows');
-        document.getElementById('sig-count').textContent = rows.length ? `за период: ${rows.length}` : '';
-        body.innerHTML = rows.map((row) => `<tr>
+        const taken = rows.filter((r) => r.taken !== false).length;
+        document.getElementById('sig-count').textContent = rows.length
+            ? `сигналов ${rows.length}, принято ${taken}` : '';
+        body.innerHTML = rows.map((row) => `<tr class="${row.taken === false ? 'text-muted' : ''}">
             <td class="ps-2 text-muted">${hhmm(row.time)}</td>
             <td class="${row.kind === 'breakout' ? 'text-success' : 'text-primary'}">${row.kind_label}</td>
             <td class="text-end">${Number(row.zone_price).toFixed(3)}</td>
             <td class="text-end">${Number(row.price).toFixed(3)}</td>
             <td class="text-end ${row.delta >= 0 ? 'text-success' : 'text-danger'}">${row.delta >= 0 ? '+' : ''}${row.delta}</td>
             <td class="text-end text-muted">×${row.volume_ratio}</td>
-        </tr>`).join('') || '<tr><td colspan="6" class="text-muted">сигналов нет</td></tr>';
+            <td class="text-end">${row.taken === false
+                ? '<span title="Цель ближе стопа — вход отсеян">—</span>'
+                : '<span class="text-success" title="Вход принят">✓</span>'}</td>
+        </tr>`).join('') || '<tr><td colspan="7" class="text-muted">сигналов нет</td></tr>';
     }
 
     async function loadSignals() {
@@ -964,7 +970,11 @@
             <td class="text-end">${t.bars}</td>
             <td class="text-muted">${t.reason}</td>
             <td class="text-end ${t.pnl >= 0 ? 'text-success' : 'text-danger'}">${t.pnl.toFixed(0)}</td>
-        </tr>`).join('') || '<tr><td colspan="7" class="text-muted">сделок не было — ослабьте параметры</td></tr>';
+        </tr>`).join('') || `<tr><td colspan="7" class="text-muted">${
+            (m.skipped_rr || 0) > 0
+                ? `Все ${m.skipped_rr} сигналов отсеяны: цель ближе стопа (средний R:R ${m.avg_rr}). `
+                  + 'Это не «нет сигналов» — это отказ от невыгодных входов.'
+                : 'Сделок не было: сигналов за период нет.'}</td></tr>`;
 
         const equity = [{time: res.trades.length ? res.trades[0].entry_time - 60 : 0, value: 0}]
             .concat(res.equity || []);
