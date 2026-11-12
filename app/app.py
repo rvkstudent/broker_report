@@ -7,7 +7,7 @@ import re
 import secrets
 import threading
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from functools import wraps
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, Response, make_response
 
@@ -25,6 +25,9 @@ from app.parser_nalog import (parse_nalog_report, get_nalog_summary,
                                get_nalog_tax_summary_by_year,
                                get_nalog_group_summary)
 from app.replication import push_async as push_to_cloud
+from app import (screener, chartdata, backtest, volatility, levels,
+                strategy_levels, signals_cache, signal_days, adaptive)
+from app import dashboard_prices as tinkoff_prices
 from app.allowed_devices import (is_device_allowed, add_pending_device,
                                   approve_device, reject_device, remove_device,
                                   get_all_devices, toggle_device, get_pending_count,
@@ -32,6 +35,9 @@ from app.allowed_devices import (is_device_allowed, add_pending_device,
 from app.auth import register_auth, auth_enabled
 
 flask_app = Flask(__name__, template_folder='templates')
+# Шаблоны перечитываем при изменении файла: правки вёрстки не требуют
+# перезапуска контейнера (в gunicorn debug выключен, auto_reload по умолчанию глушится).
+flask_app.config['TEMPLATES_AUTO_RELOAD'] = True
 
 # Шрифт иконок Bootstrap отдаётся Python'ом как application/octet-stream:
 # файла mimetypes.types_map для .woff2 в slim-образе нет. Если рядом появится
@@ -41,6 +47,65 @@ flask_app = Flask(__name__, template_folder='templates')
 mimetypes.add_type('font/woff2', '.woff2')
 mimetypes.add_type('font/woff', '.woff')
 mimetypes.add_type('font/ttf', '.ttf')
+
+# ── Цены дашборда: QUIK + резервный источник T-Invest ─────────
+QUIK_FRESH_SECONDS = 10
+# Инструменты с открытыми позициями: Tinkoff подставляет цены только по ним,
+# а /api/prices (поллинг каждые 3 с) не пересчитывает позиции на каждый запрос.
+_TRACKED_INSTRUMENTS: dict = {}
+
+
+def _prices_are_fresh(prices, seconds: int = QUIK_FRESH_SECONDS) -> bool:
+    """Есть ли среди цен запись не старше ``seconds`` секунд."""
+    now = datetime.now()
+    for p in prices:
+        try:
+            ts = datetime.strptime(p['timestamp'], '%Y-%m-%d %H:%M:%S')
+        except Exception:
+            continue
+        if now - ts < timedelta(seconds=seconds):
+            return True
+    return False
+
+
+def _position_instruments(open_trades, quik_positions, my_instruments) -> dict:
+    """``{sec_code: class_code}`` для инструментов с открытыми позициями."""
+    class_map = {i['sec_code']: (i.get('class_code') or '') for i in my_instruments}
+    codes = set()
+    for o in open_trades or []:
+        codes.add(o.get('security_code'))
+    for p in quik_positions or []:
+        codes.add(p.get('sec_code'))
+    return {c: class_map.get(c, '') for c in codes if c}
+
+
+def _effective_prices(db_prices, instruments=None, quik_connected=None):
+    """Цены для дашборда: QUIK, если активен, иначе — T-Invest.
+
+    Возвращает ``(prices, prices_source)``, где ``prices_source`` —
+    'quik', 'tinkoff' или 'none'. Tinkoff подставляет только те бумаги, по
+    которым пришёл ответ; остальные остаются из БД (пусть и устаревшие).
+    """
+    db_prices = list(db_prices or [])
+    if quik_connected is None:
+        quik_connected = _prices_are_fresh(db_prices)
+    if quik_connected:
+        return db_prices, 'quik'
+    if not tinkoff_prices.enabled():
+        return db_prices, 'none'
+
+    instruments = instruments if instruments is not None else _TRACKED_INSTRUMENTS
+    if not instruments:
+        return db_prices, 'none'
+
+    tf_prices = tinkoff_prices.get_prices(instruments)
+    if not tf_prices:
+        return db_prices, 'none'
+
+    by_code = {p['sec_code']: p for p in db_prices}
+    by_code.update(tf_prices)
+    merged = sorted(by_code.values(), key=lambda p: p['sec_code'])
+    return merged, 'tinkoff'
 
 
 def _resolve_secret_key() -> str:
@@ -595,28 +660,25 @@ def index():
     repo_total = get_repo_total(None, df_dmy, dt_dmy, broker)
 
     quik_trades = get_recent_quik_trades(20)
-    prices = get_current_prices()
+    db_prices = get_current_prices()
     quik_pos = get_quik_positions(broker)
+    my_instruments = get_my_instruments()
 
     # Индикатор соединения с QUIK: данные обновлялись за последние 10 секунд
-    quik_connected = False
-    if prices:
-        from datetime import datetime, timedelta
-        for p in prices:
-            try:
-                ts = datetime.strptime(p['timestamp'], '%Y-%m-%d %H:%M:%S')
-                if datetime.now() - ts < timedelta(seconds=10):
-                    quik_connected = True
-                    break
-            except Exception:
-                pass
+    quik_connected = _prices_are_fresh(db_prices)
+
+    # Цены для дашборда: QUIK, а если он молчит — резерв из T-Invest.
+    global _TRACKED_INSTRUMENTS
+    price_instruments = _position_instruments(open_trades, quik_pos, my_instruments)
+    if price_instruments:
+        _TRACKED_INSTRUMENTS = dict(price_instruments)
+    prices, prices_source = _effective_prices(db_prices, price_instruments, quik_connected)
 
     # Добавляем текущую цену в открытые трейд-сделки для прогноза P&L
     open_trades = list(open_trades)
     price_map = {p['sec_code']: p['price'] for p in prices}
 
     # Подставляем названия для QUIK-сделок (у них только sec_code)
-    my_instruments = get_my_instruments()
     name_map = {i['sec_code']: i['sec_name'] for i in my_instruments}
     my_price_codes = sorted({i['sec_code'] for i in my_instruments})
     for o in open_trades:
@@ -696,6 +758,7 @@ def index():
                            my_price_codes=my_price_codes,
                            quik_positions=quik_pos,
                            quik_connected=quik_connected,
+                           prices_source=prices_source,
                            cash_flow=cash_flow,
                            date_from=df_dmy, date_to=dt_dmy,
                            date_from_iso=date_from, date_to_iso=date_to,
@@ -925,8 +988,8 @@ def api_price():
 
 @flask_app.route('/api/prices', methods=['GET'])
 def api_prices():
-    """Get all current instrument prices."""
-    prices = get_current_prices()
+    """Get all current instrument prices (QUIK, с резервом из T-Invest)."""
+    prices, _source = _effective_prices(get_current_prices())
     return jsonify(prices), 200
 
 
@@ -940,17 +1003,16 @@ def api_quik_trades():
 
 @flask_app.route('/api/quik-connected', methods=['GET'])
 def api_quik_connected():
-    """Check if QUIK data is flowing (price update within last 10s)."""
+    """Поток цен: QUIK активен, а если нет — используется резерв T-Invest."""
     prices = get_current_prices()
-    from datetime import datetime, timedelta
-    for p in prices:
-        try:
-            ts = datetime.strptime(p['timestamp'], '%Y-%m-%d %H:%M:%S')
-            if datetime.now() - ts < timedelta(seconds=10):
-                return jsonify({'connected': True}), 200
-        except Exception:
-            pass
-    return jsonify({'connected': False}), 200
+    connected = _prices_are_fresh(prices)
+    tinkoff = (not connected and tinkoff_prices.enabled()
+               and tinkoff_prices.cached_count() > 0)
+    return jsonify({
+        'connected': connected,
+        'tinkoff': bool(tinkoff),
+        'source': 'quik' if connected else ('tinkoff' if tinkoff else 'none'),
+    }), 200
 
 
 @flask_app.route('/api/forecast', methods=['GET'])
@@ -963,6 +1025,7 @@ def api_forecast():
     broker = request.args.get('broker', 'all')
     date_from = request.args.get('date_from', '')
     date_to = request.args.get('date_to', '')
+    global _TRACKED_INSTRUMENTS
 
     # Конвертация HTML date (YYYY-MM-DD) → DD.MM.YYYY для БД
     def to_dmy(iso):
@@ -973,11 +1036,18 @@ def api_forecast():
             return f'{parts[2]}.{parts[1]}.{parts[0]}'
         return iso
 
-    prices = get_current_prices()
-    price_map = {p['sec_code']: p['price'] for p in prices}
     # date_from не передаём: открытые позиции считаются по всей истории до
     # date_to (иначе позиция, открытая до начала фильтра, пропадала из прогноза).
     open_trades = list(get_open_trades(None, None, to_dmy(date_to), broker))
+
+    db_prices = get_current_prices()
+    quik_connected = _prices_are_fresh(db_prices)
+    instruments = {o['security_code']: _TRACKED_INSTRUMENTS.get(o['security_code'], '')
+                   for o in open_trades}
+    if instruments:
+        _TRACKED_INSTRUMENTS = dict(instruments)
+    prices, _source = _effective_prices(db_prices, instruments, quik_connected)
+    price_map = {p['sec_code']: p['price'] for p in prices}
 
     TRADE_FEE_RATE = 0.000685
     forecast_map = {}
@@ -1003,6 +1073,362 @@ def api_forecast():
             'net_profit': None,  # заполняется на клиенте из HTML
         }
     return jsonify(result), 200
+
+
+@flask_app.route('/screener')
+def screener_view():
+    """Скринер акций по объёмному анализу обезличенных сделок."""
+    return render_template('screener.html',
+                           status=screener.collector_status(),
+                           signals=screener.SIGNAL_LABELS,
+                           universe=screener.universe_snapshot())
+
+
+@flask_app.route('/api/screener')
+def api_screener():
+    """Метрики скринера. Параметры: window, min_turnover, signal, limit."""
+    window = request.args.get('window', 'session')
+    try:
+        min_turnover = float(request.args.get('min_turnover', 0) or 0)
+    except ValueError:
+        min_turnover = 0.0
+    limit = max(1, min(request.args.get('limit', 200, type=int), 500))
+    wanted = {s.strip() for s in (request.args.get('signal') or '').split(',') if s.strip()}
+
+    rows = screener.compute_metrics(window=window, min_turnover=min_turnover)
+    if wanted:
+        rows = [r for r in rows if r['signal'] in wanted]
+
+    # Волатильность считаем по минуткам того же окна: одна SQL-выборка на
+    # весь универсум, поэтому таблица не начинает тормозить.
+    try:
+        vol_from, vol_to, _ = screener._window_bounds(window)
+        vols = volatility.universe(vol_from, vol_to, interval=1)
+    except Exception:
+        vols = {}
+    # Сигналы стратегии за сегодня — из фонового кэша (тяжёлый расчёт)
+    try:
+        signal_map, signals_at = signals_cache.snapshot()
+    except Exception:
+        signal_map, signals_at = {}, 0.0
+    for row in rows:
+        info = signal_map.get(row['ticker'], {})
+        row['signal_count'] = int(info.get('count', 0))
+        row['signal_taken'] = int(info.get('taken', 0))
+        row['signal_skipped'] = int(info.get('skipped', 0))
+        row['signal_last'] = info.get('last')
+        row['signal_kinds'] = info.get('kinds', [])
+
+    for row in rows:
+        vol = vols.get(row['ticker'], {})
+        row['vol_day_pct'] = vol.get('sigma_day_pct', 0.0)
+        row['vol_range_rub'] = vol.get('range_rub', 0.0)
+        row['vol_atr_rub'] = vol.get('atr_rub', 0.0)
+        row['vol_range_pct'] = vol.get('range_pct', 0.0)
+
+    # Качество прошлых сигналов и действующие индивидуальные параметры.
+    try:
+        quality = adaptive.quality_map()
+    except Exception:
+        quality = {}
+    for row in rows:
+        info = quality.get(row['ticker']) or {}
+        row['quality_trades'] = int(info.get('trades', 0))
+        row['quality_win_rate'] = float(info.get('win_rate', 0.0))
+        row['quality_pf'] = float(info.get('profit_factor', 0.0))
+        row['quality_net'] = float(info.get('net', 0.0))
+        try:
+            row['adaptive_params'] = adaptive.summary(row['ticker'])
+        except Exception:
+            row['adaptive_params'] = {}
+
+    # Бумаги с сигналами стратегии — наверху, внутри группы по оценке.
+    # Сначала принятые сигналы (их можно торговать), потом остальные.
+    rows.sort(key=lambda r: (-r.get('signal_taken', 0),
+                             -r.get('signal_count', 0), -r.get('score', 0)))
+
+    return jsonify({
+        'window': rows[0]['window'] if rows else window,
+        'count': len(rows),
+        'rows': rows[:limit],
+        'status': screener.collector_status(),
+        'signals_at': signals_at,
+        'signals_total': sum(r.get('signal_count', 0) for r in rows),
+    })
+
+
+@flask_app.route('/api/screener/status')
+def api_screener_status():
+    return jsonify(screener.collector_status())
+
+
+@flask_app.route('/api/screener/<ticker>')
+def api_screener_instrument(ticker):
+    """Детализация: метрики, лента сделок и дельта по минутам."""
+    window = request.args.get('window', 'session')
+    limit = max(10, min(request.args.get('limit', 150, type=int), 500))
+    detail = screener.instrument_detail(ticker, window=window, limit=limit)
+    if detail is None:
+        return jsonify({'error': 'Инструмент не найден в универсуме'}), 404
+    return jsonify(detail)
+
+
+@flask_app.route('/api/screener/refresh-universe', methods=['POST'])
+def api_screener_refresh_universe():
+    """Пересобрать универсум топ-N по обороту (в фоне, до минуты)."""
+    if not screener.is_enabled():
+        return jsonify({'error': 'Скринер выключен: задайте TINKOFF_TOKEN'}), 400
+    if not screener.request_universe_refresh():
+        return jsonify({'ok': False, 'message': 'Обновление уже выполняется'}), 202
+    return jsonify({'ok': True, 'message': 'Обновление универсума запущено'}), 202
+
+
+
+# ── График инструмента и бэктест ─────────────────────────────
+
+
+@flask_app.route('/chart')
+@flask_app.route('/chart/<ticker>')
+def chart_view(ticker=None):
+    """График свечей с маркерами сделок и панелью бэктеста."""
+    if not ticker:
+        rows = screener.universe_snapshot()
+        first = next((r['ticker'] for r in rows if r['selected']), 'SBER')
+        return redirect(url_for('chart_view', ticker=first))
+    return render_template('chart.html',
+                           ticker=ticker.upper(),
+                           strategies=strategy_levels.catalog())
+
+
+def _chart_range():
+    range_key = request.args.get('range', '3d')
+    interval = request.args.get('interval', 5, type=int)
+    if interval not in chartdata.INTERVALS:
+        interval = 5
+    from_ns, to_ns, _ = chartdata.resolve_range(range_key)
+    return from_ns, to_ns, range_key, interval
+
+
+@flask_app.route('/api/chart/<ticker>')
+def api_chart(ticker):
+    """Свечи, объём, дельта и VWAP за выбранный диапазон."""
+    from_ns, to_ns, range_key, interval = _chart_range()
+    try:
+        data = chartdata.series(ticker, from_ns, to_ns, interval)
+        data['volatility'] = volatility.metrics(ticker, from_ns, to_ns, interval)
+    except chartdata.ChartError as exc:
+        return jsonify({'error': str(exc)}), 400
+    data['range'] = range_key
+    return jsonify(data)
+
+
+@flask_app.route('/api/signals/<ticker>')
+def api_signals(ticker):
+    """Сигналы на покупку по уровням за торговые дни диапазона.
+
+    Считаются по каждому дню отдельно на минутных барах (``app.signal_days``):
+    сигнал дня X одинаков при любом диапазоне и таймфрейме графика, поэтому
+    историю сигналов можно сравнивать между днями и оценивать стратегию.
+    """
+    from_ns, to_ns, range_key, _interval = _chart_range()
+    payload = {k: request.args.get(k) for k in
+               ('warmup_min', 'approach_pct', 'break_margin_pct', 'confirm_delta',
+                'volume_factor', 'take_profit_pct', 'stop_loss_pct', 'max_hold_min')}
+    payload = {k: v for k, v in payload.items() if v is not None}
+    # По умолчанию — индивидуальные параметры инструмента; явные параметры в
+    # запросе (manual=1 или любое значение) включают ручной режим.
+    manual = request.args.get('manual') == '1' or bool(payload)
+    signals, zones = signal_days.signals_for_range(
+        ticker, from_ns, to_ns, payload if manual else None)
+    return jsonify({
+        'ticker': ticker.upper(),
+        'params': strategy_levels._resolve(payload),
+        'signals': signals,
+        'markers': strategy_levels.signal_markers(signals),
+        'zones': [{'price': z['price'], 'low': z['low'], 'high': z['high'],
+                   'side': z['side'], 'origin': z.get('origin')} for z in zones],
+        'count': len(signals),
+        'range_key': range_key,
+    })
+
+
+@flask_app.route('/api/levels/<ticker>')
+def api_levels(ticker):
+    """Профиль объёма по цене, зоны поддержки/сопротивления и вердикт."""
+    from_ns, to_ns, range_key, _ = _chart_range()
+    try:
+        buckets = int(request.args.get('buckets', 80))
+    except (TypeError, ValueError):
+        buckets = 80
+    try:
+        large = float(request.args.get('large_rub') or 0) or \
+            screener.get_config().large_trade_rub
+    except ValueError:
+        large = screener.get_config().large_trade_rub
+    try:
+        days = max(0, min(int(request.args.get('days', 0) or 0), 180))
+    except (TypeError, ValueError):
+        days = 0
+    try:
+        data = levels.analyze(ticker, from_ns, to_ns, buckets=buckets, large_rub=large,
+                              history_days=days)
+    except levels.LevelsError as exc:
+        return jsonify({'error': str(exc)}), 400
+    data['range_key'] = range_key
+    return jsonify(data)
+
+
+@flask_app.route('/api/volatility/<ticker>')
+def api_volatility(ticker):
+    """Волатильность инструмента: абсолютная (₽) и относительная (%)."""
+    from_ns, to_ns, _, interval = _chart_range()
+    try:
+        data = volatility.metrics(ticker, from_ns, to_ns, interval)
+    except chartdata.ChartError as exc:
+        return jsonify({'error': str(exc)}), 400
+    return jsonify(data)
+
+
+@flask_app.route('/api/chart/<ticker>/markers')
+def api_chart_markers(ticker):
+    """Маркеры сделок: крупные принты или все (с ограничением)."""
+    from_ns, to_ns, _, _ = _chart_range()
+    mode = request.args.get('mode', 'large')
+    if mode not in ('large', 'all'):
+        mode = 'large'
+    try:
+        min_value = float(request.args.get('min_value') or 0)
+    except ValueError:
+        min_value = 0.0
+    if min_value <= 0:
+        min_value = screener.get_config().large_trade_rub
+    try:
+        return jsonify(chartdata.markers(ticker, from_ns, to_ns, min_value, mode))
+    except chartdata.ChartError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+
+@flask_app.route('/api/chart/<ticker>/tape')
+def api_chart_tape(ticker):
+    from_ns, to_ns, _, _ = _chart_range()
+    limit = max(10, min(request.args.get('limit', 100, type=int), 500))
+    return jsonify({'items': chartdata.tape(ticker, from_ns, to_ns, limit)})
+
+
+@flask_app.route('/api/backtest/scan', methods=['POST'])
+def api_backtest_scan():
+    """Проверка стратегии по универсуму: in-sample / out-of-sample.
+
+    Отвечает на вопрос «эффективна ли стратегия», а не «что было по одной
+    бумаге»: один набор параметров на всём периоде, сравнение двух половин.
+    """
+    payload = request.get_json(silent=True) or {}
+    strategy = payload.get('strategy') or strategy_levels.KEY
+    range_key = payload.get('range') or 'today'
+    try:
+        interval = int(payload.get('interval', 1))
+    except (TypeError, ValueError):
+        interval = 1
+    if interval not in chartdata.INTERVALS:
+        interval = 1
+    try:
+        top = max(1, min(int(payload.get('top', 20)), 200))
+    except (TypeError, ValueError):
+        top = 20
+
+    def _num(value, default):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    notional = max(1000.0, _num(payload.get('notional'), 100_000.0))
+    fee_pct = max(0.0, min(_num(payload.get('fee_pct'), 0.05), 1.0))
+    try:
+        split = min(0.9, max(0.1, _num(payload.get('split'), 0.6)))
+    except (TypeError, ValueError):
+        split = 0.6
+
+    tickers = [t['ticker'] for t in screener.universe_snapshot() if t['selected']][:top]
+    if not tickers:
+        return jsonify({'error': 'Универсум пуст — сначала соберите данные'}), 400
+
+    from_ns, to_ns, _ = chartdata.resolve_range(range_key)
+    try:
+        result = backtest.scan(tickers, from_ns, to_ns, strategy, payload.get('params'),
+                               interval=interval, notional=notional, fee_pct=fee_pct,
+                               split=split)
+    except (chartdata.ChartError, backtest.BacktestError) as exc:
+        return jsonify({'error': str(exc)}), 400
+    return jsonify(result)
+
+
+@flask_app.route('/api/backtest/<ticker>', methods=['POST'])
+def api_backtest(ticker):
+    """Прогнать intraday-стратегию по минуткам инструмента."""
+    payload = request.get_json(silent=True) or {}
+    strategy = payload.get('strategy') or strategy_levels.KEY
+    range_key = payload.get('range') or request.args.get('range', 'today')
+    interval = payload.get('interval', 1)
+    try:
+        interval = int(interval)
+    except (TypeError, ValueError):
+        interval = 1
+    if interval not in chartdata.INTERVALS:
+        interval = 1
+    from_ns, to_ns, _ = chartdata.resolve_range(range_key)
+
+    def _num(value, default):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    notional = max(1000.0, _num(payload.get('notional'), 100_000.0))
+    fee_pct = max(0.0, min(_num(payload.get('fee_pct'), 0.05), 1.0))
+    try:
+        if strategy == strategy_levels.KEY:
+            # Бэктест считаем по дням на минутках — так же, как сигналы.
+            # Иначе на 5-минутках/3 днях пороги другие и «сделки» исчезают,
+            # хотя скринер показывает принятый сигнал.
+            days = signal_days.day_results(ticker, from_ns, to_ns,
+                                           payload.get('params'))
+            signals = sorted((s for d in days for s in d['signals']),
+                             key=lambda s: s['time'])
+            trades = sorted((t for d in days for t in d['trades']),
+                            key=lambda t: t['exit_time'])
+            running = 0.0
+            equity = []
+            for trade in trades:
+                running += trade['pnl']
+                equity.append({'time': trade['exit_time'], 'value': round(running, 2)})
+            metrics = strategy_levels._metrics(trades, running, notional)
+            metrics['skipped_rr'] = sum(
+                (d.get('metrics') or {}).get('skipped_rr', 0) for d in days)
+            last = days[-1] if days else None
+            result = {
+                'ticker': ticker.upper(),
+                'strategy': strategy_levels.KEY,
+                'label': strategy_levels.LABEL,
+                'params': last['params'] if last else strategy_levels._resolve(payload.get('params')),
+                'interval': 1,
+                'notional': notional,
+                'fee_pct': fee_pct,
+                'bars': sum(d.get('bars', 0) for d in days),
+                'signals': signals,
+                'trades': trades,
+                'equity': equity,
+                'metrics': metrics,
+                'stop_enabled': last.get('stop_enabled') if last else True,
+                'no_stop_tickers': last.get('no_stop_tickers', []) if last else [],
+                'markers': strategy_levels.signal_markers(signals),
+            }
+        else:
+            result = backtest.run(ticker, from_ns, to_ns, strategy, payload.get('params'),
+                                  interval=interval, notional=notional, fee_pct=fee_pct)
+    except (chartdata.ChartError, backtest.BacktestError, levels.LevelsError) as exc:
+        return jsonify({'error': str(exc)}), 400
+    return jsonify(result)
 
 
 TICKER_LOGO_COLORS = {

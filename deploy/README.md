@@ -69,8 +69,13 @@ sh deploy/set-password.sh
 # 3.2. Ключ сессий, токен для QUIK, замена admin123
 sh deploy/init-secrets.sh      # в конце покажет токен для config.local.lua
 
-# 3.3. Токен туннеля
-nano .env                      # вписать BROKER_TUNNEL_TOKEN=...
+# 3.3. Токен туннеля и параметры скринера
+nano .env                      # вписать BROKER_TUNNEL_TOKEN=..., TINKOFF_TOKEN=...
+
+# 3.4. Сертификат T-Invest API (УЦ Минцифры) — нужен для скринера
+sh deploy/export-tinkoff-ca.sh # создаёт secrets/tinkoff-ca.pem (11 корней)
+#   в .env на сервере путь ВНУТРИ контейнера:
+#   TINKOFF_CA_BUNDLE=/app/secrets/tinkoff-ca.pem
 ```
 
 Проверить, что секреты на месте (значения не печатать):
@@ -78,6 +83,10 @@ nano .env                      # вписать BROKER_TUNNEL_TOKEN=...
 ```bash
 # ожидается 4 — пароль в .env не хранится, он в secrets/password_hash.txt
 grep -cE '^(FLASK_SECRET|API_TOKEN|ADMIN_TOKEN|BROKER_TUNNEL_TOKEN)=.+' .env
+
+# скринер: токен T-Invest и путь к сертификату внутри контейнера
+grep -E '^(TINKOFF_TOKEN|TINKOFF_CA_BUNDLE)=' .env | sed 's/=.*/=<задано>/'
+ls -l secrets/tinkoff-ca.pem
 
 # хеш пароля: ровно 2 знака $ и длина больше 80 (иначе хеш повреждён)
 awk '{print length($0), gsub(/\$/,"$")}' secrets/password_hash.txt
@@ -188,7 +197,47 @@ docker compose -f docker-compose.server.yml up -d --build
 
 ---
 
+## 6.1. Профиль скринера для этого VPS
+
+На сервере 15 ГБ диска, поэтому сырой тик ограничен (настройки в `.env`):
+
+```bash
+SCREENER_MAX_INSTRUMENTS=50        # топ-50 по обороту: ~95% объёма торгов
+SCREENER_RETENTION_DAYS=4          # ~1 ГБ/день → ~4 ГБ
+SCREENER_BAR_RETENTION_DAYS=180    # минутки для бэктестов, ~1 ГБ
+SCREENER_MIN_FREE_MB=700           # защита: ниже порога сбор пауза,
+                                   # сырой тик аварийно ужимается до 1 суток
+```
+
+Расширить хранение можно двумя путями: подключить отдельный volume под
+`screener.db` (`SCREENER_DB_PATH`) или поднять `SCREENER_MAX_INSTRUMENTS`
+и срок после увеличения диска — код переживёт и 100 инструментов, и 10 дней.
+
+---
+
 ## 7. Диагностика
+
+Скринер (сбор сделок и объёмы БД):
+
+```bash
+# состояние сборщика и счётчики
+curl -s localhost:5000/api/screener/status
+
+# токен, лента, размеры хранилища, свёртка минуток, выгрузка
+docker compose -f docker-compose.server.yml exec broker-report python -m app.screener check
+docker compose -f docker-compose.server.yml exec broker-report python -m app.screener stats
+docker compose -f docker-compose.server.yml exec broker-report python -m app.screener rollup
+```
+
+Типичные ошибки:
+
+| Симптом | Причина и что делать |
+|---|---|
+| `TLS: не удалось проверить сертификат T-Invest` | нет корня УЦ Минцифры: `sh deploy/export-tinkoff-ca.sh`, в `.env` → `TINKOFF_CA_BUNDLE=/app/secrets/tinkoff-ca.pem`, перезапустить |
+| `TINKOFF_CA_BUNDLE указывает на каталог` | файл не создан до `docker compose up` — Docker создал каталог на месте файла; удалить каталог, выполнить скрипт, перезапустить |
+| `HTTP 401 ... Authentication token is missing or invalid` | неверный/просроченный `TINKOFF_TOKEN` |
+| `универсум пуст` | API не вернул бумаг по `SCREENER_CLASS_CODES` — проверьте секции и права токена |
+
 
 ```bash
 docker compose -f docker-compose.server.yml logs -f broker-report

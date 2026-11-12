@@ -10,10 +10,18 @@ Firebase) должны существовать в единственном эк
 достигается потоками: ``--workers 1 --threads 8``.
 """
 
+from app.envfile import load_env_file
+
+# В Docker переменные приходят из env_file; локальный запуск gunicorn без
+# compose должен вести себя так же. Вызов — до импорта app.db, потому что
+# путь к базе фиксируется при импорте.
+load_env_file()
+
 from app.app import flask_app, start_watcher, _auto_import
 from app.db import init_db
 from app.replication import init_replication
 from app.replication import push_async as push_to_cloud
+from app.screener import start_collector as start_screener_collector
 
 
 def _bootstrap():
@@ -36,6 +44,22 @@ def _bootstrap():
 
     start_watcher(interval=60)
     print('  Фоновый дозор: проверка новых отчётов каждые 60с', flush=True)
+
+    if start_screener_collector():
+        print('  Скринер: сбор сделок T-Invest запущен', flush=True)
+    else:
+        print('  Скринер: выключен (нет TINKOFF_TOKEN)', flush=True)
+
+    # Сигналы стратегии считаем постоянно в фоне, а не при открытии страницы.
+    from app.signals_cache import start_background_refresh
+    start_background_refresh()
+    print('  Сигналы: фоновый пересчёт запущен', flush=True)
+
+    # Индивидуальные параметры на инструмент + донастройка после сделок.
+    from app import adaptive
+    adaptive.start_background_adaptation()
+    adaptive.seed_universe()
+    print('  Адаптивная стратегия: донастройка параметров запущена', flush=True)
 
 
 _bootstrap()

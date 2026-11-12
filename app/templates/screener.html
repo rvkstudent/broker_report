@@ -1,0 +1,481 @@
+{% extends "base.html" %}
+{% block title %}Скринер — BrokerReport{% endblock %}
+{% block content %}
+<style>
+
+    /* Компактные контролы: стандартные кнопки и поля Bootstrap слишком
+       крупные для плотного терминального интерфейса. Меняем переменные,
+       а не отдельные классы, чтобы стиль применился ко всем вариантам. */
+    .ui-compact .btn {
+        --bs-btn-padding-y: .1rem;
+        --bs-btn-padding-x: .42rem;
+        --bs-btn-font-size: .71rem;
+        --bs-btn-border-radius: .25rem;
+        --bs-btn-line-height: 1.35;
+    }
+    .ui-compact .btn-sm {
+        --bs-btn-padding-y: .08rem;
+        --bs-btn-padding-x: .38rem;
+        --bs-btn-font-size: .69rem;
+    }
+    .ui-compact .btn i { font-size: .75rem; }
+    .ui-compact .btn-group > .btn { --bs-btn-border-radius: 0; }
+    .ui-compact .btn-group > .btn:first-child { border-top-left-radius: .25rem; border-bottom-left-radius: .25rem; }
+    .ui-compact .btn-group > .btn:last-child { border-top-right-radius: .25rem; border-bottom-right-radius: .25rem; }
+    .ui-compact .form-control, .ui-compact .form-select { font-size: .73rem; }
+    .ui-compact .form-control-sm, .ui-compact .form-select-sm {
+        font-size: .72rem; padding: .05rem .32rem; height: 22px; min-height: 22px;
+    }
+    .ui-compact .form-check-input { width: .85em; height: .85em; margin-top: .18em; }
+    .ui-compact .form-check-label, .ui-compact .form-label { font-size: .7rem; }
+    .ui-compact .badge { font-size: .64rem; padding: .18em .42em; font-weight: 600; }
+    .ui-compact table { font-size: .78rem; }
+    .ui-compact table td, .ui-compact table th { padding: .2rem .4rem; }
+    .ui-compact h4, .ui-compact .h4 { font-size: 1.02rem; }
+    .ui-compact .card-header { padding: .3rem .55rem; font-size: .74rem; }
+    .ui-compact .card-body { padding: .5rem .55rem; }
+
+</style>
+<div class="ui-compact">
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+    <h4 class="mb-0"><i class="bi bi-funnel"></i> Скринер акций</h4>
+    <div class="d-flex align-items-center gap-2">
+        <span class="badge {% if status.running %}bg-success{% else %}bg-secondary{% endif %}"
+              id="scr-running-badge">
+            {% if status.running %}сбор идёт{% else %}сбор остановлен{% endif %}
+        </span>
+        <span class="badge {% if status.market_open %}bg-primary{% else %}bg-secondary{% endif %}"
+              id="scr-market-badge">
+            {% if status.market_open %}сессия открыта{% else %}сессия закрыта{% endif %}
+        </span>
+        <button class="btn btn-outline-secondary btn-sm" id="scr-refresh-universe"
+                title="Пересобрать список топ-N по обороту">
+            <i class="bi bi-arrow-repeat"></i> Универсум
+        </button>
+        <div class="form-check form-switch mb-0 ms-1">
+            <input class="form-check-input" type="checkbox" id="scr-auto" checked>
+            <label class="form-check-label small" for="scr-auto">авто</label>
+        </div>
+    </div>
+</div>
+
+{% if not status.has_token %}
+<div class="alert alert-warning">
+    <i class="bi bi-key"></i> Не задан токен T-Invest.
+    Добавьте <code>TINKOFF_TOKEN=...</code> в <code>.env</code> и перезапустите приложение —
+    скринер начнёт собирать обезличенные сделки автоматически.
+</div>
+{% endif %}
+<div class="alert alert-danger d-none" id="scr-error"></div>
+
+{# ── Фильтры ── #}
+<div class="card mb-3">
+    <div class="card-body py-3">
+        <div class="row g-2 align-items-end">
+            <div class="col-6 col-md-3">
+                <label class="form-label small mb-1">Окно анализа</label>
+                <select class="form-select form-select-sm" id="scr-window">
+                    <option value="session">С начала дня</option>
+                    <option value="180">3 часа</option>
+                    <option value="60">1 час</option>
+                    <option value="30">30 минут</option>
+                    <option value="15">15 минут</option>
+                </select>
+            </div>
+            <div class="col-6 col-md-3">
+                <label class="form-label small mb-1">Оборот от, ₽</label>
+                <input type="number" class="form-control form-control-sm" id="scr-min-turnover"
+                       value="0" min="0" step="100000">
+            </div>
+            <div class="col-6 col-md-3">
+                <label class="form-label small mb-1">Сигнал</label>
+                <select class="form-select form-select-sm" id="scr-signal">
+                    <option value="">Все</option>
+                    {% for code, label in signals.items() %}
+                    <option value="{{ code }}">{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-6 col-md-3">
+                <div class="d-flex justify-content-end align-items-center gap-3">
+                    <div class="form-check mb-0">
+                        <input class="form-check-input" type="checkbox" id="scr-only-taken">
+                        <label class="form-check-label small" for="scr-only-taken"
+                               title="Оставить бумаги, у которых сигнал прошёл фильтр R:R (не «отсеян»)">Только принятые</label>
+                    </div>
+                    <span class="text-muted small text-nowrap" id="scr-updated">—</span>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{# ── Таблица скринера ── #}
+<div class="card">
+    <div class="table-responsive">
+        <table class="table table-sm table-hover align-middle mb-0" id="scr-table">
+            <thead class="table-light">
+            <tr>
+                <th class="ps-3">Тикер</th>
+                <th class="text-end">Цена</th>
+                <th class="text-end">Δ цены</th>
+                <th class="text-end">Оборот</th>
+                <th class="text-end" title="Перевес покупок над продажами в рублях">
+                    Дельта
+                </th>
+                <th class="text-end d-none d-xl-table-cell"
+                    title="Перевес в процентах от общего объёма">Δ %</th>
+                <th class="text-end d-none d-xl-table-cell"
+                    title="Волатильность: σ дневная, % (приведена по корню из времени)">Вол. %</th>
+                <th class="text-end d-none d-xl-table-cell"
+                    title="Сколько рублей прошла бумага за период (максимум минус минимум)">Ход ₽</th>
+                <th class="text-end d-none d-lg-table-cell"
+                    title="Сделки крупнее порога (по умолчанию 1 млн ₽)">Крупные</th>
+                <th class="text-end d-none d-lg-table-cell"
+                    title="Оборот относительно среднего дневного — аномалия объёма">Активн.</th>
+                <th class="text-end d-none d-md-table-cell">Оценка</th>
+                <th>Сигнал</th>
+                <th class="text-end" id="scr-signals-head" style="cursor:pointer"
+                    title="Сигналы стратегии «покупка от уровней» за сегодня: принято / всего. Клик — сменить порядок">
+                    Сигн. <span class="text-muted" id="scr-signals-dir">↓</span></th>
+                <th class="text-end d-none d-lg-table-cell"
+                    title="Качество прошлых сигналов инструмента: winrate · profit factor · сделок">Качество</th>
+            </tr>
+            </thead>
+            <tbody id="scr-body">
+            <tr><td colspan="14" class="text-center text-muted py-4">Загрузка…</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+</div>
+
+{# ── Детализация ── #}
+<div class="offcanvas offcanvas-end" tabindex="-1" id="scr-detail"
+     style="--bs-offcanvas-width: min(560px, 100vw);">
+    <div class="offcanvas-header">
+        <h5 class="offcanvas-title" id="scr-detail-title">Инструмент</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="offcanvas"></button>
+    </div>
+    <div class="offcanvas-body small" id="scr-detail-body"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+    const REFRESH_MS = 15000;
+    let timer = null;
+
+    const fmtMoney = (v) => {
+        if (v === null || v === undefined) return '—';
+        const n = Number(v);
+        if (!isFinite(n)) return '—';
+        if (Math.abs(n) >= 1e9) return (n / 1e9).toFixed(2) + ' млрд';
+        if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(2) + ' млн';
+        if (Math.abs(n) >= 1e3) return (n / 1e3).toFixed(0) + ' тыс';
+        return n.toFixed(0);
+    };
+    const fmtPrice = (v) => (v === null || v === undefined) ? '—' : Number(v).toFixed(
+        Math.abs(Number(v)) < 10 ? 3 : 2);
+    // ATR у дешёвых бумаг — тысячные доли рубля, поэтому точность адаптивная
+    const fmtSmall = (v) => {
+        const n = Number(v || 0);
+        if (n >= 1) return n.toFixed(2);
+        if (n >= 0.01) return n.toFixed(3);
+        return n.toFixed(4);
+    };
+    const fmtSigned = (v, digits) => {
+        const n = Number(v || 0);
+        const sign = n > 0 ? '+' : '';
+        return sign + n.toFixed(digits === undefined ? 3 : digits);
+    };
+    const cls = (v) => Number(v) > 0 ? 'text-success' : (Number(v) < 0 ? 'text-danger' : 'text-muted');
+
+    const SIGNAL_CLASS = {
+        strong_buy: 'bg-success', strong_sell: 'bg-danger',
+        large_buy: 'bg-success-subtle text-success-emphasis',
+        large_sell: 'bg-danger-subtle text-danger-emphasis',
+        accumulation: 'bg-info-subtle text-info-emphasis',
+        distribution: 'bg-warning-subtle text-warning-emphasis',
+        volume_spike: 'bg-primary-subtle text-primary-emphasis',
+        neutral: 'bg-light text-muted',
+    };
+
+    function params() {
+        return new URLSearchParams({
+            window: document.getElementById('scr-window').value,
+            min_turnover: document.getElementById('scr-min-turnover').value || '0',
+            signal: document.getElementById('scr-signal').value,
+        });
+    }
+
+    function scoreBar(score) {
+        const value = Math.max(-100, Math.min(100, Number(score) || 0));
+        const width = Math.abs(value) / 2; // половина шкалы — максимум
+        const color = value >= 0 ? '#198754' : '#dc3545';
+        const left = value >= 0 ? 50 : 50 - width;
+        return `<div class="position-relative bg-body-secondary rounded" style="height:6px;min-width:56px">
+                  <div style="position:absolute;left:${left}%;width:${width}%;top:0;bottom:0;background:${color};border-radius:3px"></div>
+                  <div style="position:absolute;left:50%;top:-1px;bottom:-1px;width:1px;background:#adb5bd"></div>
+                </div>`;
+    }
+
+    let signalSortAsc = false;
+
+    function signalHint(r) {
+        const kinds = (r.signal_kinds || []).join(', ') || 'сигналов не было';
+        const total = r.signal_count || 0;
+        const taken = r.signal_taken || 0;
+        if (!total) return kinds;
+        return `${kinds}. Принято ${taken} из ${total}` +
+            (total > taken ? `, отсеяно ${total - taken} (цель ближе стопа)` : '');
+    }
+
+    function signalBadges(r) {
+        const total = r.signal_count || 0;
+        const taken = r.signal_taken || 0;
+        if (!total) return '<span class="text-muted">—</span>';
+        const cls = taken > 0 ? 'bg-success' : 'bg-secondary';
+        return `<span class="badge ${cls}" title="принято / всего">${taken}✓ / ${total}</span>`;
+    }
+
+    function qualityCell(r) {
+        const n = r.quality_trades || 0;
+        if (!n) {
+            return '<span class="text-muted" title="Пока нет закрытых сделок — параметры базовые">—</span>';
+        }
+        const wr = Math.round((r.quality_win_rate || 0) * 100);
+        const pfRaw = Number(r.quality_pf || 0);
+        const pf = pfRaw >= 99 ? '∞' : pfRaw.toFixed(2);
+        const net = Number(r.quality_net || 0);
+        const cls = net >= 0 ? 'bg-success' : 'bg-danger';
+        const p = r.adaptive_params || {};
+        const title = `win ${wr}% · PF ${pf} · сделок ${n} · net ${Math.round(net)} ₽`
+            + ` · RR ${p.min_rr} · SL ${p.stop_loss_pct}% · TP ${p.take_profit_pct}%`
+            + ` · Δ ${p.confirm_delta} · vol×${p.volume_factor}`;
+        return `<span class="badge ${cls}" title="${title}">${wr}% · ${pf}</span>`;
+    }
+
+    function renderRows(rows) {
+        const body = document.getElementById('scr-body');
+        const onlyTaken = document.getElementById('scr-only-taken');
+        const onlyTakenChecked = !!(onlyTaken && onlyTaken.checked);
+        if (onlyTakenChecked) {
+            rows = rows.filter((r) => (r.signal_taken || 0) > 0);
+        }
+        if (signalSortAsc) {
+            rows = [...rows].sort((a, b) =>
+                ((a.signal_taken || 0) - (b.signal_taken || 0)) ||
+                ((a.signal_count || 0) - (b.signal_count || 0)));
+        }
+        if (!rows.length) {
+            const msg = onlyTakenChecked
+                ? 'Нет бумаг с принятыми сигналами: кэш сигналов ещё считается '
+                  + 'или все сигналы отсеяны по R:R. Снимите галку «Только принятые».'
+                : 'Нет данных. Сборщик только запустился или сделок за окно не было.';
+            body.innerHTML = '<tr><td colspan="14" class="text-center text-muted py-4">'
+                + msg + '</td></tr>';
+            return;
+        }
+        body.innerHTML = rows.map((r) => {
+            const badge = SIGNAL_CLASS[r.signal] || SIGNAL_CLASS.neutral;
+            return `<tr data-ticker="${r.ticker}" style="cursor:pointer">
+                <td class="ps-3">
+                    <a class="text-decoration-none fw-semibold" href="/chart/${r.ticker}"
+                       title="График и бэктест" onclick="event.stopPropagation()">${r.ticker}
+                       <i class="bi bi-graph-up" style="font-size:.72rem"></i></a>
+                    <div class="text-muted text-truncate" style="font-size:.72rem;max-width:140px">${(r.name || '').slice(0, 26)}</div></td>
+                <td class="text-end">${fmtPrice(r.price)}</td>
+                <td class="text-end ${cls(r.price_change_pct)}">${fmtSigned(r.price_change_pct, 2)}%</td>
+                <td class="text-end">${fmtMoney(r.turnover)}</td>
+                <td class="text-end ${cls(r.delta_value)}">${fmtMoney(r.delta_value)}</td>
+                <td class="text-end d-none d-xl-table-cell ${cls(r.delta_ratio)}">${fmtSigned(r.delta_ratio * 100, 1)}%</td>
+                <td class="text-end d-none d-xl-table-cell">${(r.vol_day_pct || 0).toFixed(2)}</td>
+                <td class="text-end d-none d-xl-table-cell text-muted">${fmtSmall(r.vol_range_rub)}</td>
+                <td class="text-end d-none d-lg-table-cell ${cls(r.large_buy - r.large_sell)}">${fmtMoney(r.large_buy - r.large_sell)}</td>
+                <td class="text-end d-none d-lg-table-cell ${r.activity_ratio >= 1.5 ? 'fw-semibold' : 'text-muted'}">${r.activity_ratio.toFixed(2)}×</td>
+                <td class="text-end d-none d-md-table-cell">${scoreBar(r.score)}</td>
+                <td><span class="badge ${badge}">${r.signal_label}</span></td>
+                <td class="text-end" title="${signalHint(r)}">${signalBadges(r)}</td>
+                <td class="text-end d-none d-lg-table-cell">${qualityCell(r)}</td>
+            </tr>`;
+        }).join('');
+    }
+
+    const signalsHead = document.getElementById('scr-signals-head');
+    if (signalsHead) {
+        signalsHead.addEventListener('click', () => {
+            signalSortAsc = !signalSortAsc;
+            document.getElementById('scr-signals-dir').textContent = signalSortAsc ? '↑' : '↓';
+            if (window.__lastScreenerRows) renderRows(window.__lastScreenerRows);
+        });
+    }
+
+    function renderStatus(status) {
+        const running = document.getElementById('scr-running-badge');
+        running.className = 'badge ' + (status.running ? 'bg-success' : 'bg-secondary');
+        running.textContent = status.running ? 'сбор идёт' : 'сбор остановлен';
+
+        const market = document.getElementById('scr-market-badge');
+        market.className = 'badge ' + (status.market_open ? 'bg-primary' : 'bg-secondary');
+        market.textContent = status.market_open ? 'сессия открыта' : 'сессия закрыта';
+
+        const err = document.getElementById('scr-error');
+        if (status.last_error) {
+            err.classList.remove('d-none');
+            err.textContent = 'Ошибка сбора: ' + status.last_error;
+        } else {
+            err.classList.add('d-none');
+        }
+        if (status.universe_refreshing) {
+            document.getElementById('scr-refresh-universe').disabled = true;
+        } else {
+            document.getElementById('scr-refresh-universe').disabled = false;
+        }
+    }
+
+    async function load() {
+        try {
+            const resp = await fetch('/api/screener?' + params().toString(),
+                                     { headers: { 'Accept': 'application/json' } });
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            const data = await resp.json();
+            window.__lastScreenerRows = data.rows || [];
+            renderRows(window.__lastScreenerRows);
+            renderStatus(data.status || {});
+            document.getElementById('scr-updated').textContent =
+                'обновлено ' + new Date().toLocaleTimeString('ru-RU');
+        } catch (e) {
+            const err = document.getElementById('scr-error');
+            err.classList.remove('d-none');
+            err.textContent = 'Не удалось получить данные скринера: ' + e.message;
+        }
+    }
+
+    async function showDetail(ticker) {
+        const body = document.getElementById('scr-detail-body');
+        document.getElementById('scr-detail-title').textContent = ticker;
+        body.innerHTML = '<div class="text-muted">Загрузка…</div>';
+        bootstrap.Offcanvas.getOrCreateInstance(
+            document.getElementById('scr-detail')).show();
+        try {
+            const resp = await fetch(`/api/screener/${encodeURIComponent(ticker)}?` +
+                                     params().toString(), { headers: { 'Accept': 'application/json' } });
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            const d = await resp.json();
+            const m = d.metrics || {};
+            const series = d.series || [];
+            const maxAbs = series.reduce((acc, p) => Math.max(acc,
+                Math.abs(p.delta_shares || 0)), 1);
+            const bars = series.map((p) => {
+                const h = Math.round(Math.abs(p.delta_shares || 0) / maxAbs * 40);
+                const up = (p.delta_shares || 0) >= 0;
+                return `<div title="${p.time} · дельта ${fmtSigned(p.delta_shares, 0)} акц. · оборот ${fmtMoney(p.turnover)}"
+                             style="flex:1 1 4px;display:flex;flex-direction:column;justify-content:flex-end;height:44px">
+                            <div style="height:${up ? h : 0}px;background:#198754"></div>
+                            <div style="height:1px;background:#cfd4da"></div>
+                            <div style="height:${up ? 0 : h}px;background:#dc3545"></div>
+                        </div>`;
+            }).join('');
+
+            const tape = (d.tape || []).map((t) => `<tr>
+                    <td class="text-muted">${t.trade_time}</td>
+                    <td class="text-end">${fmtPrice(t.price)}</td>
+                    <td class="text-end">${t.lots}</td>
+                    <td class="text-end">${fmtMoney(t.value)}</td>
+                    <td class="text-end ${t.side === 'buy' ? 'text-success' : 'text-danger'}">
+                        ${t.side === 'buy' ? 'B' : 'S'}</td>
+                </tr>`).join('') || '<tr><td colspan="5" class="text-muted">Сделок нет</td></tr>';
+
+            body.innerHTML = `
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <div><strong>${d.instrument.ticker}</strong>
+                        <span class="text-muted">${d.instrument.name || ''}</span></div>
+                    <div class="d-flex gap-2 align-items-center">
+                        <span class="badge ${SIGNAL_CLASS[m.signal] || SIGNAL_CLASS.neutral}">${m.signal_label || ''}</span>
+                        <a class="btn btn-sm btn-outline-primary" href="/chart/${d.instrument.ticker}">
+                            <i class="bi bi-graph-up"></i> График
+                        </a>
+                    </div>
+                </div>
+                <div class="row g-2 mb-3">
+                    <div class="col-6 col-sm-4"><div class="text-muted">Оборот</div><div>${fmtMoney(m.turnover)}</div></div>
+                    <div class="col-6 col-sm-4"><div class="text-muted">Дельта</div>
+                        <div class="${cls(m.delta_value)}">${fmtMoney(m.delta_value)} (${fmtSigned((m.delta_ratio || 0) * 100, 1)}%)</div></div>
+                    <div class="col-6 col-sm-4"><div class="text-muted">Крупные B/S</div>
+                        <div><span class="text-success">${fmtMoney(m.large_buy)}</span> /
+                             <span class="text-danger">${fmtMoney(m.large_sell)}</span></div></div>
+                    <div class="col-6 col-sm-4"><div class="text-muted">VWAP</div><div>${fmtPrice(m.vwap)}</div></div>
+                    <div class="col-6 col-sm-4"><div class="text-muted">Активность</div><div>${(m.activity_ratio || 0).toFixed(2)}×</div></div>
+                    <div class="col-6 col-sm-4"><div class="text-muted">Сделок</div><div>${m.trades || 0}</div></div>
+                    <div class="col-6 col-sm-4"><div class="text-muted">Тренд дельты</div>
+                        <div class="${cls(m.delta_trend)}">${fmtSigned((m.delta_trend || 0) * 100, 1)}%</div></div>
+                    <div class="col-6 col-sm-4"><div class="text-muted">Оценка</div><div>${(m.score || 0).toFixed(1)}</div></div>
+                    <div class="col-6 col-sm-4"><div class="text-muted">Без направления</div>
+                        <div>${(m.direction_unknown_pct || 0).toFixed(1)}%</div></div>
+                </div>
+                <div class="text-muted mb-1">Дельта по минутам (${d.window})</div>
+                <div class="d-flex align-items-stretch gap-1 mb-3" style="height:48px">${bars || '<span class="text-muted">нет данных</span>'}</div>
+                <div class="text-muted mb-1">Лента сделок</div>
+                <div class="table-responsive" style="max-height:320px;overflow:auto">
+                    <table class="table table-sm mb-0">
+                        <thead class="table-light"><tr>
+                            <th>Время</th><th class="text-end">Цена</th>
+                            <th class="text-end">Лоты</th><th class="text-end">Объём</th>
+                            <th class="text-end">Сторона</th>
+                        </tr></thead>
+                        <tbody>${tape}</tbody>
+                    </table>
+                </div>`;
+        } catch (e) {
+            body.innerHTML = `<div class="text-danger">Не удалось загрузить детали: ${e.message}</div>`;
+        }
+    }
+
+    document.getElementById('scr-body').addEventListener('click', (ev) => {
+        const row = ev.target.closest('tr[data-ticker]');
+        if (row) showDetail(row.dataset.ticker);
+    });
+
+    ['scr-window', 'scr-min-turnover', 'scr-signal'].forEach((id) => {
+        document.getElementById(id).addEventListener('change', load);
+    });
+    const onlyTakenEl = document.getElementById('scr-only-taken');
+    if (onlyTakenEl) {
+        onlyTakenEl.addEventListener('change', () => {
+            if (window.__lastScreenerRows) renderRows(window.__lastScreenerRows);
+        });
+    }
+    document.getElementById('scr-min-turnover').addEventListener('input', () => {
+        clearTimeout(window.__scrDebounce);
+        window.__scrDebounce = setTimeout(load, 400);
+    });
+
+    document.getElementById('scr-refresh-universe').addEventListener('click', async () => {
+        try {
+            const resp = await fetch('/api/screener/refresh-universe', { method: 'POST' });
+            const data = await resp.json();
+            if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+            document.getElementById('scr-updated').textContent = data.message || 'обновление запущено';
+        } catch (e) {
+            const err = document.getElementById('scr-error');
+            err.classList.remove('d-none');
+            err.textContent = e.message;
+        }
+    });
+
+    function schedule() {
+        clearInterval(timer);
+        if (document.getElementById('scr-auto').checked) {
+            timer = setInterval(load, REFRESH_MS);
+        }
+    }
+    document.getElementById('scr-auto').addEventListener('change', schedule);
+
+    load();
+    schedule();
+})();
+</script>
+{% endblock %}

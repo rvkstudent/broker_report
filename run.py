@@ -2,11 +2,18 @@
 import os
 import sys
 
+# .env читаем ДО импорта app.db: путь к БД и настройки скринера фиксируются
+# на этапе импорта модулей.
+from app.envfile import load_env_file
+
+load_env_file()
+
 from app.db import init_db
 from app.app import flask_app, start_watcher, _auto_import
 from app.replication import init_replication
 from app.replication import push_async as push_to_cloud
 from app.allowed_devices import DISABLE_AUTH
+from app.screener import start_collector as start_screener_collector
 
 
 if __name__ == '__main__':
@@ -50,6 +57,23 @@ if __name__ == '__main__':
     # Start background watcher (checks for new files every 60s)
     start_watcher(interval=60)
     print('  Фоновый дозор: проверка новых отчётов каждые 60с')
+
+    # Скринер: сбор обезличенных сделок из T-Invest API (если задан токен)
+    if start_screener_collector():
+        print('  Скринер: сбор сделок T-Invest запущен')
+    else:
+        print('  Скринер: выключен (нет TINKOFF_TOKEN)')
+
+    # Сигналы стратегии считаем постоянно в фоне, а не при открытии страницы.
+    from app.signals_cache import start_background_refresh
+    start_background_refresh()
+    print('  Сигналы: фоновый пересчёт запущен')
+
+    # Индивидуальные параметры на инструмент + донастройка после сделок.
+    from app import adaptive
+    adaptive.start_background_adaptation()
+    adaptive.seed_universe()
+    print('  Адаптивная стратегия: донастройка параметров запущена')
 
     # Настройки хоста/порта из переменных окружения (для Docker)
     flask_host = os.environ.get('FLASK_HOST', '127.0.0.1')

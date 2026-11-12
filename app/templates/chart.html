@@ -1,0 +1,1139 @@
+{% extends "base.html" %}
+{% block title %}{{ ticker }} — график и бэктест{% endblock %}
+{% block content %}
+<style>
+    /* Компактная компоновка: по умолчанию Bootstrap слишком «воздушный»,
+       а здесь важна плотность информации, как в терминале. */
+    #chart-page { font-size: .8rem; }
+    #chart-page .card { margin-bottom: .5rem; }
+    #chart-page .card-header { padding: .25rem .5rem; font-size: .72rem; font-weight: 600; }
+    #chart-page .card-body { padding: .4rem .5rem; }
+    #chart-page .form-label { font-size: .68rem; margin-bottom: .05rem; color: #6c757d; }
+
+    /* Компактные контролы: стандартные кнопки и поля Bootstrap слишком
+       крупные для плотного терминального интерфейса. Меняем переменные,
+       а не отдельные классы, чтобы стиль применился ко всем вариантам. */
+    #chart-page .btn {
+        --bs-btn-padding-y: .1rem;
+        --bs-btn-padding-x: .42rem;
+        --bs-btn-font-size: .71rem;
+        --bs-btn-border-radius: .25rem;
+        --bs-btn-line-height: 1.35;
+    }
+    #chart-page .btn-sm {
+        --bs-btn-padding-y: .08rem;
+        --bs-btn-padding-x: .38rem;
+        --bs-btn-font-size: .69rem;
+    }
+    #chart-page .btn i { font-size: .75rem; }
+    #chart-page .btn-group > .btn { --bs-btn-border-radius: 0; }
+    #chart-page .btn-group > .btn:first-child { border-top-left-radius: .25rem; border-bottom-left-radius: .25rem; }
+    #chart-page .btn-group > .btn:last-child { border-top-right-radius: .25rem; border-bottom-right-radius: .25rem; }
+    #chart-page .form-control, #chart-page .form-select { font-size: .73rem; }
+    #chart-page .form-control-sm, #chart-page .form-select-sm {
+        font-size: .72rem; padding: .05rem .32rem; height: 22px; min-height: 22px;
+    }
+    #chart-page .form-check-input { width: .85em; height: .85em; margin-top: .18em; }
+    #chart-page .form-check-label, #chart-page .form-label { font-size: .7rem; }
+    #chart-page .badge { font-size: .64rem; padding: .18em .42em; font-weight: 600; }
+    #chart-page table { font-size: .78rem; }
+    #chart-page table td, #chart-page table th { padding: .2rem .4rem; }
+    #chart-page h4, #chart-page .h4 { font-size: 1.02rem; }
+    #chart-page .card-header { padding: .3rem .55rem; font-size: .74rem; }
+    #chart-page .card-body { padding: .5rem .55rem; }
+
+
+    #chart-page table { font-size: .72rem; }
+    #chart-page table td, #chart-page table th { padding: .12rem .35rem; }
+    /* Плотные таблицы не сжимаем: пусть прокручиваются по горизонтали,
+       иначе заголовки и значения ломаются по буквам. */
+    #chart-page table td, #chart-page table th { white-space: nowrap; }
+    #chart-page .metric { border: 1px solid #e9ecef; border-radius: .25rem; padding: .2rem .35rem; }
+    #chart-page .metric .k { color: #6c757d; font-size: .63rem; line-height: 1.1; }
+    #chart-page .metric .v { font-weight: 600; font-size: .8rem; line-height: 1.2; }
+    #chart-page .chart-wrap { display: flex; align-items: stretch; }
+    #chart-page .chart-wrap > #chart-main { flex: 1 1 auto; min-width: 0; }
+    /* Своя ось справа (цена + %): шкала библиотеки скрыта — её ширина
+       не управляется, а подписи прижаты вправо, из-за чего оставалась
+       пустая полоса. */
+    #chart-page .axis-gap { flex: 0 0 68px; width: 68px; }
+    #chart-page .chart-axis {
+        position: relative; width: 68px; flex: 0 0 68px;
+        font-size: 10px; color: #6c757d; overflow: hidden;
+        border-left: 1px solid #f1f3f5; pointer-events: none;
+    }
+    #chart-page .chart-axis .row-label {
+        position: absolute; right: 3px; transform: translateY(-50%);
+        display: flex; align-items: baseline; gap: 5px;
+        white-space: nowrap; font-variant-numeric: tabular-nums;
+    }
+    #chart-page .chart-axis .px { color: #444; }
+    #chart-page .chart-axis .pc { color: #8a94a0; min-width: 26px; text-align: right; }
+    #chart-page .chart-axis .pc.up { color: #1a7f37; }
+    #chart-page .chart-axis .pc.down { color: #c1121f; }
+    /* Без процентов колонка сужается до цены */
+    #chart-page .chart-axis.no-pct, #chart-page .axis-gap.no-pct { width: 40px; flex: 0 0 40px; }
+    /* На телефоне две шкалы справа занимали четверть ширины — сжимаем обе */
+    @media (max-width: 575.98px) {
+        /* Панель контролов в 390 px переносилась на 4 строки и съедала
+           159 px по высоте. На телефоне — одна строка с горизонтальным
+           скроллом: всё доступно, но график выше. */
+        /* Шапка на телефоне: имя бумаги и сводка по объёму уводили цену
+           на отдельную строку и съедали ~90 px. Оставляем тикер и цену. */
+        #chart-page #ch-name, #chart-page #ch-summary { display: none; }
+        #chart-page .ch-head { font-size: .84rem; }
+        #chart-page #ch-vol {
+            display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+            overflow: hidden; font-size: .66rem; line-height: 1.3;
+        }
+        #chart-page .chart-toolbar {
+            flex-wrap: nowrap !important;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            max-width: 100%;
+            padding-bottom: 2px;
+        }
+        #chart-page .chart-toolbar > * { flex: 0 0 auto; }
+        #chart-page .chart-toolbar .ctl-label { display: none; }
+        #chart-page .chart-toolbar::-webkit-scrollbar { height: 0; }
+        #chart-page .chart-axis { width: 40px; flex: 0 0 40px; font-size: 9px; }
+        #chart-page .axis-gap { width: 40px; flex: 0 0 40px; }
+        #chart-page .chart-axis .pc { display: none; }
+        #chart-page .zone-label { font-size: 8px; padding: 0 2px; }
+    }
+    #chart-page .chart-main-box { position: relative; flex: 1 1 auto; min-width: 0; overflow: hidden; }
+    #chart-page .profile-layer {
+        position: absolute; left: 0; right: 0; top: 0; pointer-events: none; z-index: 3;
+        overflow: hidden;
+    }
+    #chart-page .profile-bar { position: absolute; left: 0; height: 2px; border-radius: 0 1px 1px 0; opacity: .75; }
+    /* Уровень — это зона: полоса на всю ширину с заливкой и границами */
+    #chart-page .zones-layer {
+        position: absolute; left: 0; right: 0; top: 0; pointer-events: none; z-index: 2;
+        overflow: hidden;
+    }
+    #chart-page .zone-band { position: absolute; left: 0; pointer-events: none; }
+    #chart-page .zone-band.support { background: rgba(26,127,55,.07); }
+    #chart-page .zone-band.resistance { background: rgba(193,18,31,.07); }
+    #chart-page .zone-band.inside { background: rgba(13,110,253,.06); }
+    #chart-page .zone-label {
+        position: absolute; left: 2px; top: 50%; transform: translateY(-50%);
+        font-size: 9px; padding: 0 3px; border-radius: 2px;
+        background: rgba(255,255,255,.75); white-space: nowrap;
+    }
+    #chart-page .zone-label.support { color: #1a7f37; }
+    #chart-page .zone-label.resistance { color: #c1121f; }
+</style>
+
+<div id="chart-page">
+    <div class="d-flex flex-wrap align-items-center gap-2 mb-2 ch-head">
+        <span class="fw-bold fs-6">{{ ticker }}</span>
+        <span class="text-muted" id="ch-name"></span>
+        <span class="fw-semibold" id="ch-price">—</span>
+        <span id="ch-change" class="small"></span>
+        <span class="text-muted" id="ch-summary"></span>
+        <div class="ms-auto d-flex flex-wrap align-items-center gap-1 chart-toolbar">
+            <a href="/screener" class="btn btn-outline-secondary btn-sm" title="Скринер">
+                <i class="bi bi-funnel"></i>
+            </a>
+            <select class="form-select form-select-sm" id="ch-range" style="width:96px">
+                <option value="today">сегодня</option>
+                <option value="3d" selected>3 дня</option>
+                <option value="7d">7 дней</option>
+                <option value="30d">30 дней</option>
+            </select>
+            <div class="btn-group btn-group-sm" role="group" id="ch-interval">
+                <button type="button" class="btn btn-outline-primary" data-interval="1">1м</button>
+                <button type="button" class="btn btn-outline-primary active" data-interval="5">5м</button>
+                <button type="button" class="btn btn-outline-primary" data-interval="15">15м</button>
+                <button type="button" class="btn btn-outline-primary" data-interval="60">1ч</button>
+            </div>
+            <span class="text-muted ms-1 ctl-label">маркеры</span>
+            <select class="form-select form-select-sm" id="ch-markers" style="width:auto">
+                <option value="none" selected>нет</option>
+                <option value="large">крупные</option>
+                <option value="all">все</option>
+            </select>
+            <input type="number" class="form-control form-control-sm" id="ch-min-value"
+                   value="1000000" min="0" step="100000" style="width:96px" title="Крупные сделки от, ₽">
+            <div class="form-check form-check-inline mb-0 ms-1">
+                <input class="form-check-input" type="checkbox" id="ch-vwap" checked>
+                <label class="form-check-label" for="ch-vwap" style="font-size:.72rem">VWAP</label>
+            </div>
+            <div class="form-check form-check-inline mb-0">
+                <input class="form-check-input" type="checkbox" id="ch-signals" checked>
+                <label class="form-check-label" for="ch-signals" style="font-size:.72rem"
+                       title="Сигналы на покупку по уровням: зелёные — приняты фильтром R:R, серые «отсеян» — цель ближе стопа">сигналы</label>
+            </div>
+            <div class="form-check form-check-inline mb-0">
+                <input class="form-check-input" type="checkbox" id="ch-nostop">
+                <label class="form-check-label" for="ch-nostop" style="font-size:.72rem"
+                       title="Без стоп-лосса: выход по цели или времени (для дивидендных бумаг)">без стопа</label>
+            </div>
+            <div class="form-check form-check-inline mb-0">
+                <input class="form-check-input" type="checkbox" id="ch-pct" checked>
+                <label class="form-check-label" for="ch-pct" style="font-size:.72rem"
+                       title="Колонка процентов справа">%</label>
+            </div>
+            <div class="form-check form-check-inline mb-0">
+                <input class="form-check-input" type="checkbox" id="ch-profile" checked>
+                <label class="form-check-label" for="ch-profile" style="font-size:.72rem"
+                       title="Горизонтальный профиль объёма по цене">объёмы</label>
+            </div>
+            <span class="text-muted" id="ch-markers-info" style="font-size:.68rem"></span>
+        </div>
+    </div>
+
+    <div class="alert alert-danger py-1 px-2 mb-2 d-none" id="ch-error" style="font-size:.75rem"></div>
+
+    <div class="text-muted mb-2" id="ch-vol" style="font-size:.7rem"></div>
+
+    <div class="card">
+        <div class="card-header d-flex justify-content-between">
+            <span>Цена и объём</span>
+            <span class="text-muted fw-normal" style="font-size:.68rem">время МСК</span>
+        </div>
+        <div class="card-body p-0">
+            <div class="chart-wrap">
+                <div class="chart-main-box">
+                    <div id="chart-main" style="height:300px"></div>
+                    <div class="zones-layer" id="chart-zones"></div>
+                    <div class="profile-layer" id="chart-profile"></div>
+                </div>
+                <div class="chart-axis" id="chart-axis" style="height:300px"
+                     title="Цена и изменение в % от первой свечи диапазона"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header d-flex justify-content-between">
+            <span>Дельта покупок и продаж, ₽</span>
+            <span class="text-muted fw-normal" style="font-size:.68rem" id="ch-delta-max"></span>
+        </div>
+        <div class="card-body p-0">
+            <div class="chart-wrap">
+                <div class="chart-main-box"><div id="chart-delta" style="height:78px"></div></div>
+                <div class="axis-gap" id="chart-delta-gap" style="height:78px"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header d-flex justify-content-between">
+            <span><i class="bi bi-bar-chart-steps"></i> Уровни и перевес</span>
+            <span class="text-muted fw-normal d-none d-md-inline" style="font-size:.68rem" id="lv-state"></span>
+        </div>
+        <div class="card-body">
+            <div class="mb-2" id="lv-verdict" style="font-size:.74rem"></div>
+            <div class="table-responsive" style="max-height:170px;overflow:auto">
+                <table class="table table-sm mb-0" data-no-stack>
+                    <thead class="table-light"><tr>
+                        <th title="Границы зоны: где реально торговались">зона</th><th>тип</th>
+                        <th class="text-end">объём, ₽</th>
+                        <th class="text-end">покупки</th>
+                        <th class="text-end" title="Сколько раз цена подходила к зоне">кас.</th>
+                        <th class="text-end" title="Сколько касаний закончились удержанием">держ.</th>
+                        <th>сейчас</th>
+                    </tr></thead>
+                    <tbody id="lv-rows"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header d-flex justify-content-between">
+            <span><i class="bi bi-lightning-charge"></i> Сигналы на покупку</span>
+            <span class="text-muted fw-normal" style="font-size:.68rem" id="sig-count"></span>
+        </div>
+        <div class="table-responsive" style="max-height:170px;overflow:auto">
+            <table class="table table-sm mb-0" data-no-stack>
+                <thead class="table-light"><tr>
+                    <th class="ps-2">время</th><th>тип</th>
+                    <th class="text-end">зона</th><th class="text-end">цена</th>
+                    <th class="text-end">дельта</th><th class="text-end">объём</th>
+                    <th class="text-end" title="Принят ли вход фильтром риск/прибыль">вход</th>
+                </tr></thead>
+                <tbody id="sig-rows"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header d-flex justify-content-between">
+            <span><i class="bi bi-clock-history"></i> Бэктест intraday</span>
+            <span class="text-muted fw-normal" style="font-size:.68rem">
+                вход по следующему бару · комиссия с обеих сторон
+            </span>
+        </div>
+        <div class="card-body">
+            <div class="row g-1 align-items-end mb-1">
+                <div class="col-12 col-md-4">
+                    <label class="form-label">Стратегия</label>
+                    <select class="form-select form-select-sm" id="bt-strategy">
+                        {% for s in strategies %}
+                        <option value="{{ s.key }}">{{ s.label }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-6 col-md-2">
+                    <label class="form-label">Номинал, ₽</label>
+                    <input type="number" class="form-control form-control-sm" id="bt-notional"
+                           value="100000" min="1000" step="10000">
+                </div>
+                <div class="col-6 col-md-2">
+                    <label class="form-label">Комиссия, %</label>
+                    <input type="number" class="form-control form-control-sm" id="bt-fee"
+                           value="0.05" min="0" max="1" step="0.01">
+                </div>
+                <div class="col-12 col-md-4 d-flex gap-1">
+                    <button class="btn btn-primary btn-sm flex-fill" id="bt-run">
+                        <i class="bi bi-play-fill"></i> Запустить
+                    </button>
+                    <button class="btn btn-outline-secondary btn-sm flex-fill" id="bt-clear">Сбросить</button>
+                    <button class="btn btn-outline-primary btn-sm flex-fill" id="bt-scan-btn"
+                            title="Тот же набор параметров по топ-20 инструментам, первая и вторая половина периода">
+                        <i class="bi bi-collection"></i> Универсум
+                    </button>
+                </div>
+            </div>
+            <div class="text-muted mb-2" id="bt-description" style="font-size:.66rem"></div>
+
+            <div class="row g-1 mb-2" id="bt-params"></div>
+
+            <div class="alert alert-danger py-1 px-2 mb-2 d-none" id="bt-error" style="font-size:.75rem"></div>
+
+            <div class="d-none mb-2" id="bt-scan">
+                <div class="d-flex flex-wrap gap-3 mb-1" id="bt-scan-summary" style="font-size:.72rem"></div>
+                <div class="table-responsive" style="max-height:150px;overflow:auto">
+                    <table class="table table-sm mb-0">
+                        <thead class="table-light"><tr>
+                            <th>тикер</th><th class="text-end">сдел</th>
+                            <th class="text-end">до комиссий</th><th class="text-end">комиссии</th>
+                            <th class="text-end">итог</th><th class="text-end">in</th>
+                            <th class="text-end">out</th>
+                        </tr></thead>
+                        <tbody id="bt-scan-rows"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div id="bt-results" class="d-none">
+                <div class="row g-1 mb-2" id="bt-metrics"></div>
+                <div class="mb-2 d-none" id="bt-diagnosis" style="font-size:.72rem"></div>
+                <div class="row g-2">
+                    <div class="col-lg-4">
+                        <div class="text-muted" style="font-size:.68rem">Накопленный результат, ₽</div>
+                        <div id="chart-equity" style="height:110px"></div>
+                    </div>
+                    <div class="col-lg-8">
+                        <div class="text-muted" style="font-size:.68rem">Сделки</div>
+                        <div class="table-responsive" style="max-height:130px;overflow:auto">
+                            <table class="table table-sm table-hover mb-0" data-no-stack>
+                                <thead class="table-light">
+                                <tr>
+                                    <th>Вход</th><th class="text-end">Цена</th>
+                                    <th>Выход</th><th class="text-end">Цена</th>
+                                    <th class="text-end">Бар.</th><th>Причина</th>
+                                    <th class="text-end">P&amp;L, ₽</th>
+                                </tr>
+                                </thead>
+                                <tbody id="bt-trades"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-header">Последние сделки</div>
+        <div class="table-responsive" style="max-height:150px;overflow:auto">
+            <table class="table table-sm mb-0" data-no-stack>
+                <thead class="table-light">
+                <tr><th class="ps-2">Время</th><th class="text-end">Цена</th>
+                    <th class="text-end">Лоты</th><th class="text-end">Объём, ₽</th>
+                    <th class="text-end">Сторона</th></tr>
+                </thead>
+                <tbody id="ch-tape"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='vendor/lightweight-charts-4.2.3/lightweight-charts.standalone.production.js') }}"></script>
+<script>
+(function () {
+    const TICKER = {{ ticker|tojson }};
+    const BASE_OPTS = {
+        layout: { background: { color: '#ffffff' }, textColor: '#444', fontSize: 9 },
+        grid: { vertLines: { color: '#f4f6f8' }, horzLines: { color: '#f4f6f8' } },
+        rightPriceScale: { borderColor: '#dee2e6', scaleMargins: {top: 0.08, bottom: 0.08} },
+        timeScale: { borderColor: '#dee2e6', timeVisible: true, secondsVisible: false },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+        localization: { locale: 'ru-RU' },
+    };
+
+    // Ценовая шкала TradingView: на узких экранах ей хватает ~44 px,
+    // иначе вместе с процентами она съедает четверть ширины.
+    const narrow = window.matchMedia('(max-width: 575.98px)').matches;
+    const mainChart = LightweightCharts.createChart(
+        document.getElementById('chart-main'),
+        {...BASE_OPTS, height: 300,
+         // Своя ось справа: у библиотеки ширина шкалы 54 px и подписи
+         // прижаты вправо, из-за чего на телефоне оставалась пустота.
+         rightPriceScale: {...BASE_OPTS.rightPriceScale, visible: false}});
+    const candleSeries = mainChart.addCandlestickSeries({
+        upColor: '#26a69a', downColor: '#ef5350',
+        wickUpColor: '#26a69a', wickDownColor: '#ef5350', priceLineVisible: false,
+        // Плашка последней цены расширяет шкалу на ~15 px; цена и так видна
+        // в шапке страницы, поэтому шкалу держим узкой.
+        lastValueVisible: false,
+    });
+    const volumeSeries = mainChart.addHistogramSeries({
+        priceFormat: { type: 'volume' }, priceScaleId: 'vol',
+        lastValueVisible: false, priceLineVisible: false,
+    });
+    mainChart.priceScale('vol').applyOptions({scaleMargins: {top: 0.85, bottom: 0}});
+    const vwapSeries = mainChart.addLineSeries({
+        color: '#f59f00', lineWidth: 1, lastValueVisible: false, priceLineVisible: false,
+    });
+
+    const deltaChart = LightweightCharts.createChart(
+        document.getElementById('chart-delta'),
+        // Шкалу скрываем: иначе область графика уже, чем у свечей,
+        // и ось времени дельты съезжает относительно основного графика.
+        {...BASE_OPTS, height: 78,
+         rightPriceScale: {...BASE_OPTS.rightPriceScale, visible: false}});
+    const deltaSeries = deltaChart.addHistogramSeries({
+        priceFormat: { type: 'volume' }, lastValueVisible: false, priceLineVisible: false,
+    });
+
+    const equityChart = LightweightCharts.createChart(
+        document.getElementById('chart-equity'), {...BASE_OPTS, height: 110});
+    const equitySeries = equityChart.addAreaSeries({
+        lineColor: '#0d6efd', topColor: 'rgba(13,110,253,.25)', bottomColor: 'rgba(13,110,253,0)',
+        lineWidth: 1, priceLineVisible: false,
+    });
+
+    // ── своя ось справа: цена + процент ─────────────────────────
+    // Шкалу библиотеки скрыли: её ширина (54 px) не управляется, а подписи
+    // прижаты вправо — на телефоне это давало пустую полосу справа.
+    const axisEl = document.getElementById('chart-axis');
+    let pctBase = 0;
+
+    function niceStep(raw) {
+        const pow = Math.pow(10, Math.floor(Math.log10(raw)));
+        const norm = raw / pow;
+        const mult = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10;
+        return mult * pow;
+    }
+
+    function priceDecimals() {
+        if (!candlesCache.length) return 2;
+        const text = String(candlesCache[0].close);
+        const dot = text.indexOf('.');
+        return dot < 0 ? 0 : Math.min(4, text.length - dot - 1);
+    }
+
+    function chartHeight() {
+        return document.getElementById('chart-main').clientHeight || 300;
+    }
+
+    // Высота области графика без оси времени: полосы зон и профиль не должны
+    // рисоваться поверх подписей времени.
+    function paneHeight() {
+        const total = chartHeight();
+        let axis = 0;
+        try { axis = mainChart.timeScale().height() || 0; } catch (e) { axis = 0; }
+        return Math.max(20, total - axis);
+    }
+
+    function syncOverlayHeights() {
+        const h = paneHeight() + 'px';
+        document.getElementById('chart-zones').style.height = h;
+        document.getElementById('chart-profile').style.height = h;
+        axisEl.style.height = h;
+    }
+
+    // Вертикальное сжатие ценовой шкалы не даёт события, поэтому следим за
+    // отображением цена→пиксель и перерисовываем слои при изменении.
+    let lastMapping = null;
+
+    function mappingSignature() {
+        const reference = candlesCache.length
+            ? candlesCache[Math.floor(candlesCache.length / 2)].close : 0;
+        if (!reference) return null;
+        const y = candleSeries.priceToCoordinate(reference);
+        return y == null ? null : Math.round(y * 2) / 2;
+    }
+
+    function refreshOverlays() {
+        syncOverlayHeights();
+        renderPercentAxis();
+        drawZoneBands(levelsData);
+        renderProfile(levelsData);
+    }
+
+    function checkMapping() {
+        const signature = mappingSignature();
+        if (signature === null && lastMapping === null) return;
+        if (signature === lastMapping) return;
+        lastMapping = signature;
+        refreshOverlays();
+    }
+
+    setInterval(checkMapping, 120);
+
+    function renderPercentAxis() {
+        axisEl.innerHTML = '';
+        if (!pctBase || !candlesCache.length) return;
+        const range = mainChart.timeScale().getVisibleLogicalRange();
+        if (!range) return;
+        const from = Math.max(0, Math.floor(range.from));
+        const to = Math.min(candlesCache.length - 1, Math.ceil(range.to));
+        if (to < from) return;
+
+        let lo = Infinity, hi = -Infinity;
+        for (let i = from; i <= to; i += 1) {
+            lo = Math.min(lo, candlesCache[i].low);
+            hi = Math.max(hi, candlesCache[i].high);
+        }
+        if (!isFinite(lo) || !isFinite(hi) || hi <= lo) return;
+
+        const yLo = candleSeries.priceToCoordinate(lo);
+        const yHi = candleSeries.priceToCoordinate(hi);
+        if (yLo == null || yHi == null || yHi === yLo) return;
+
+        const height = chartHeight();
+        const slope = (yHi - yLo) / (hi - lo);
+        const priceTop = hi + (0 - yHi) / slope;
+        const priceBottom = hi + (height - yHi) / slope;
+
+        // ~10 подписей — как обычная ценовая шкала
+        const step = niceStep((priceTop - priceBottom) / Math.max(4, Math.round(height / 30)));
+        const decimals = priceDecimals();
+        const first = Math.ceil(priceBottom / step) * step;
+        const frag = document.createDocumentFragment();
+        let lastText = null;
+        for (let price = first; price <= priceTop; price += step) {
+            const y = yHi + (price - hi) * slope;
+            if (y < 2 || y > height - 2) continue;
+            const pct = (price / pctBase - 1) * 100;
+            const pctText = (Math.abs(pct) < 0.05 ? '0.0' : (pct > 0 ? '+' : '') + pct.toFixed(1)) + '%';
+            const priceText = price.toFixed(decimals);
+            if (priceText === lastText) continue;
+            lastText = priceText;
+
+            const row = document.createElement('span');
+            row.className = 'row-label';
+            row.style.top = y + 'px';
+            const px = document.createElement('span');
+            px.className = 'px';
+            px.textContent = priceText;
+            row.appendChild(px);
+            if (document.getElementById('ch-pct').checked) {
+                const pc = document.createElement('span');
+                pc.className = 'pc ' + (pct >= 0 ? 'up' : 'down');
+                pc.textContent = pctText;
+                row.appendChild(pc);
+            }
+            frag.appendChild(row);
+        }
+        axisEl.appendChild(frag);
+    }
+
+    // Общая ось времени: скролл/зум основного графика двигает панель дельты.
+    (function sync(a, b) {
+        let busy = false;
+        a.timeScale().subscribeVisibleLogicalRangeChange((range) => {
+            if (busy || !range) return;
+            busy = true;
+            b.timeScale().setVisibleLogicalRange(range);
+            busy = false;
+        });
+    })(mainChart, deltaChart);
+
+    mainChart.timeScale().subscribeVisibleLogicalRangeChange(() => refreshOverlays());
+
+    const money = (v) => {
+        const n = Number(v || 0);
+        if (Math.abs(n) >= 1e9) return (n / 1e9).toFixed(2) + ' млрд';
+        if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(2) + ' млн';
+        if (Math.abs(n) >= 1e3) return (n / 1e3).toFixed(0) + ' тыс';
+        return n.toFixed(0);
+    };
+    const compact = (v) => {
+        const n = Number(v || 0);
+        if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(1) + 'М';
+        if (Math.abs(n) >= 1e3) return (n / 1e3).toFixed(0) + 'К';
+        return n.toFixed(0);
+    };
+    const hhmm = (t) => new Date(t * 1000).toISOString().slice(11, 16);
+
+    let candlesCache = [];
+    let levelsData = null;
+    let zoneLines = [];
+    let currentInterval = 5;
+    let currentRange = '3d';
+    let priceMarkers = [];
+    let backtestMarkers = [];
+    let signalMarkers = [];
+
+    function applyMarkers() {
+        // Приоритет: результат бэктеста → сигналы стратегии → сделки из ленты.
+        // Отсеянные сигналы (серые) показываем всегда, в том числе поверх
+        // бэктеста: иначе на графике «исчезают» сигналы, которые видит скринер.
+        const rejected = signalMarkers.filter((m) => m.text === 'отсеян');
+        let list;
+        if (backtestMarkers.length) list = [...backtestMarkers, ...rejected];
+        else if (signalMarkers.length) list = signalMarkers;
+        else list = priceMarkers;
+        candleSeries.setMarkers([...list].sort((a, b) => a.time - b.time));
+    }
+
+    function renderSignalRows(rows) {
+        const body = document.getElementById('sig-rows');
+        const taken = rows.filter((r) => r.taken !== false).length;
+        document.getElementById('sig-count').textContent = rows.length
+            ? `сигналов ${rows.length}, принято ${taken}` : '';
+        body.innerHTML = rows.map((row) => `<tr class="${row.taken === false ? 'text-muted' : ''}">
+            <td class="ps-2 text-muted">${hhmm(row.time)}</td>
+            <td class="${row.kind === 'breakout' ? 'text-success' : 'text-primary'}">${row.kind_label}</td>
+            <td class="text-end">${Number(row.zone_price).toFixed(3)}</td>
+            <td class="text-end">${Number(row.price).toFixed(3)}</td>
+            <td class="text-end ${row.delta >= 0 ? 'text-success' : 'text-danger'}">${row.delta >= 0 ? '+' : ''}${row.delta}</td>
+            <td class="text-end text-muted">×${row.volume_ratio}</td>
+            <td class="text-end">${row.taken === false
+                ? '<span title="Цель ближе стопа — вход отсеян">—</span>'
+                : '<span class="text-success" title="Вход принят">✓</span>'}</td>
+        </tr>`).join('') || '<tr><td colspan="7" class="text-muted">сигналов нет</td></tr>';
+    }
+
+    async function loadSignals() {
+        if (!document.getElementById('ch-signals').checked) {
+            signalMarkers = [];
+            renderSignalRows([]);
+            applyMarkers();
+            return;
+        }
+        try {
+            const query = new URLSearchParams({range: currentRange, interval: currentInterval});
+            const resp = await fetch(`/api/signals/${TICKER}?` + query);
+            const data = await resp.json();
+            if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+            signalMarkers = data.markers || [];
+            renderSignalRows(data.signals || []);
+            applyMarkers();
+        } catch (e) {
+            signalMarkers = [];
+            renderSignalRows([]);
+            applyMarkers();
+        }
+    }
+
+    function tradeMarkers(items) {
+        // Подписи — только у 12 крупнейших принтов, иначе график превращается
+        // в кашу из цифр; остальные маркеры рисуем без текста.
+        const labeled = new Set([...items]
+            .sort((a, b) => b.value - a.value).slice(0, 12)
+            .map((t) => t.time + ':' + t.value));
+        return items.map((t) => ({
+            time: t.time,
+            position: t.side === 'buy' ? 'belowBar' : 'aboveBar',
+            color: t.side === 'buy' ? '#1a7f37' : '#c1121f',
+            shape: t.side === 'buy' ? 'arrowUp' : 'arrowDown',
+            text: labeled.has(t.time + ':' + t.value) ? compact(t.value) : '',
+        }));
+    }
+
+    const strategies = {{ strategies|tojson }};
+    const paramsEl = document.getElementById('bt-params');
+
+    function renderParams() {
+        const key = document.getElementById('bt-strategy').value;
+        const cfg = strategies.find((s) => s.key === key);
+        document.getElementById('bt-description').textContent = cfg ? cfg.description : '';
+        paramsEl.innerHTML = (cfg ? cfg.params : []).map((p) => `
+            <div class="col-6 col-md-3 col-lg-2">
+                <label class="form-label">${p.label}</label>
+                <input type="number" class="form-control form-control-sm bt-param"
+                       data-key="${p.key}" value="${p.default}"
+                       min="${p.min}" max="${p.max}" step="${p.step}">
+            </div>`).join('');
+    }
+
+    async function loadChart() {
+        const err = document.getElementById('ch-error');
+        err.classList.add('d-none');
+        try {
+            const query = new URLSearchParams({range: currentRange, interval: currentInterval});
+            const resp = await fetch(`/api/chart/${TICKER}?` + query);
+            const data = await resp.json();
+            if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+
+            candlesCache = data.candles || [];
+            candleSeries.setData(candlesCache);
+            pctBase = candlesCache.length ? candlesCache[0].open : 0;
+            volumeSeries.setData(data.volume || []);
+            vwapSeries.setData(document.getElementById('ch-vwap').checked ? (data.vwap || []) : []);
+            deltaSeries.setData(data.delta || []);
+            const maxDelta = (data.delta || []).reduce((m, p) => Math.max(m, Math.abs(p.value)), 0);
+            document.getElementById('ch-delta-max').textContent =
+                maxDelta ? 'макс. ' + money(maxDelta) + ' ₽' : '';
+
+            const s = data.summary || {};
+            document.getElementById('ch-name').textContent = (data.instrument || {}).name || '';
+            document.getElementById('ch-price').textContent =
+                s.last_price ? Number(s.last_price).toFixed(2) : '—';
+            const chg = document.getElementById('ch-change');
+            chg.textContent = s.change_pct === undefined ? '' :
+                `${s.change_pct > 0 ? '+' : ''}${s.change_pct}%`;
+            chg.className = s.change_pct >= 0 ? 'text-success' : 'text-danger';
+            renderVolatility(data.volatility);
+            document.getElementById('ch-summary').textContent =
+                `баров ${s.bars || 0} · оборот ${money(s.turnover)} · объём ${money(s.volume)}` +
+                (data.truncated ? ' · обрезано' : '');
+            mainChart.timeScale().fitContent();
+            deltaChart.timeScale().fitContent();
+            refreshOverlays();
+            loadTape();
+            await loadMarkers();
+            await loadLevels();
+            await loadSignals();
+        } catch (e) {
+            err.textContent = 'Не удалось загрузить график: ' + e.message;
+            err.classList.remove('d-none');
+        }
+    }
+
+    function renderVolatility(v) {
+        const box = document.getElementById('ch-vol');
+        if (!v || !v.bars) { box.textContent = ''; return; }
+        const pct = (x) => (x >= 0 ? '+' : '') + Number(x).toFixed(2) + '%';
+        const items = [
+            `ATR14 на бар <b>${Number(v.atr_rub).toFixed(3)} ₽</b> / ${Number(v.atr_pct).toFixed(3)}%`,
+            `σ бара <b>${Number(v.sigma_bar_pct).toFixed(3)}%</b>`,
+            `σ час <b>${Number(v.sigma_hour_pct).toFixed(2)}%</b>`,
+            `σ день <b>${Number(v.sigma_day_pct).toFixed(2)}%</b> ` +
+                `(${Number(v.sigma_day_rub).toFixed(2)} ₽)`,
+            `размах <b>${pct(v.range_pct)}</b> (${Number(v.range_rub).toFixed(2)} ₽)`,
+        ];
+        box.innerHTML = '<span class="fw-semibold">Волатильность</span> · ' + items.join(' · ');
+    }
+
+    function renderProfile(data) {
+        const layer = document.getElementById('chart-profile');
+        layer.innerHTML = '';
+        if (!data || !data.profile || !document.getElementById('ch-profile').checked) return;
+        const maxTotal = Math.max(...data.profile.map((p) => p.total), 1);
+        const maxWidth = layer.clientWidth * 0.22;
+        const frag = document.createDocumentFragment();
+        data.profile.forEach((point) => {
+            // Полки с объёмом меньше 8 % от максимума — визуальный шум
+            if (!point.total || point.total < maxTotal * 0.03) return;
+            const y = candleSeries.priceToCoordinate(point.price);
+            if (y == null) return;
+            const width = Math.max(1, (point.total / maxTotal) * maxWidth);
+            const bar = document.createElement('div');
+            bar.className = 'profile-bar';
+            bar.style.top = (y - 1.5) + 'px';
+            bar.style.width = width + 'px';
+            // Цвет по перевесу: зелёный — покупки, красный — продажи
+            const share = point.total ? point.buy / point.total : 0.5;
+            bar.style.background = share >= 0.5
+                ? `rgba(26,127,55,${0.16 + 0.35 * share})`
+                : `rgba(193,18,31,${0.16 + 0.35 * (1 - share)})`;
+            bar.title = `${point.price} · объём ${money(point.total)} ₽ · `
+                + `покупки ${(share * 100).toFixed(0)}% · дельта ${money(point.delta)} ₽`;
+            frag.appendChild(bar);
+        });
+        layer.appendChild(frag);
+    }
+
+    function drawZoneBands(data) {
+        const layer = document.getElementById('chart-zones');
+        layer.innerHTML = '';
+        if (!data || !data.zones) return;
+        let scaleWidth = 0;
+        try { scaleWidth = mainChart.priceScale('right').width(); } catch (e) { scaleWidth = 0; }
+        const frag = document.createDocumentFragment();
+        data.zones.forEach((zone) => {
+            const yHigh = candleSeries.priceToCoordinate(zone.high);
+            const yLow = candleSeries.priceToCoordinate(zone.low);
+            if (yHigh == null || yLow == null) return;
+            const pane = paneHeight();
+            const top = Math.max(0, Math.min(yHigh, yLow));
+            const height = Math.min(Math.max(3, Math.abs(yLow - yHigh)), Math.max(3, pane - top));
+            const band = document.createElement('div');
+            const isInside = data.inside && data.inside.price === zone.price;
+            band.className = 'zone-band ' + zone.side + (isInside ? ' inside' : '');
+            band.style.top = top + 'px';
+            band.style.height = height + 'px';
+            band.style.right = (scaleWidth + 1) + 'px';
+            band.title = `${zone.side === 'support' ? 'Поддержка' : 'Сопротивление'} `
+                + `${zone.low.toFixed(3)}–${zone.high.toFixed(3)} · ${money(zone.volume_rub)} ₽`
+                + ` · покупки ${(zone.buy_share * 100).toFixed(0)}%`
+                + ` · крупные ${zone.large_flow >= 0 ? '+' : ''}${zone.large_flow.toFixed(2)}`;
+            // Подписи — только у ближайших уровней: иначе полотно превращается
+            // в набор наложенных друг на друга ярлыков.
+            const isNearest = [data.support, data.resistance, data.inside]
+                .some((z) => z && z.price === zone.price);
+            if (isNearest) {
+                const label = document.createElement('span');
+                label.className = 'zone-label ' + zone.side;
+                label.textContent = `${zone.side === 'support' ? 'S' : 'R'} `
+                    + `${zone.price.toFixed(3)} · ${money(zone.volume_rub)}`;
+                band.appendChild(label);
+            }
+            frag.appendChild(band);
+        });
+        layer.appendChild(frag);
+    }
+
+    function renderZones(data) {
+        drawZoneBands(data);
+        const rows = document.getElementById('lv-rows');
+        if (!data || !data.zones) {
+            rows.innerHTML = '<tr><td colspan="6" class="text-muted">нет данных</td></tr>';
+            return;
+        }
+
+        rows.innerHTML = data.zones.map((zone) => `<tr>
+            <td><b>${zone.low.toFixed(3)}–${zone.high.toFixed(3)}</b></td>
+            <td class="${zone.side === 'support' ? 'text-success' : 'text-danger'}">
+                ${zone.side === 'support' ? 'поддержка' : 'сопротивление'}</td>
+            <td class="text-end">${money(zone.volume_rub)}</td>
+            <td class="text-end ${zone.buy_share >= 0.5 ? 'text-success' : 'text-danger'}">
+                ${(zone.buy_share * 100).toFixed(0)}%</td>
+            <td class="text-end">${zone.touches ?? 0}</td>
+            <td class="text-end">${zone.held ?? 0}${zone.hold_rate !== null && zone.hold_rate !== undefined
+                ? ' <span class="text-muted">(' + Math.round(zone.hold_rate * 100) + '%)</span>' : ''}</td>
+            <td class="text-muted" title="${(zone.behavior && zone.behavior.label) || ''}">${
+                ({absorption: 'держат', break_up: 'пробой ↑', break_down: 'пробой ↓',
+                  pierce_up: 'прокол ↑', pierce_down: 'прокол ↓'}[(zone.behavior || {}).kind] || '—')}</td>
+        </tr>`).join('') || '<tr><td colspan="6" class="text-muted">зон не найдено</td></tr>';
+    }
+
+    function renderLevels(data) {
+        levelsData = data;
+        document.getElementById('lv-state').textContent = data
+            ? `${data.source === 'trades' ? 'по сделкам' : 'по минуткам'} · `
+              + `диапазон ${Number(data.range.low).toFixed(3)}–${Number(data.range.high).toFixed(3)}`
+            : '';
+        const sig = data && data.signal;
+        const box = document.getElementById('lv-verdict');
+        if (sig) {
+            // Цвет честно говорит, можно ли действовать по сигналу:
+            // зелёный/красный — есть вход, жёлтый — ход меньше издержек,
+            // серый — перевеса или цели нет.
+            const cls = sig.actionable
+                ? (sig.direction === 'up' ? 'success' : 'danger')
+                : (sig.blocked_by_cost ? 'warning' : 'secondary');
+            box.innerHTML = `<span class="badge bg-${cls}">${sig.title}` +
+                (sig.confidence ? ` · ${sig.confidence}%` : '') + `</span> `
+                + `<span class="text-muted">${sig.level ? sig.level.side === 'support' ? 'поддержка' : 'сопротивление' : ''}`
+                + (sig.level ? ` ${sig.level.price.toFixed(3)} · ${sig.level.behavior}` : '') + `</span>`
+                + (sig.target ? ` · цель <b>${sig.target.toFixed(3)}</b>` +
+                    (sig.expected_move_pct ? ` (${sig.expected_move_pct}%)` : '') : '')
+                + (sig.blocked_by_cost ? ' · <b class="text-warning">ход меньше издержек</b>' : '')
+                + `<div class="text-muted mt-1" style="font-size:.68rem">${sig.reasons.join(' · ')}</div>`;
+            renderZones(data);
+            renderProfile(data);
+            return;
+        }
+        const v = data && data.verdict;
+        if (!v) {
+            box.innerHTML = '';
+        } else {
+            const cls = {up: 'success', down: 'danger', neutral: 'secondary'}[v.direction];
+            const state = v.state === 'in_zone' ? 'цена в зоне' : 'между уровнями';
+            box.innerHTML = `<span class="badge bg-${cls}">${v.title}</span> `
+                + `<span class="text-muted">${state}` +
+                (v.confidence ? ` · уверенность ${v.confidence}%` : '') + `</span>`
+                + (v.target ? ` · цель <b>${v.target.toFixed(3)}</b> (${v.target_pct > 0 ? '+' : ''}${v.target_pct}%)` : '')
+                + `<div class="text-muted mt-1" style="font-size:.68rem">${v.detail}</div>`;
+        }
+        syncOverlayHeights();
+        renderZones(data);
+        renderProfile(data);
+    }
+
+    async function loadLevels() {
+        if (!document.getElementById('ch-profile').checked) {
+            renderLevels(null);
+            return;
+        }
+        try {
+            const query = new URLSearchParams({range: currentRange, buckets: 80, days: 30});
+            const resp = await fetch(`/api/levels/${TICKER}?` + query);
+            const data = await resp.json();
+            if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+            renderLevels(data);
+        } catch (e) {
+            document.getElementById('lv-verdict').textContent = 'Уровни: ' + e.message;
+        }
+    }
+
+    async function loadMarkers() {
+        const mode = document.getElementById('ch-markers').value;
+        const info = document.getElementById('ch-markers-info');
+        backtestMarkers = [];
+        if (mode === 'none') {
+            priceMarkers = [];
+            info.textContent = '';
+            applyMarkers();
+            return;
+        }
+        const minValue = document.getElementById('ch-min-value').value || 0;
+        const query = new URLSearchParams({range: currentRange, mode, min_value: minValue});
+        const resp = await fetch(`/api/chart/${TICKER}/markers?` + query);
+        const data = await resp.json();
+        if (!resp.ok) { info.textContent = data.error || ''; return; }
+        priceMarkers = tradeMarkers(data.items || []);
+        info.textContent = `${data.count}` + (data.truncated ? '+' : '');
+        applyMarkers();
+    }
+
+    async function loadTape() {
+        const resp = await fetch(`/api/chart/${TICKER}/tape?range=${currentRange}&limit=100`);
+        const data = await resp.json();
+        const body = document.getElementById('ch-tape');
+        if (!resp.ok) {
+            body.innerHTML = `<tr><td colspan="5" class="text-muted">${data.error || ''}</td></tr>`;
+            return;
+        }
+        body.innerHTML = (data.items || []).map((t) => `<tr>
+            <td class="ps-2 text-muted">${t.trade_time}</td>
+            <td class="text-end">${Number(t.price).toFixed(3)}</td>
+            <td class="text-end">${t.lots}</td>
+            <td class="text-end">${money(t.value)}</td>
+            <td class="text-end ${t.side === 'buy' ? 'text-success' : 'text-danger'}">${t.side === 'buy' ? 'B' : 'S'}</td>
+        </tr>`).join('') || '<tr><td colspan="5" class="text-muted">сделок за период нет</td></tr>';
+    }
+
+    function metric(label, value, cls) {
+        return `<div class="col-4 col-md-3 col-lg-2">
+            <div class="metric"><div class="k">${label}</div>
+            <div class="v ${cls || ''}">${value}</div></div></div>`;
+    }
+
+    function renderBacktest(res) {
+        const m = res.metrics;
+        const gross = m.gross_pnl ?? 0;
+        const skipped = m.skipped_rr || 0;
+        const diag = document.getElementById('bt-diagnosis');
+        if (m.trades === 0) {
+            diag.className = 'mb-2 alert alert-secondary py-1 px-2';
+            diag.textContent = skipped
+                ? `Сигналы были (${skipped}), но все отсеяны: цель ближе стопа — `
+                  + `средний R:R ${m.avg_rr}. Такой вход не окупает проигрыш.`
+                : 'Сделок нет: порог входа не достигнут.';
+            diag.classList.remove('d-none');
+        } else if (gross <= 0) {
+            diag.className = 'mb-2 alert alert-warning py-1 px-2';
+            diag.textContent = `Валовой результат ≤ 0: у сигнала нет перевеса, дело не в комиссиях. `
+                + `Средний R:R ${m.avg_rr}, винрейт ${m.win_rate}% — при таком соотношении `
+                + `нужен винрейт ≥ ${m.avg_rr > 0 ? Math.round(100 / (1 + m.avg_rr)) : 50}%.`;
+            diag.classList.remove('d-none');
+        } else if (m.net_pnl < 0) {
+            diag.className = 'mb-2 alert alert-warning py-1 px-2';
+            diag.textContent = `Сигнал есть: до комиссий ${money(gross)} ₽, но комиссии ${money(m.fees)} ₽ `
+                + 'съедают больше. Нужны более крупные движения (длиннее удержание) или ниже тариф.';
+            diag.classList.remove('d-none');
+        } else {
+            diag.className = 'mb-2 alert alert-success py-1 px-2';
+            diag.textContent = `Прибыльно до и после комиссий: ${money(m.net_pnl)} ₽. `
+                + 'Проверьте устойчивость кнопкой «По универсуму» (out-of-sample).';
+            diag.classList.remove('d-none');
+        }
+        document.getElementById('bt-metrics').innerHTML = [
+            metric('сделок', m.trades),
+            metric('до комиссий', money(m.gross_pnl ?? 0), (m.gross_pnl ?? 0) >= 0 ? 'text-success' : 'text-danger'),
+            metric('результат, ₽', money(m.net_pnl), m.net_pnl >= 0 ? 'text-success' : 'text-danger'),
+            metric('доходность', `${m.total_return_pct}%`, m.total_return_pct >= 0 ? 'text-success' : 'text-danger'),
+            metric('винрейт', `${m.win_rate}%`),
+            metric('профит-фактор', m.profit_factor),
+            metric('ожидание', money(m.expectancy), m.expectancy >= 0 ? 'text-success' : 'text-danger'),
+            metric('просадка', money(m.max_drawdown), 'text-danger'),
+            metric('комиссии', money(m.fees)),
+            metric('средний бар', m.avg_bars),
+            metric('R:R', m.avg_rr ?? 0),
+            metric('отсеяно', m.skipped_rr ?? 0),
+            metric('шарп', m.sharpe),
+        ].join('');
+
+        document.getElementById('bt-trades').innerHTML = res.trades.map((t) => `<tr>
+            <td class="text-muted">${hhmm(t.entry_time)}</td>
+            <td class="text-end">${t.entry_price}</td>
+            <td class="text-muted">${hhmm(t.exit_time)}</td>
+            <td class="text-end">${t.exit_price}</td>
+            <td class="text-end">${t.bars}</td>
+            <td class="text-muted">${t.reason}</td>
+            <td class="text-end ${t.pnl >= 0 ? 'text-success' : 'text-danger'}">${t.pnl.toFixed(0)}</td>
+        </tr>`).join('') || `<tr><td colspan="7" class="text-muted">${
+            (m.skipped_rr || 0) > 0
+                ? `Все ${m.skipped_rr} сигналов отсеяны: цель ближе стопа (средний R:R ${m.avg_rr}). `
+                  + 'Это не «нет сигналов» — это отказ от невыгодных входов.'
+                : 'Сделок не было: сигналов за период нет.'}</td></tr>`;
+
+        const equity = [{time: res.trades.length ? res.trades[0].entry_time - 60 : 0, value: 0}]
+            .concat(res.equity || []);
+        equitySeries.setData(equity.filter((p) => p.time > 0));
+        equityChart.timeScale().fitContent();
+
+        backtestMarkers = (res.markers || []).map((m) => ({
+            time: m.time, position: m.position, color: m.color, shape: m.shape, text: m.text,
+        }));
+        applyMarkers();
+        document.getElementById('bt-results').classList.remove('d-none');
+    }
+
+    async function runScan() {
+        const err = document.getElementById('bt-error');
+        err.classList.add('d-none');
+        const params = {};
+        document.querySelectorAll('.bt-param').forEach((el) => { params[el.dataset.key] = el.value; });
+        const box = document.getElementById('bt-scan');
+        box.classList.remove('d-none');
+        document.getElementById('bt-scan-summary').textContent = 'считаю по универсуму…';
+        try {
+            const resp = await fetch('/api/backtest/scan', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+                body: JSON.stringify({
+                    strategy: document.getElementById('bt-strategy').value,
+                    params: {...params,
+                             use_stop: document.getElementById('ch-nostop').checked ? 0 : 1},
+                    range: currentRange,
+                    interval: currentInterval,
+                    notional: document.getElementById('bt-notional').value,
+                    fee_pct: document.getElementById('bt-fee').value,
+                    top: 20,
+                }),
+            });
+            const d = await resp.json();
+            if (!resp.ok) throw new Error(d.error || ('HTTP ' + resp.status));
+
+            const span = (label, value, cls) =>
+                `<span>${label}: <span class="fw-semibold ${cls || ''}">${value}</span></span>`;
+            document.getElementById('bt-scan-summary').innerHTML = [
+                span('инструментов', `${d.tickers} (торговали ${d.traded_tickers})`),
+                span('сделок', d.total_trades),
+                span('до комиссий', money(d.gross), d.gross >= 0 ? 'text-success' : 'text-danger'),
+                span('комиссии', money(d.fees)),
+                span('итог', money(d.net), d.net >= 0 ? 'text-success' : 'text-danger'),
+                span('in-sample', money(d.in_net), d.in_net >= 0 ? 'text-success' : 'text-danger'),
+                span('out-of-sample', money(d.out_net), d.out_net >= 0 ? 'text-success' : 'text-danger'),
+                span('прибыльных', d.win_tickers),
+            ].join('');
+            document.getElementById('bt-scan-rows').innerHTML = (d.rows || []).map((r) => `<tr>
+                <td>${r.ticker}</td>
+                <td class="text-end">${r.trades}</td>
+                <td class="text-end ${r.gross >= 0 ? 'text-success' : 'text-danger'}">${r.gross.toFixed(0)}</td>
+                <td class="text-end text-muted">${r.fees.toFixed(0)}</td>
+                <td class="text-end ${r.net >= 0 ? 'text-success' : 'text-danger'}">${r.net.toFixed(0)}</td>
+                <td class="text-end ${r.in_net >= 0 ? 'text-success' : 'text-danger'}">${r.in_net.toFixed(0)}</td>
+                <td class="text-end ${r.out_net >= 0 ? 'text-success' : 'text-danger'}">${r.out_net.toFixed(0)}</td>
+            </tr>`).join('');
+        } catch (e) {
+            err.textContent = 'Проверка по универсуму не выполнена: ' + e.message;
+            err.classList.remove('d-none');
+            box.classList.add('d-none');
+        }
+    }
+
+    async function runBacktest() {
+        const err = document.getElementById('bt-error');
+        err.classList.add('d-none');
+        const params = {};
+        document.querySelectorAll('.bt-param').forEach((el) => { params[el.dataset.key] = el.value; });
+        try {
+            const resp = await fetch(`/api/backtest/${TICKER}`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+                body: JSON.stringify({
+                    strategy: document.getElementById('bt-strategy').value,
+                    params: {...params,
+                             use_stop: document.getElementById('ch-nostop').checked ? 0 : 1},
+                    range: currentRange,
+                    interval: currentInterval,
+                    notional: document.getElementById('bt-notional').value,
+                    fee_pct: document.getElementById('bt-fee').value,
+                }),
+            });
+            const data = await resp.json();
+            if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+            renderBacktest(data);
+        } catch (e) {
+            err.textContent = 'Бэктест не выполнен: ' + e.message;
+            err.classList.remove('d-none');
+        }
+    }
+
+    document.querySelectorAll('#ch-interval button').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('#ch-interval button').forEach((b) => b.classList.remove('active'));
+            btn.classList.add('active');
+            currentInterval = Number(btn.dataset.interval);
+            loadChart();
+        });
+    });
+    document.getElementById('ch-range').addEventListener('change', (e) => {
+        currentRange = e.target.value;
+        loadChart();
+    });
+    document.getElementById('ch-markers').addEventListener('change', loadMarkers);
+    document.getElementById('ch-signals').addEventListener('change', loadSignals);
+    document.getElementById('ch-min-value').addEventListener('change', loadMarkers);
+    document.getElementById('ch-vwap').addEventListener('change', loadChart);
+    function applyAxisMode() {
+        const on = document.getElementById('ch-pct').checked;
+        document.getElementById('chart-axis').classList.toggle('no-pct', !on);
+        document.getElementById('chart-delta-gap').classList.toggle('no-pct', !on);
+        const el = document.getElementById('chart-main');
+        mainChart.applyOptions({width: el.clientWidth});
+        const deltaEl = document.getElementById('chart-delta');
+        deltaChart.applyOptions({width: deltaEl.clientWidth});
+        refreshOverlays();
+    }
+    document.getElementById('ch-pct').addEventListener('change', applyAxisMode);
+    if (narrow) document.getElementById('ch-pct').checked = false;
+    applyAxisMode();
+    document.getElementById('ch-profile').addEventListener('change', () => {
+        if (document.getElementById('ch-profile').checked) loadLevels();
+        else renderLevels(null);
+    });
+    document.getElementById('bt-strategy').addEventListener('change', () => {
+        renderParams();
+        backtestMarkers = [];
+        applyMarkers();
+    });
+    document.getElementById('bt-run').addEventListener('click', runBacktest);
+    document.getElementById('bt-scan-btn').addEventListener('click', runScan);
+    document.getElementById('bt-clear').addEventListener('click', () => {
+        backtestMarkers = [];
+        applyMarkers();
+        document.getElementById('bt-results').classList.add('d-none');
+        document.getElementById('bt-diagnosis').classList.add('d-none');
+        equitySeries.setData([]);
+        applyMarkers();
+    });
+
+    window.addEventListener('resize', () => {
+        [mainChart, deltaChart, equityChart].forEach((c) => {
+            const el = c.chartElement();
+            if (el) c.applyOptions({width: el.clientWidth});
+        });
+        refreshOverlays();
+    });
+
+    renderParams();
+    loadChart();
+})();
+</script>
+{% endblock %}

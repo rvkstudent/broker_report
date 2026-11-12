@@ -5,8 +5,8 @@
 <!-- █████  QUIK connection indicator  █████ -->
 <div class="row mb-2">
     <div class="col">
-        <span id="quikStatus" class="badge {% if quik_connected %}bg-success{% else %}bg-secondary{% endif %}">
-            {% if quik_connected %}● QUIK подключён{% else %}○ QUIK не активен{% endif %}
+        <span id="quikStatus" class="badge {% if quik_connected %}bg-success{% elif prices_source == 'tinkoff' %}bg-info{% else %}bg-secondary{% endif %}">
+            {% if quik_connected %}● QUIK подключён{% elif prices_source == 'tinkoff' %}◐ Цены: T-Invest{% else %}○ QUIK не активен{% endif %}
         </span>
         <span class="text-muted small ms-2" id="quikStatusTime"></span>
     </div>
@@ -678,6 +678,9 @@ async function refreshQuikStatus() {
         if (data.connected) {
             el.className = 'badge bg-success';
             el.innerHTML = '● QUIK подключён';
+        } else if (data.tinkoff) {
+            el.className = 'badge bg-info';
+            el.innerHTML = '◐ Цены: T-Invest';
         } else {
             el.className = 'badge bg-secondary';
             el.innerHTML = '○ QUIK не активен';
