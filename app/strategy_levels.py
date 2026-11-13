@@ -489,8 +489,12 @@ def signal_markers(rows: list[dict]) -> list[dict]:
     markers = []
     for row in rows:
         taken = row.get('taken', True)
+        # Строки журнала хранят момент сигнала в ``signal_ts``.
+        moment = row.get('time', row.get('signal_ts'))
+        if moment is None:
+            continue
         markers.append({
-            'time': row['time'],
+            'time': moment,
             'position': 'belowBar' if taken else 'aboveBar',
             'color': '#1a7f37' if taken else '#adb5bd',
             'shape': 'arrowUp' if taken else 'circle',

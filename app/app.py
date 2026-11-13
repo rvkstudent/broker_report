@@ -1274,11 +1274,15 @@ def api_signals(ticker):
         # Источник истины — журнал: сигнал и его статус фиксируются в момент
         # появления и больше не меняются. Расчёт выше мог добавить новые
         # строки, поэтому читаем журнал после него.
-        logged = signal_journal.rows(
-            ticker,
-            from_ts=from_ns // 1_000_000_000 + 3 * 3600,
-            to_ts=to_ns // 1_000_000_000 + 3 * 3600,
-            limit=2000)
+        try:
+            logged = signal_journal.rows(
+                ticker,
+                from_ts=from_ns // 1_000_000_000 + 3 * 3600,
+                to_ts=to_ns // 1_000_000_000 + 3 * 3600,
+                limit=2000)
+        except Exception:
+            # Сбой журнала не должен лишать график сигналов из расчёта.
+            logged = []
         if logged:
             signals = logged
     return jsonify({

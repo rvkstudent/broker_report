@@ -19,6 +19,7 @@ os.environ.pop('SCREENER_ENABLED', None)
 
 from app import screener  # noqa: E402
 from app import signal_journal  # noqa: E402
+from app import strategy_levels  # noqa: E402
 from app.db import init_db  # noqa: E402
 
 get_connection = screener.get_connection
@@ -562,6 +563,18 @@ class SignalJournalTests(unittest.TestCase):
         self.assertEqual(info['skipped'], 1)
         self.assertEqual(info['last'], 1700014400)
         self.assertEqual(info['kinds'], ['разворот'])
+
+    def test_rows_are_ready_for_chart_markers(self):
+        """Строки журнала отдаются в /api/signals — маркеры строятся без сбоев."""
+        signal_journal.record('SBER', [self.signal(1700010800),
+                                       self.signal(1700014400, taken=False, rr=0.5)])
+        rows = signal_journal.rows(ticker='SBER')
+        for row in rows:
+            self.assertEqual(row['time'], row['signal_ts'])
+        markers = strategy_levels.signal_markers(rows)
+        self.assertEqual([m['time'] for m in markers], [1700010800, 1700014400])
+        self.assertEqual(markers[0]['text'], 'Отскок')
+        self.assertEqual(markers[1]['text'], 'отсеян')
 
 
 if __name__ == '__main__':

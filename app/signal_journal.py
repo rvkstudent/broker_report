@@ -106,6 +106,9 @@ def _row_to_dict(row) -> dict:
     item = dict(row)
     item['taken'] = bool(item.get('taken'))
     item['date'] = item.get('date_label') or ''
+    # ``time`` — то же, что ``signal_ts``: сигналы стратегии (и маркеры графика)
+    # используют это имя ключа. Без него API сигналов падал с KeyError.
+    item['time'] = item.get('signal_ts')
     return item
 
 
