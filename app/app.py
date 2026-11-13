@@ -1147,6 +1147,17 @@ def api_screener():
     rows.sort(key=lambda r: (-r.get('signal_taken', 0),
                              -r.get('signal_count', 0), -r.get('score', 0)))
 
+    # Плоский список сигналов для отдельной таблицы: каждый сигнал со своей
+    # датой и временем, чтобы было видно, когда он появился, и когда позже
+    # был помечен как отсеянный.
+    names = {row['ticker']: row.get('name') or '' for row in rows}
+    try:
+        for inst in screener.universe_snapshot():
+            names.setdefault(inst['ticker'], inst.get('name') or '')
+    except Exception:
+        pass
+    signal_rows = signals_cache.signal_rows(signal_map, names)
+
     return jsonify({
         'window': rows[0]['window'] if rows else window,
         'count': len(rows),
@@ -1154,6 +1165,9 @@ def api_screener():
         'status': screener.collector_status(),
         'signals_at': signals_at,
         'signals_total': sum(r.get('signal_count', 0) for r in rows),
+        'signals': signal_rows[-300:],
+        'signals_count': len(signal_rows),
+        'signals_taken': sum(1 for s in signal_rows if s.get('taken')),
     })
 
 

@@ -219,6 +219,7 @@ def simulate(bars: list[dict], zone_signals: list[dict], params: dict, *,
     skipped_rr = 0
     skipped_times: list[int] = []
     rr_values: list[float] = []
+    rr_by_time: dict[int, float] = {}
     stop_enabled = bool(params.get('use_stop', 1)) if use_stop is None else bool(use_stop)
     if ticker and ticker.upper() in no_stop_tickers():
         stop_enabled = False
@@ -326,6 +327,7 @@ def simulate(bars: list[dict], zone_signals: list[dict], params: dict, *,
             if risk > 0:
                 rr = reward / risk
                 rr_values.append(rr)
+                rr_by_time[item['time']] = round(rr, 2)
                 if rr < params['min_rr']:
                     skipped_rr += 1
                     skipped_times.append(item['time'])
@@ -341,7 +343,7 @@ def simulate(bars: list[dict], zone_signals: list[dict], params: dict, *,
     metrics['avg_rr'] = round(sum(rr_values) / len(rr_values), 2) if rr_values else 0.0
     return {'trades': trades, 'equity': equity, 'metrics': metrics,
             'markers': _markers(trades), 'stop_enabled': stop_enabled,
-            'skipped_times': skipped_times}
+            'skipped_times': skipped_times, 'rr_by_time': rr_by_time}
 
 
 def _atr_series(bars: list[dict], window: int = 14) -> list[float]:
@@ -358,6 +360,12 @@ def _atr_series(bars: list[dict], window: int = 14) -> list[float]:
         window_values = ranges[-window:]
         result.append(sum(window_values) / len(window_values))
     return result
+
+
+def _signal_moment(ns: int) -> tuple[str, str]:
+    """Дата и время сигнала в московском времени — с точностью до минуты."""
+    moment = datetime.fromtimestamp(ns // 1_000_000_000, MSK)
+    return moment.strftime('%d.%m.%Y'), moment.strftime('%H:%M')
 
 
 def _decimals(bars: list[dict]) -> int:
@@ -435,18 +443,25 @@ def analyze_range(ticker: str, from_ns: int, to_ns: int, raw_params: dict | None
                       ticker=ticker)
 
     skipped = set(result.get('skipped_times', []))
-    signal_rows = [{
-        'taken': item['time'] not in skipped,
-        'time': item['time'] // 1_000_000_000 + 3 * 3600,
-        'price': round(item['price'], 4),
-        'kind': item['kind'],
-        'kind_label': item['kind_label'],
-        'zone_price': round(item['zone']['price'], 4),
-        'zone_low': round(item['zone']['low'], 4),
-        'zone_high': round(item['zone']['high'], 4),
-        'delta': item['delta'],
-        'volume_ratio': item['volume_ratio'],
-    } for item in found]
+    rr_by_time = result.get('rr_by_time') or {}
+    signal_rows = []
+    for item in found:
+        date_label, time_label = _signal_moment(item['time'])
+        signal_rows.append({
+            'taken': item['time'] not in skipped,
+            'time': item['time'] // 1_000_000_000 + 3 * 3600,
+            'date': date_label,
+            'time_label': time_label,
+            'rr': rr_by_time.get(item['time']),
+            'price': round(item['price'], 4),
+            'kind': item['kind'],
+            'kind_label': item['kind_label'],
+            'zone_price': round(item['zone']['price'], 4),
+            'zone_low': round(item['zone']['low'], 4),
+            'zone_high': round(item['zone']['high'], 4),
+            'delta': item['delta'],
+            'volume_ratio': item['volume_ratio'],
+        })
 
     return {
         'ticker': ticker.upper(),

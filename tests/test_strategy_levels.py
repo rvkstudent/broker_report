@@ -181,6 +181,23 @@ class RiskRewardTests(unittest.TestCase):
         self.assertEqual(len(result['trades']), 0)
         self.assertEqual(result['metrics']['skipped_rr'], 1)
 
+    def test_rr_recorded_per_signal(self):
+        bars = self._bars()
+        near_resistance = {'price': 100.2, 'low': 100.15, 'high': 100.25,
+                           'side': 'resistance', 'hold_rate': 0.5, 'touches': 3,
+                           'volume_rub': 1e8}
+        signal = {'time': bars[0]['minute_ns'], 'price': 100.0, 'zone': support(),
+                  'kind': 'reversal', 'kind_label': 'разворот'}
+        params = dict(PARAMS, min_rr=1.5, atr_mult=0.0, take_profit_pct=0.1)
+        result = sl.simulate(bars, [signal], params,
+                             zones=[support(), near_resistance], ticker='TEST')
+        rr = result['rr_by_time'][signal['time']]
+        self.assertLess(rr, 1.5)
+
+    def test_signal_moment_is_msk(self):
+        # START = 1_700_000_000 с — 2023-11-15 01:13 по Москве
+        self.assertEqual(sl._signal_moment(START), ('15.11.2023', '01:13'))
+
     def test_trade_taken_with_good_rr(self):
         bars = [bar(i, 100.0, low=99.9, high=100.1) for i in range(5)]
         bars += [bar(i, 100.4, low=100.0, high=100.5) for i in range(5, 12)]

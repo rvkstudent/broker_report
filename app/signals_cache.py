@@ -33,6 +33,16 @@ _started = False
 _start_lock = threading.Lock()
 
 
+def _current_snapshot() -> dict[str, dict]:
+    """Копия прошлого снимка: новый проход дополняет его, а не стирает.
+
+    Иначе в начале каждого пересчёта таблица на секунды пустеет, и сигналы
+    «исчезают», чтобы потом появиться заново.
+    """
+    with _lock:
+        return dict(_data)
+
+
 def _analyze_one(ticker: str, from_ns: int, to_ns: int):
     params = adaptive.params_for(ticker)
     try:
@@ -48,6 +58,21 @@ def _analyze_one(ticker: str, from_ns: int, to_ns: int):
         'skipped': len(signals) - taken,
         'last': signals[-1]['time'] if signals else None,
         'kinds': sorted({s['kind_label'] for s in signals}),
+        # Полные строки сигналов — для отдельной таблицы: у каждого видно
+        # момент появления (дата и время бара) и статус входа.
+        'signals': [{
+            'time': s['time'],
+            'date': s.get('date'),
+            'time_label': s.get('time_label'),
+            'kind': s['kind'],
+            'kind_label': s['kind_label'],
+            'price': s['price'],
+            'zone_price': s['zone_price'],
+            'delta': s['delta'],
+            'volume_ratio': s['volume_ratio'],
+            'taken': bool(s.get('taken', True)),
+            'rr': s.get('rr'),
+        } for s in signals],
     }
 
 
@@ -60,7 +85,7 @@ def _compute(publish=None) -> dict[str, dict]:
     finally:
         conn.close()
 
-    result: dict[str, dict] = {}
+    result: dict[str, dict] = _current_snapshot()
     with ThreadPoolExecutor(max_workers=WORKERS,
                             thread_name_prefix='signals-calc') as pool:
         futures = [pool.submit(_analyze_one, ticker, from_ns, to_ns)
@@ -74,7 +99,9 @@ def _compute(publish=None) -> dict[str, dict]:
             # мере расчёта, а не только после обхода всего универсума.
             if publish is not None:
                 publish(dict(result))
-    return result
+    # Бумаги, выпавшие из универсума, из снимка убираем.
+    allowed = set(tickers)
+    return {ticker: info for ticker, info in result.items() if ticker in allowed}
 
 
 def _worker() -> None:
@@ -114,6 +141,21 @@ def snapshot(force: bool = False) -> tuple[dict[str, dict], float]:
     refresh(force=force)
     with _lock:
         return dict(_data), _updated_at
+
+
+def signal_rows(snapshot_data: dict[str, dict], names: dict[str, str] | None = None) -> list[dict]:
+    """Плоский список сигналов по всем бумагам, по времени появления.
+
+    Из него на странице скринера строится отдельная таблица: у каждого сигнала
+    своя дата и время, поэтому видно, когда он появился, а не только счётчик.
+    """
+    names = names or {}
+    rows = []
+    for ticker, info in (snapshot_data or {}).items():
+        for sig in info.get('signals') or []:
+            rows.append({**sig, 'ticker': ticker, 'name': names.get(ticker, '')})
+    rows.sort(key=lambda item: item['time'])
+    return rows
 
 
 def start_background_refresh(interval: float = 30.0) -> None:

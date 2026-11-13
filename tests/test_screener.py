@@ -510,5 +510,29 @@ class SignalThresholdTests(unittest.TestCase):
         self.assertEqual(screener._classify(metrics), 'neutral')
 
 
+class SignalsCacheRowsTests(unittest.TestCase):
+    """Плоский список сигналов для отдельной таблицы скринера."""
+
+    def test_rows_sorted_by_time_with_names(self):
+        from app import signals_cache
+        snapshot = {
+            'SBER': {'signals': [
+                {'time': 200, 'taken': False, 'date': '13.11.2026', 'time_label': '14:00'},
+                {'time': 100, 'taken': True, 'date': '13.11.2026', 'time_label': '10:05'},
+            ]},
+            'GAZP': {'signals': [{'time': 150, 'taken': True}]},
+            'LKOH': {},
+        }
+        rows = signals_cache.signal_rows(snapshot, {'SBER': 'Сбербанк'})
+        self.assertEqual([r['time'] for r in rows], [100, 150, 200])
+        self.assertEqual([r['ticker'] for r in rows], ['SBER', 'GAZP', 'SBER'])
+        self.assertEqual(rows[0]['name'], 'Сбербанк')
+        self.assertEqual(rows[1]['name'], '')
+
+    def test_empty(self):
+        from app import signals_cache
+        self.assertEqual(signals_cache.signal_rows({}), [])
+
+
 if __name__ == '__main__':
     unittest.main()
