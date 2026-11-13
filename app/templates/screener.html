@@ -154,7 +154,7 @@
     <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
         <span><i class="bi bi-lightning-charge"></i> Сигналы на покупку
             <span class="text-muted fw-normal" style="font-size:.68rem">
-                за сегодня · по моменту появления сигнала
+                за сегодня · по моменту появления, статус фиксируется один раз
             </span>
         </span>
         <div class="d-flex align-items-center gap-3">
@@ -268,13 +268,14 @@
     let sigSortDesc = false;
 
     function signalStatusCell(sig) {
+        const seen = sig.first_seen_at ? ` · зафиксирован ${sig.first_seen_at}` : '';
         if (sig.taken) {
             return '<span class="badge bg-success" '
-                + 'title="Вход принят: цель дальше стопа">принят</span>';
+                + `title="Вход принят в момент появления${seen}">принят</span>`;
         }
         const rr = (sig.rr === null || sig.rr === undefined) ? '' : ` · R:R ${sig.rr}`;
         return `<span class="badge bg-secondary" `
-            + `title="Цель ближе стопа — вход отсеян${rr}">отсеян</span>`;
+            + `title="Цель ближе стопа — вход отсеян${rr}${seen}">отсеян</span>`;
     }
 
     function renderSignals(rows) {

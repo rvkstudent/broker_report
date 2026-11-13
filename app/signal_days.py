@@ -20,7 +20,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 
-from app import adaptive, strategy_levels
+from app import adaptive, signal_journal, strategy_levels
 from app.screener import MSK, get_connection
 
 MAX_DAYS = 10          # сколько последних торговых дней считаем по запросу
@@ -137,6 +137,9 @@ def _analyze_day(ticker: str, day, from_ns: int, to_ns: int, raw_params):
     if day < today and not explicit:
         frozen = _load_frozen(ticker, day.isoformat())
         if frozen is not None:
+            # Замороженный день мог быть посчитан до появления журнала —
+            # дозаписываем его, чтобы история была полной (idempotent).
+            signal_journal.record(ticker, frozen.get('signals') or [])
             with _lock:
                 _mem[key] = (frozen, time.time())
             return frozen
@@ -148,6 +151,9 @@ def _analyze_day(ticker: str, day, from_ns: int, to_ns: int, raw_params):
         data = None
 
     if data:
+        # Ручные параметры — это «что если», такие сигналы в историю не пишем.
+        if not explicit:
+            signal_journal.record(ticker, data.get('signals') or [])
         adaptive.record_trades(ticker, data.get('trades') or [])
         if day < today and not explicit:
             _store_frozen(ticker, day.isoformat(), params, data)

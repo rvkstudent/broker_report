@@ -608,13 +608,14 @@
     };
 
     function signalStatus(row) {
+        const seen = row.first_seen_at ? ` · зафиксирован ${row.first_seen_at}` : '';
         if (row.taken !== false) {
             return '<span class="badge bg-success" '
-                + 'title="Вход принят: цель дальше стопа">принят</span>';
+                + `title="Вход принят в момент появления${seen}">принят</span>`;
         }
         const rr = (row.rr === null || row.rr === undefined) ? '' : ` · R:R ${row.rr}`;
         return `<span class="badge bg-secondary" `
-            + `title="Цель ближе стопа — вход отсеян${rr}">отсеян</span>`;
+            + `title="Цель ближе стопа — вход отсеян${rr}${seen}">отсеян</span>`;
     }
 
     function renderSignalRows(rows) {

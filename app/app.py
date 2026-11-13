@@ -26,7 +26,7 @@ from app.parser_nalog import (parse_nalog_report, get_nalog_summary,
                                get_nalog_group_summary)
 from app.replication import push_async as push_to_cloud
 from app import (screener, chartdata, backtest, volatility, levels,
-                strategy_levels, signals_cache, signal_days, adaptive)
+                strategy_levels, signals_cache, signal_days, signal_journal, adaptive)
 from app import dashboard_prices as tinkoff_prices
 from app.allowed_devices import (is_device_allowed, add_pending_device,
                                   approve_device, reject_device, remove_device,
@@ -1106,13 +1106,36 @@ def api_screener():
         vols = volatility.universe(vol_from, vol_to, interval=1)
     except Exception:
         vols = {}
-    # Сигналы стратегии за сегодня — из фонового кэша (тяжёлый расчёт)
+    # Фоновый пересчёт сигналов: он же пополняет журнал в БД.
     try:
-        signal_map, signals_at = signals_cache.snapshot()
+        _, signals_at = signals_cache.snapshot()
     except Exception:
-        signal_map, signals_at = {}, 0.0
+        signals_at = 0.0
+
+    # Имена — по бумагам универсума скринера. Журнал хранит сигналы и по
+    # инструментам, открытым на графике, но в этой таблице они лишние.
+    names = {}
+    try:
+        names = {inst['ticker']: (inst.get('name') or '')
+                 for inst in screener.universe_snapshot() if inst.get('selected')}
+    except Exception:
+        pass
     for row in rows:
-        info = signal_map.get(row['ticker'], {})
+        names[row['ticker']] = row.get('name') or names.get(row['ticker'], '')
+
+    # Счётчики и таблица сигналов — из журнала, а не из текущего расчёта:
+    # статус (принят / отсеян) и время появления фиксируются один раз.
+    day_today = datetime.now(screener.MSK).strftime('%Y-%m-%d')
+    try:
+        journal_counts = {ticker: info for ticker, info
+                          in signal_journal.counts(day=day_today).items()
+                          if ticker in names}
+        journal_rows = [sig for sig in signal_journal.rows(day=day_today, limit=1000)
+                        if sig['ticker'] in names]
+    except Exception:
+        journal_counts, journal_rows = {}, []
+    for row in rows:
+        info = journal_counts.get(row['ticker'], {})
         row['signal_count'] = int(info.get('count', 0))
         row['signal_taken'] = int(info.get('taken', 0))
         row['signal_skipped'] = int(info.get('skipped', 0))
@@ -1147,16 +1170,9 @@ def api_screener():
     rows.sort(key=lambda r: (-r.get('signal_taken', 0),
                              -r.get('signal_count', 0), -r.get('score', 0)))
 
-    # Плоский список сигналов для отдельной таблицы: каждый сигнал со своей
-    # датой и временем, чтобы было видно, когда он появился, и когда позже
-    # был помечен как отсеянный.
-    names = {row['ticker']: row.get('name') or '' for row in rows}
-    try:
-        for inst in screener.universe_snapshot():
-            names.setdefault(inst['ticker'], inst.get('name') or '')
-    except Exception:
-        pass
-    signal_rows = signals_cache.signal_rows(signal_map, names)
+    # Таблица сигналов: каждый сигнал со своим временем появления и статусом,
+    # зафиксированным в момент записи (журнал append-only).
+    signal_rows = [dict(sig, name=names.get(sig['ticker'], '')) for sig in journal_rows]
 
     return jsonify({
         'window': rows[0]['window'] if rows else window,
@@ -1166,8 +1182,8 @@ def api_screener():
         'signals_at': signals_at,
         'signals_total': sum(r.get('signal_count', 0) for r in rows),
         'signals': signal_rows[-300:],
-        'signals_count': len(signal_rows),
-        'signals_taken': sum(1 for s in signal_rows if s.get('taken')),
+        'signals_count': sum(c.get('count', 0) for c in journal_counts.values()),
+        'signals_taken': sum(c.get('taken', 0) for c in journal_counts.values()),
     })
 
 
@@ -1254,6 +1270,17 @@ def api_signals(ticker):
     manual = request.args.get('manual') == '1' or bool(payload)
     signals, zones = signal_days.signals_for_range(
         ticker, from_ns, to_ns, payload if manual else None)
+    if not manual:
+        # Источник истины — журнал: сигнал и его статус фиксируются в момент
+        # появления и больше не меняются. Расчёт выше мог добавить новые
+        # строки, поэтому читаем журнал после него.
+        logged = signal_journal.rows(
+            ticker,
+            from_ts=from_ns // 1_000_000_000 + 3 * 3600,
+            to_ts=to_ns // 1_000_000_000 + 3 * 3600,
+            limit=2000)
+        if logged:
+            signals = logged
     return jsonify({
         'ticker': ticker.upper(),
         'params': strategy_levels._resolve(payload),
