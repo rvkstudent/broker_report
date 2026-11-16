@@ -28,6 +28,10 @@ DETAIL_METHODS = {
     'bond': 'BondBy', 'future': 'FutureBy', 'share': 'ShareBy',
     'etf': 'EtfBy', 'currency': 'CurrencyBy',
 }
+# Классы MOEX в порядке предпочтения — используются, когда класс бумаги
+# неизвестен (в отчётах брокеров поле class_code часто пустое).
+PREFERRED_CLASSES = ('TQBR', 'TQTF', 'TQIF', 'TQCB', 'TQOB', 'TQTD',
+                     'TQTC', 'TQIR', 'SPBFUT', 'SPBOPT')
 
 _lock = threading.Lock()
 _fetch_lock = threading.Lock()
@@ -79,8 +83,23 @@ def _get_client() -> TinkoffClient | None:
     return _client
 
 
+def _class_preference(ins: dict) -> int:
+    """Порядок предпочтения классов: MOEX-акции, затем фонды, облигации, срочный."""
+    cls = (ins.get('classCode') or '').upper()
+    return PREFERRED_CLASSES.index(cls) if cls in PREFERRED_CLASSES else len(PREFERRED_CLASSES)
+
+
 def _find(client: TinkoffClient, sec_code: str, class_code: str) -> dict | None:
-    """Найти инструмент по коду QUIK (тикер или ISIN)."""
+    """Найти инструмент по коду QUIK (тикер или ISIN).
+
+    Один тикер в T-Invest может встречаться в нескольких классах (например,
+    BELU есть и на MOEX — TQBR, и в классе PTEQ). FindInstrument — это поиск,
+    поэтому порядок выдачи произвольный, а LastPrice по чужой листинговой
+    записи отдаёт цену её последней сделки: она может быть неликвидна и
+    «стоять» месяцами, выдавая 243.40 вместо 316 руб. Поэтому при известном
+    классе берём только точное совпадение, а без класса — предпочитаем
+    биржевые классы MOEX вместо «первой попавшейся» записи.
+    """
     key = (sec_code.upper(), class_code or '')
     if key in _uid_cache:
         return _uid_cache[key]
@@ -89,20 +108,33 @@ def _find(client: TinkoffClient, sec_code: str, class_code: str) -> dict | None:
     try:
         instruments = client.find_instrument(sec_code)
         wanted = sec_code.upper()
-        best = None
+        matches = []
         for ins in instruments:
             ticker = (ins.get('ticker') or '').upper()
             isin = (ins.get('isin') or '').upper()
-            if ticker != wanted and isin != wanted:
-                continue
-            if class_code and ins.get('classCode') == class_code:
-                best = ins
-                break
-            if best is None:
-                best = ins
-        if best is None and instruments:
-            best = instruments[0]
-        found = best
+            if ticker == wanted or isin == wanted:
+                matches.append(ins)
+
+        if class_code:
+            wanted_class = class_code.upper()
+            for ins in matches:
+                if (ins.get('classCode') or '').upper() == wanted_class:
+                    found = ins
+                    break
+            if found is None:
+                log.warning(
+                    'FindInstrument %s: нет инструмента в классе %s — '
+                    'цену из T-Invest не подставляю', sec_code, wanted_class)
+        elif matches:
+            matches.sort(key=_class_preference)
+            best = matches[0]
+            if (best.get('classCode') or '').upper() in PREFERRED_CLASSES:
+                found = best
+            else:
+                log.warning(
+                    'FindInstrument %s: нет записи в классах MOEX (есть только %s) — '
+                    'цену из T-Invest не подставляю',
+                    sec_code, (best.get('classCode') or '—'))
     except TinkoffAPIError as exc:
         log.warning('FindInstrument %s: %s', sec_code, exc)
         found = None

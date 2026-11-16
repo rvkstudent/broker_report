@@ -1774,11 +1774,22 @@ def get_current_prices():
 
 
 def get_my_instruments():
-    """Get distinct securities from the trade table (user's instruments)."""
+    """Get distinct securities from the trade table (user's instruments).
+
+    Класс площадки в отчётах брокеров часто пустой (у BELU, например, пусто),
+    а по одному тикеру T-Invest может отдать чужую листинговую запись. Поэтому
+    дозаполняем class_code из справочника QUIK (instrument).
+    """
     conn = get_connection()
     rows = conn.execute("""
         SELECT DISTINCT security_code AS sec_code, security_name AS sec_name,
-               COALESCE(NULLIF(class_code, ''), '') AS class_code
+               COALESCE(
+                   NULLIF(class_code, ''),
+                   (SELECT i.class_code FROM instrument i
+                     WHERE i.sec_code = trade.security_code AND i.class_code != ''
+                     ORDER BY i.class_code LIMIT 1),
+                   ''
+               ) AS class_code
         FROM trade
         WHERE security_code IS NOT NULL AND security_code != ''
         ORDER BY security_code
