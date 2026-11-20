@@ -134,5 +134,26 @@ class CurrentPortfolioSummaryTests(unittest.TestCase):
         self.assertEqual([r['label'] for r in out['structure']], ['Кэш'])
 
 
+    def test_rolling_ignores_stale_closed_accounts(self):
+        """Старт окна — ближайший снимок по активным счетам, без закрытых."""
+        inv = {'value': 3582996.07, 'as_of': '2026-11-19'}
+        snaps = [
+            {'filename': 'old_2020.pdf', 'snapshot_date': '2020-11-08',
+             'assets': 591605.70, 'cash': 0.0},     # давно закрытый счёт
+            {'filename': 'vtb_2024.xlsx', 'snapshot_date': '2024-12-31',
+             'assets': 2600583.60, 'cash': 0.0},
+            {'filename': 'vtb_2025.xlsx', 'snapshot_date': '2025-12-31',
+             'assets': 3311948.99, 'cash': 0.0},
+        ]
+        flows = [{'date': '2026-03-01', 'amount': 100000.0, 'filename': 'vtb_2025.xlsx'}]
+        patches = self._patched([], [], snaps, [], flows=(flows, 0.0))
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            out = pg.current_portfolio_summary(inv)
+        # Старт 12-мес окна = 2025-12-31 (3.31М), а НЕ 3.31М + 591k закрытого счёта.
+        # Если бы старый счёт прибавлялся, XIRR ушла бы в минус; проверяем, что нет.
+        self.assertIsNotNone(out['rolling_xirr_12m'])
+        self.assertGreater(out['rolling_xirr_12m'], 0)
+
+
 if __name__ == '__main__':
     unittest.main()

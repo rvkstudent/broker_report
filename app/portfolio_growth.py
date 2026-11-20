@@ -726,15 +726,31 @@ def current_portfolio_summary(invested: dict | None = None) -> dict:
     except Exception:  # noqa: BLE001
         external = []
 
+    # Даты снимков: скользящее окно стартуем от РЕАЛЬНОГО снимка, ближайшего к
+    # целевой дате. Нельзя брать _value_asof от произвольной даты: он суммирует
+    # последние снимки всех счетов, включая давно закрытые (старый брокер
+    # 2020-го + счёт 2022-го + текущий), из-за чего старт завышается в разы и
+    # XIRR становится ложно отрицательной.
+    snap_dates = sorted({d for rows in families.values() for d, _ in rows if d <= as_of})
+
     def rolling(months: int):
-        start = as_of_d - timedelta(days=int(months * 30.4375))
-        start_value = _value_asof(families, start.isoformat())
+        if not snap_dates:
+            return None
+        target = as_of_d - timedelta(days=int(months * 30.4375))
+        start_day = min(snap_dates, key=lambda d: abs((date.fromisoformat(d) - target).days))
+        start = date.fromisoformat(start_day)
+        # Стоимость на дату — только счета, актуальные на тот момент
+        # (_value_at отсекает просроченные снимки закрытых брокеров).
+        start_value = _value_at(families, start_day)
+        if not start_value:
+            start_value = sum(a for rows in families.values()
+                              for d, a in rows if d == start_day)
         if not start_value:
             return None
         cash_flows = [(start, -start_value)]
         cash_flows += [(date.fromisoformat(f['date']), -f['amount'])
                        for f in external
-                       if start.isoformat() < (f.get('date') or '') <= as_of]
+                       if start_day < (f.get('date') or '') <= as_of]
         return _xirr(cash_flows, value, as_of)
 
     return {

@@ -182,7 +182,7 @@
                             <div class="fw-bold">{{ '{:,.2f}'.format(pn.cash_value) }} ₽</div>
                         </div>
                         <div class="col-6 col-lg-6">
-                            <div class="text-muted small" title="Money-weighted доходность за последние 12 месяцев">XIRR, 12 мес</div>
+                            <div class="text-muted small" title="Money-weighted доходность от ближайшего отчёта к дате 12 месяцев назад">XIRR, 12 мес</div>
                             <div class="fw-bold {{ 'profit-positive' if pn.rolling_xirr_12m is not none and pn.rolling_xirr_12m >= 0 else 'profit-negative' }}">
                                 {% if pn.rolling_xirr_12m is not none %}{{ '{:+.2f}'.format(pn.rolling_xirr_12m) }}%{% else %}—{% endif %}</div>
                         </div>
