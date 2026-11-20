@@ -18,6 +18,8 @@ os.environ.pop('TINKOFF_TOKEN', None)
 os.environ.pop('SCREENER_ENABLED', None)
 
 from app import screener  # noqa: E402
+from app import signal_journal  # noqa: E402
+from app import strategy_levels  # noqa: E402
 from app.db import init_db  # noqa: E402
 
 get_connection = screener.get_connection
@@ -508,6 +510,71 @@ class SignalThresholdTests(unittest.TestCase):
         metrics = {'delta_ratio': 0.02, 'large_delta_ratio': 0.0, 'activity_ratio': 0.4,
                    'price_change_pct': 0.0, 'large_turnover': 0}
         self.assertEqual(screener._classify(metrics), 'neutral')
+
+
+class SignalJournalTests(unittest.TestCase):
+    """Журнал сигналов: первая запись фиксирует статус навсегда."""
+
+    def setUp(self):
+        conn = signal_journal._conn()
+        conn.execute('DELETE FROM strategy_signal_log')
+        conn.commit()
+        conn.close()
+
+    @staticmethod
+    def signal(ts, *, taken=True, rr=2.0, kind='reversal'):
+        return {'time': ts, 'date': '15.11.2023', 'time_label': '01:13',
+                'kind': kind,
+                'kind_label': 'разворот' if kind == 'reversal' else 'пробой',
+                'zone_price': 100.0, 'zone_low': 99.9, 'zone_high': 100.1,
+                'price': 100.05, 'delta': 0.2, 'volume_ratio': 1.3,
+                'taken': taken, 'rr': rr}
+
+    def test_first_status_wins(self):
+        self.assertEqual(signal_journal.record('SBER', [self.signal(1700010800)]), 1)
+        # Повторный расчёт с другим статусом не переписывает историю.
+        changed = self.signal(1700010800, taken=False, rr=0.4)
+        self.assertEqual(signal_journal.record('SBER', [changed]), 0)
+        rows = signal_journal.rows(ticker='SBER')
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]['taken'])
+        self.assertEqual(rows[0]['rr'], 2.0)
+        self.assertEqual(rows[0]['date'], '15.11.2023')
+        self.assertEqual(rows[0]['day'], '2023-11-15')
+        self.assertTrue(rows[0]['first_seen_at'])
+
+    def test_rows_sorted_and_filtered(self):
+        signal_journal.record('SBER', [self.signal(1700014400),
+                                       self.signal(1700010800)])
+        signal_journal.record('GAZP', [self.signal(1700012600, taken=False,
+                                                   rr=0.5, kind='breakout')])
+        rows = signal_journal.rows(day='2023-11-15')
+        self.assertEqual([r['signal_ts'] for r in rows],
+                         [1700010800, 1700012600, 1700014400])
+        self.assertEqual(len(signal_journal.rows(ticker='GAZP')), 1)
+        self.assertEqual(signal_journal.rows(day='2023-11-14'), [])
+
+    def test_counts(self):
+        signal_journal.record('SBER', [self.signal(1700010800),
+                                       self.signal(1700014400, taken=False, rr=0.5)])
+        info = signal_journal.counts(day='2023-11-15')['SBER']
+        self.assertEqual(info['count'], 2)
+        self.assertEqual(info['taken'], 1)
+        self.assertEqual(info['skipped'], 1)
+        self.assertEqual(info['last'], 1700014400)
+        self.assertEqual(info['kinds'], ['разворот'])
+
+    def test_rows_are_ready_for_chart_markers(self):
+        """Строки журнала отдаются в /api/signals — маркеры строятся без сбоев."""
+        signal_journal.record('SBER', [self.signal(1700010800),
+                                       self.signal(1700014400, taken=False, rr=0.5)])
+        rows = signal_journal.rows(ticker='SBER')
+        for row in rows:
+            self.assertEqual(row['time'], row['signal_ts'])
+        markers = strategy_levels.signal_markers(rows)
+        self.assertEqual([m['time'] for m in markers], [1700010800, 1700014400])
+        self.assertEqual(markers[0]['text'], 'Отскок')
+        self.assertEqual(markers[1]['text'], 'отсеян')
 
 
 if __name__ == '__main__':

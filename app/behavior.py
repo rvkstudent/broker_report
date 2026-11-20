@@ -67,17 +67,36 @@ def accumulate_level_stats(ticker_uid: str, ticker: str, from_ns: int, to_ns: in
     """
     conn = get_connection()
     try:
+        # Уже посчитанные дни не пересчитываем: сегодня и вчера оставляем
+        # «живыми» (могут приходить опоздавшие сделки), остальные — берём из
+        # level_stats. Без этого каждый вызов заново агрегировал 30 дней тиков.
+        first_day = datetime.fromtimestamp(from_ns / 1_000_000_000, MSK).date()
+        last_day = datetime.fromtimestamp(to_ns / 1_000_000_000, MSK).date()
+        today = datetime.now(MSK).date()
+        protect = {today.isoformat(), (today - timedelta(days=1)).isoformat()}
+        existing = {row['day'] for row in conn.execute(
+            'SELECT DISTINCT day FROM level_stats '
+            'WHERE instrument_uid = ? AND day >= ? AND day <= ?',
+            (ticker_uid, first_day.isoformat(), last_day.isoformat())).fetchall()}
+        skip = sorted(existing - protect)
+
+        where = 'instrument_uid = ? AND ts_ns >= ? AND ts_ns < ?'
+        args: list = [large_rub, large_rub, ticker_uid, from_ns, to_ns]
+        if skip:
+            where += ' AND trade_date NOT IN (%s)' % ','.join('?' * len(skip))
+            args.extend(skip)
+
         rows = conn.execute(
-            '''SELECT trade_date, price,
+            f'''SELECT trade_date, price,
                       SUM(CASE WHEN side='buy'  THEN value ELSE 0 END) AS buy_rub,
                       SUM(CASE WHEN side='sell' THEN value ELSE 0 END) AS sell_rub,
                       SUM(CASE WHEN side='buy'  AND value >= ? THEN value ELSE 0 END) AS large_buy,
                       SUM(CASE WHEN side='sell' AND value >= ? THEN value ELSE 0 END) AS large_sell,
                       COUNT(*) AS trades
                FROM market_trade
-               WHERE instrument_uid = ? AND ts_ns >= ? AND ts_ns < ?
+               WHERE {where}
                GROUP BY trade_date, price''',
-            (large_rub, large_rub, ticker_uid, from_ns, to_ns)).fetchall()
+            args).fetchall()
         if not rows:
             return 0
 

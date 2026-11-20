@@ -43,6 +43,9 @@ BASE_URL = 'https://invest-public-api.tinkoff.ru/rest/'
 SHARES_URL = 'tinkoff.public.invest.api.contract.v1.InstrumentsService/Shares'
 CANDLES_URL = 'tinkoff.public.invest.api.contract.v1.MarketDataService/GetCandles'
 TRADES_URL = 'tinkoff.public.invest.api.contract.v1.MarketDataService/GetLastTrades'
+LAST_PRICES_URL = 'tinkoff.public.invest.api.contract.v1.MarketDataService/GetLastPrices'
+FIND_INSTRUMENT_URL = 'tinkoff.public.invest.api.contract.v1.InstrumentsService/FindInstrument'
+INSTRUMENT_BY_URL = 'tinkoff.public.invest.api.contract.v1.InstrumentsService/{method}'
 
 # Сервис котировок: 600 запросов/мин. Берём с запасом — тем же токеном
 # могут пользоваться другие клиенты, а за превышение лимита прилетает 429.
@@ -321,6 +324,30 @@ class TinkoffClient:
                 'exchange': inst.get('exchange') or '',
                 'api_trade_available': bool(inst.get('apiTradeAvailableFlag', True)),
             })
+        return result
+
+    def find_instrument(self, query: str) -> list[dict]:
+        """Поиск инструмента по тикеру/ISIN/FIGI (InstrumentsService)."""
+        data = self._post(FIND_INSTRUMENT_URL, {'query': query})
+        return data.get('instruments') or []
+
+    def instrument_details(self, method: str, uid: str) -> dict:
+        """Полная карточка инструмента (BondBy/FutureBy/ShareBy/EtfBy)."""
+        data = self._post(INSTRUMENT_BY_URL.format(method=method),
+                          {'idType': 'INSTRUMENT_ID_TYPE_UID', 'id': uid})
+        return data.get('instrument') or {}
+
+    def last_prices(self, instrument_ids: list[str]) -> dict[str, float]:
+        """Последние цены по списку uid → ``{uid: price}`` (пачками по 100)."""
+        result: dict[str, float] = {}
+        for index in range(0, len(instrument_ids), 100):
+            chunk = instrument_ids[index:index + 100]
+            data = self._post(LAST_PRICES_URL, {'instrumentId': chunk})
+            for item in data.get('lastPrices') or []:
+                uid = item.get('instrumentUid') or item.get('figi')
+                price = _quotation_to_float(item.get('price'))
+                if uid and price > 0:
+                    result[uid] = price
         return result
 
     def candles(self, instrument_id: str, from_dt: datetime, to_dt: datetime,

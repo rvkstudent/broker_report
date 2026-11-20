@@ -5,8 +5,8 @@
 <!-- █████  QUIK connection indicator  █████ -->
 <div class="row mb-2">
     <div class="col">
-        <span id="quikStatus" class="badge {% if quik_connected %}bg-success{% else %}bg-secondary{% endif %}">
-            {% if quik_connected %}● QUIK подключён{% else %}○ QUIK не активен{% endif %}
+        <span id="quikStatus" class="badge {% if quik_connected %}bg-success{% elif prices_source == 'tinkoff' %}bg-info{% else %}bg-secondary{% endif %}">
+            {% if quik_connected %}● QUIK подключён{% elif prices_source == 'tinkoff' %}◐ Цены: T-Invest{% else %}○ QUIK не активен{% endif %}
         </span>
         <span class="text-muted small ms-2" id="quikStatusTime"></span>
     </div>
@@ -74,7 +74,7 @@
             </div>
             <div class="col-auto form-check d-flex align-items-end mb-1">
                 <input type="checkbox" class="form-check-input me-1" id="showOpenOnly"
-                       onchange="toggleOpenOnly()">
+                       checked onchange="toggleOpenOnly()">
                 <label class="form-check-label small" for="showOpenOnly">Только открытые</label>
             </div>
             <div class="col-auto">
@@ -117,7 +117,8 @@
 <div class="card">
     <div class="card-header bg-white">
         <i class="bi bi-bar-chart-line"></i> Прибыль по трейд-сделкам (покупка → продажа)
-        <small class="text-muted">LIFO, все отчёты</small>
+        <small class="text-muted">LIFO, все отчёты · «За период» — результат по продажам выбранного периода,
+            «По открытым позициям» — текущая переоценка незакрытой позиции, «Всего» — за всю историю</small>
         <button class="btn btn-sm btn-outline-secondary float-end" type="button" data-bs-toggle="collapse" data-bs-target="#profitDetail">
             Детали
         </button>
@@ -126,80 +127,104 @@
         {% if profit %}
         <table class="table table-sm table-hover mb-0" id="profitTable">
             <thead class="table-light">
-                {# Прод. убрано: Куп. и Прод. всегда равны. Чист.приб. убрано —
-                   дублирует результат. Прогноз и Итого P&L сведены в одну
-                   колонку «Финрез»: для закрытой позиции это реализованный
-                   результат, для открытой — он же плюс прогноз.
-                   Комис. больше не красим в красный. #}
+                {# Одна строка на бумагу. Три результата рядом, чтобы не
+                   приходилось складывать в голове: период / открытая / всего. #}
                 <tr>
                     <th>Ценная бумага</th>
                     <th class="text-end">Куп.</th>
-                    <th class="text-end">Вал.приб.</th>
-                    <th class="text-end">Комис.</th>
+                    <th class="text-end">Зафиксир. (за период)</th>
+                    <th class="text-end">Незафиксир.<br><small class="text-muted">переоценка</small></th>
+                    <th class="text-end">Всего</th>
                     <th class="text-end">Тек.цена</th>
-                    <th class="text-end">Финрез</th>
                 </tr>
             </thead>
             <tbody>
             {% for p in profit %}
                 {% set cur_price = price_map.get(p.security_code, 0) %}
-                {# data-net — чистая прибыль нужна скрипту (пересчёт прогноза),
-                   хотя отдельной колонки у неё больше нет. По ней же видно
-                   строку, которая не закрыта. #}
-                <tr data-has-open="{{ 'true' if p.security_code in open_codes else 'false' }}" data-code="{{ p.security_code }}" data-price="{{ cur_price }}" data-is-open="{{ 'true' if p.is_open else 'false' }}" data-net="{{ '{:.2f}'.format(p.net_profit or 0) }}" {% if p.is_open %}class="table-warning"{% endif %}>
+                {% set cur_chg = price_change.get(p.security_code) %}
+                <tr data-code="{{ p.security_code }}"
+                    data-is-open="{{ 'true' if p.open_qty else 'false' }}"
+                    data-has-open="{{ 'true' if p.open_qty else 'false' }}"
+                    data-net="{{ '{:.2f}'.format(p.period_net) }}"
+                    {% if p.open_qty %}class="table-warning"{% endif %}>
                     <td>
                         {{ p.security_name }} <small class="text-muted">({{ p.security_code }})</small>
-                        {% if p.is_open %}<span class="badge bg-warning text-dark ms-1">открытая</span>{% endif %}
+                        {% if p.open_qty %}<span class="badge bg-warning text-dark ms-1">открытая</span>{% endif %}
                     </td>
-                    <td class="text-end">{{ p.buy_qty }}</td>
-                    <td class="text-end {{ 'profit-positive' if p.gross_profit >= 0 else 'profit-negative' }}">
-                        {% if p.is_open %}—{% else %}{{ '{:+,.2f}'.format(p.gross_profit) }}{% endif %}</td>
-                    <td class="text-end">{% if p.is_open %}—{% else %}{{ '{:,.2f}'.format(p.total_fees) }}{% endif %}</td>
-                    <td class="text-end price-cell">
-                        {{ '{:,.4f}'.format(cur_price) if cur_price and cur_price < 10 else '{:,.2f}'.format(cur_price) if cur_price else '—' }}
-                    </td>
-                    {# Финрез: убыток — одно число в скобках, прибыль — без них.
-                       Скобка не должна отрываться от числа (см. .finrez-cell). #}
-                    <td class="text-end fw-bold finrez-cell {{ 'profit-positive bg-profit-positive' if p.total_pl >= 0 else 'profit-negative bg-profit-negative' }}">
-                        {{ p.total_pl | pl_total }}
+                    <td class="text-end">{{ p.qty }}</td>
+                    <td class="text-end period-cell {{ 'profit-positive' if p.period_net >= 0 else 'profit-negative' }}">
+                        {% if p.has_period %}{{ p.period_net | pl_total }}{% else %}—{% endif %}</td>
+                    <td class="text-end open-cell {{ 'profit-positive' if p.open_pl >= 0 else 'profit-negative' }}">
+                        {% if p.open_qty and p.open_known %}{{ p.open_pl | pl_total }}{% else %}—{% endif %}</td>
+                    <td class="text-end fw-bold all-cell {{ 'profit-positive' if p.all_total >= 0 else 'profit-negative' }}">
+                        {{ p.all_total | pl_total }}</td>
+                    <td class="text-end price-cell" style="white-space:nowrap">
+                        <span class="price-val">{{ '{:,.4f}'.format(cur_price) if cur_price and cur_price < 10 else '{:,.2f}'.format(cur_price) if cur_price else '—' }}</span>
+                        {% if p.open_qty and cur_chg is not none %}
+                        <span class="chg-val {{ 'profit-positive' if cur_chg >= 0 else 'profit-negative' }}">{{ '{:+.2f}'.format(cur_chg) }}%</span>
+                        {% endif %}
                     </td>
                 </tr>
             {% endfor %}
             </tbody>
-            <tfoot class="table-light fw-bold" id="profitTfoot">
-                {% set total_gross = profit | sum(attribute='gross_profit') %}
-                {% set total_ftrade = profit | sum(attribute='total_fees') %}
+            <tfoot class="table-light fw-bold" id="profitTfoot" data-repo="{{ repo_total.total or 0 }}">
+                {# Итоги по колонкам: зафиксировано за период | открытые | всего. #}
+                {% set period_qty_sum = profit | sum(attribute='period_qty') %}
+                {% set open_qty_sum = profit | sum(attribute='open_qty') %}
+                {% set period_net_sum = profit | sum(attribute='period_net') %}
+                {% set open_pl_sum = profit | sum(attribute='open_pl') %}
                 {% set repo_cost = repo_total.total %}
-                {% set total_totalpl = profit | sum(attribute='total_pl') %}
-                {# Колонок шесть: ЦБ, Куп., Вал.приб., Комис., Тек.цена, Финрез. #}
-                <tr>
-                    <td>ПРИБЫЛЬ/УБЫТОК ПО ТРЕЙДАМ</td>
-                    <td class="text-end">{{ profit | sum(attribute='buy_qty') }}</td>
-                    <td class="text-end {{ 'profit-positive' if total_gross >= 0 else 'profit-negative' }}">
-                        {{ '{:+,.2f}'.format(total_gross) }}</td>
-                    <td class="text-end">{{ '{:,.2f}'.format(total_ftrade) }}</td>
-                    <td></td>
-                    <td class="text-end finrez-cell {{ 'profit-positive bg-profit-positive' if total_totalpl >= 0 else 'profit-negative bg-profit-negative' }}">
-                        {{ total_totalpl | pl_total }}
+                {# Колонок шесть: ЦБ, Куп., За период, По открытым, Всего, Тек.цена. #}
+                <tr id="tfRealized">
+                    <td>Зафиксированный результат (за период)</td>
+                    <td class="text-end">{{ period_qty_sum }}</td>
+                    <td class="text-end period-cell {{ 'profit-positive' if period_net_sum >= 0 else 'profit-negative' }}">
+                        {{ period_net_sum | pl_total }}
                     </td>
+                    <td></td>
+                    <td></td>
+                    <td></td>
+                </tr>
+                <tr id="tfOpen">
+                    <td>Незафиксированный прибыль/убыток
+                        <i class="bi bi-info-circle text-muted"
+                           title="(Текущая цена − цена покупки) × количество − комиссии по открытым позициям. Это «бумажная» переоценка: пока позиция не продана, результат не зафиксирован."></i>
+                    </td>
+                    <td class="text-end">{{ open_qty_sum }}</td>
+                    <td></td>
+                    <td class="text-end open-cell {{ 'profit-positive' if open_pl_sum >= 0 else 'profit-negative' }}">
+                        {{ open_pl_sum | pl_total }}
+                    </td>
+                    <td></td>
+                    <td></td>
+                </tr>
+                <tr class="table-dark" id="tfAll">
+                    <td>ВСЕГО: зафиксированный + незафиксированный</td>
+                    <td></td>
+                    <td></td>
+                    <td></td>
+                    <td class="text-end all-cell {{ 'profit-positive' if all_total_sum >= 0 else 'profit-negative' }}">
+                        {{ all_total_sum | pl_total }}
+                    </td>
+                    <td></td>
                 </tr>
                 <tr class="text-danger">
                     <td>РАСХОДЫ НА РЕПО</td>
                     <td></td>
                     <td></td>
-                    <td class="text-end">{{ '{:,.2f}'.format(repo_cost) }}</td>
                     <td></td>
-                    <td class="text-end finrez-cell">−{{ '{:,.2f}'.format(repo_cost) }}</td>
+                    <td class="text-end all-cell">−{{ '{:,.2f}'.format(repo_cost) }}</td>
+                    <td></td>
                 </tr>
-                <tr class="table-dark">
+                <tr class="table-dark" id="tfFinal">
                     <td>ИТОГОВЫЙ РЕЗУЛЬТАТ (с учётом РЕПО)</td>
                     <td></td>
                     <td></td>
-                    <td class="text-end">{{ '{:,.2f}'.format(total_ftrade + repo_cost) }}</td>
                     <td></td>
-                    <td class="text-end finrez-cell {{ 'profit-positive' if (total_totalpl - repo_cost) >= 0 else 'profit-negative' }}">
-                        {{ (total_totalpl - repo_cost) | pl_total }}
+                    <td class="text-end all-cell {{ 'profit-positive' if (all_total_sum - repo_cost) >= 0 else 'profit-negative' }}">
+                        {{ (all_total_sum - repo_cost) | pl_total }}
                     </td>
+                    <td></td>
                 </tr>
             </tfoot>
         </table>
@@ -235,6 +260,7 @@
 <div class="card mt-3">
     <div class="card-header bg-white">
         <i class="bi bi-cash-coin"></i> Движение денежных средств за период
+        <small class="text-muted">только движения мимо сделок: дивиденды, купоны, пополнения, вывод</small>
     </div>
     <div class="card-body p-0">
         {% if cash_flow %}
@@ -248,7 +274,16 @@
             <tbody>
             {% for cat, data in cash_flow | dictsort %}
                 <tr>
-                    <td>{{ cat }}</td>
+                    <td>
+                        {{ cat }}
+                        {% if cat == 'Вариационная маржа' %}
+                        <i class="bi bi-info-circle text-muted"
+                           title="Вариационная маржа по фьючерсам (ГО): зачисления минус списания за период. Одна и та же операция, поэтому показываем её свернуто одним итогом, а не отдельными строками «Пополнение» и «Прочее»."></i>
+                        {% elif cat == 'Прочее' %}
+                        <i class="bi bi-info-circle text-muted"
+                           title="Движения, для которых нет правила категоризации.{% if cash_flow_other %} Сейчас это: {% for d in cash_flow_other[:6] %}{{ d.description }} ({{ '{:+,.2f}'.format(d.amount) }}){% if not loop.last %}&#10;{% endif %}{% endfor %}{% endif %}"></i>
+                        {% endif %}
+                    </td>
                     <td class="text-end {{ 'profit-positive' if data.amount >= 0 else 'profit-negative' }}">
                         {{ '{:+,.2f}'.format(data.amount) }}
                     </td>
@@ -268,6 +303,14 @@
                 </tr>
             </tfoot>
         </table>
+        {% if cash_flow_other %}
+        {# «Прочее» — не ошибка расчёта, а движения без правила категоризации.
+           Показываем расшифровку, иначе строка читается как unexplained минус. #}
+        <div class="px-3 py-2 small text-muted border-top">
+            <b>Прочее</b> — движения, которым не назначена категория (служебные и технические операции).
+            Состав: {% for d in cash_flow_other[:5] %}{{ d.description }} <span class="{{ 'profit-positive' if d.amount >= 0 else 'profit-negative' }}">{{ '{:+,.2f}'.format(d.amount) }}</span>{% if not loop.last %}; {% endif %}{% endfor %}{% if cash_flow_other | length > 5 %} и ещё {{ cash_flow_other | length - 5 }}{% endif %}.
+        </div>
+        {% endif %}
         {% else %}
         <div class="p-3 text-muted text-center">Нет данных за выбранный период.</div>
         {% endif %}
@@ -290,7 +333,9 @@
                                 <th class="text-end">Стоимость</th>
                                 <th class="text-end">Комиссия</th>
                                 <th class="text-end">Тек. цена</th>
-                                <th class="text-end">Прогноз P&amp;L</th>
+                                <th class="text-end">Незафикс. прибыль/убыток
+                                    <i class="bi bi-info-circle text-muted" title="Текущая переоценка открытой позиции: (текущая цена − цена покупки) × количество − комиссия"></i>
+                                </th>
                                 <th class="text-end">%</th>
                             </tr>
                         </thead>
@@ -300,24 +345,28 @@
                             {% set group_list = group | list %}
                             {% set sub_qty = group_list | sum(attribute='qty') %}
                             {% set sub_cost = group_list | sum(attribute='total_cost') %}
-                            {% set sub_gross = namespace(val=0) %}
-                            {% set sub_fees = namespace(val=0) %}
+                            {% set sub = namespace(gross=0, fees=0, cost=0, priced=0) %}
                             {% for o in group_list %}
                                 {% set cur = o.get('current_price', 0) %}
-                                {% set sub_gross.val = sub_gross.val + (cur - o.buy_price) * o.qty %}
-                                {% set sub_fees.val = sub_fees.val + o.get('fees', 0) %}
+                                {% if cur and cur > 0 %}
+                                    {% set sub.gross = sub.gross + (cur - o.buy_price) * o.qty %}
+                                    {% set sub.fees = sub.fees + o.get('fees', 0) %}
+                                    {% set sub.cost = sub.cost + o.total_cost %}
+                                    {% set sub.priced = sub.priced + 1 %}
+                                {% endif %}
                             {% endfor %}
-                            {% set sub_net = sub_gross.val - sub_fees.val %}
-                            {% set sub_pct = (sub_net / sub_cost * 100) if sub_cost > 0 else 0 %}
+                            {% set sub_net = sub.gross - sub.fees %}
+                            {% set sub_pct = (sub_net / sub.cost * 100) if sub.cost > 0 else 0 %}
                             {# ── Individual lots for this instrument ── #}
                             {% for o in group_list %}
                                 {% set cur = o.get('current_price', 0) %}
+                                {% set has_price = cur and cur > 0 %}
                                 {% set buy_fee = o.get('fees', 0) %}
                                 {% set sell_fee = 0 %}
                                 {% set gross_pl = (cur - o.buy_price) * o.qty %}
                                 {% set net_pl = gross_pl - buy_fee %}
                                 {% set pl_pct = (net_pl / o.total_cost * 100) if o.total_cost > 0 else 0 %}
-                                <tr class="{{ 'bg-profit-pos' if net_pl >= 0 else 'bg-profit-neg' }}"
+                                <tr class="{{ ('bg-profit-pos' if net_pl >= 0 else 'bg-profit-neg') if has_price else '' }}"
                                     data-code="{{ o.security_code }}"
                                     data-qty="{{ o.qty }}"
                                     data-buy-price="{{ o.buy_price }}"
@@ -328,13 +377,21 @@
                                     <td class="text-end">{{ '{:,.2f}'.format(o.buy_price) }}</td>
                                     <td class="text-end">{{ '{:,.2f}'.format(o.total_cost) }}</td>
                                     <td class="text-end text-danger">{{ '{:,.2f}'.format(o.get('fees', 0)) }}</td>
-                                    <td class="text-end fw-bold">{{ '{:,.4f}'.format(cur) if cur < 10 else '{:,.2f}'.format(cur) }}</td>
-                                    <td class="text-end {{ 'profit-positive' if net_pl >= 0 else 'profit-negative' }}">
-                                        <span class="pl-cell">{% if net_pl >= 0 %}<span class="arrow-up">&#9650;</span>{% else %}<span class="arrow-down">&#9660;</span>{% endif %}
-                                        {{ '{:+,.2f}'.format(net_pl) }}</span>
+                                    {% set cur_chg = price_change.get(o.security_code) %}
+                                    <td class="text-end fw-bold" style="white-space:nowrap">
+                                        {% if has_price %}
+                                        <span class="price-val">{{ '{:,.4f}'.format(cur) if cur < 10 else '{:,.2f}'.format(cur) }}</span>
+                                        {% if cur_chg is not none %}
+                                        <span class="chg-val {{ 'profit-positive' if cur_chg >= 0 else 'profit-negative' }}">{{ '{:+.2f}'.format(cur_chg) }}%</span>
+                                        {% endif %}
+                                        {% else %}—{% endif %}
                                     </td>
                                     <td class="text-end {{ 'profit-positive' if net_pl >= 0 else 'profit-negative' }}">
-                                        {{ '{:+,.2f}'.format(pl_pct) }}%
+                                        {% if has_price %}<span class="pl-cell">{% if net_pl >= 0 %}<span class="arrow-up">&#9650;</span>{% else %}<span class="arrow-down">&#9660;</span>{% endif %}
+                                        {{ '{:+,.2f}'.format(net_pl) }}</span>{% else %}—{% endif %}
+                                    </td>
+                                    <td class="text-end {{ 'profit-positive' if net_pl >= 0 else 'profit-negative' }}">
+                                        {% if has_price %}{{ '{:+,.2f}'.format(pl_pct) }}%{% else %}—{% endif %}
                                     </td>
                                     </tr>
                             {% endfor %}
@@ -345,13 +402,14 @@
                                 <td></td>
                                 <td></td>
                                 <td class="text-end">{{ '{:,.2f}'.format(sub_cost) }}</td>
-                                <td class="text-end text-danger">{{ '{:,.2f}'.format(sub_fees.val) }}</td>
+                                <td class="text-end text-danger">{{ '{:,.2f}'.format(sub.fees) }}</td>
                                 <td></td>
                                 <td class="text-end {{ 'profit-positive' if sub_net >= 0 else 'profit-negative' }}">
-                                    {{ '{:+,.2f}'.format(sub_net) }}
+                                    {% if sub.priced %}{{ '{:+,.2f}'.format(sub_net) }}{% else %}—{% endif %}
                                 </td>
                                 <td class="text-end {{ 'profit-positive' if sub_net >= 0 else 'profit-negative' }}">
-                                    {{ '{:+,.2f}'.format(sub_pct) }}%
+                                    {% if sub.priced %}{{ '{:+,.2f}'.format(sub_pct) }}%{% else %}—{% endif %}
+                                </td>
                                 </td>
                             </tr>
                         {% endfor %}
@@ -359,22 +417,24 @@
                         <tfoot class="table-light fw-bold">
                             {% set total_qty = open_trades | sum(attribute='qty') %}
                             {% set total_cost = open_trades | sum(attribute='total_cost') %}
-                            {% set total_gross = namespace(val=0) %}
-                            {% set total_fees = namespace(val=0) %}
+                            {% set total = namespace(gross=0, fees=0, cost=0) %}
                             {% for o in open_trades %}
                                 {% set cur = o.get('current_price', 0) %}
-                                {% set total_gross.val = total_gross.val + (cur - o.buy_price) * o.qty %}
-                                {% set total_fees.val = total_fees.val + o.get('fees', 0) %}
+                                {% if cur and cur > 0 %}
+                                    {% set total.gross = total.gross + (cur - o.buy_price) * o.qty %}
+                                    {% set total.fees = total.fees + o.get('fees', 0) %}
+                                    {% set total.cost = total.cost + o.total_cost %}
+                                {% endif %}
                             {% endfor %}
-                            {% set total_net = total_gross.val - total_fees.val %}
-                            {% set total_pct = (total_net / total_cost * 100) if total_cost > 0 else 0 %}
+                            {% set total_net = total.gross - total.fees %}
+                            {% set total_pct = (total_net / total.cost * 100) if total.cost > 0 else 0 %}
                             <tr class="table-dark">
-                                <td>ИТОГО ПОРТФЕЛЬ</td>
+                                <td>ИТОГО (незафиксированный)</td>
                                 <td class="text-end">{{ total_qty }}</td>
                                 <td></td>
                                 <td></td>
                                 <td class="text-end">{{ '{:,.2f}'.format(total_cost) }}</td>
-                                <td class="text-end text-danger">{{ '{:,.2f}'.format(total_fees.val) }}</td>
+                                <td class="text-end text-danger">{{ '{:,.2f}'.format(total.fees) }}</td>
                                 <td></td>
                                 <td class="text-end {{ 'profit-positive' if total_net >= 0 else 'profit-negative' }}">
                                     {{ '{:+,.2f}'.format(total_net) }}
@@ -394,9 +454,12 @@
 
 <!-- █████  Instrument summary (open)  █████ -->
 <div class="row mt-3">
-    <div class="col-md-6">
+    <div class="col-12">
         <div class="card h-100">
-            <div class="card-header bg-white"><i class="bi bi-pie-chart"></i> Сводная по открытым позициям</div>
+            <div class="card-header bg-white">
+                <i class="bi bi-pie-chart"></i> Сводная по открытым позициям
+                <small class="text-muted">таргет можно ввести вручную — он сохраняется</small>
+            </div>
             <div class="card-body p-0">
                 {% if instruments %}
                 <div class="table-responsive">
@@ -407,15 +470,43 @@
                                 <th class="text-end">Кол-во</th>
                                 <th class="text-end">Ср. цена</th>
                                 <th class="text-end">Стоимость</th>
+                                <th class="text-end">Рын. стоимость
+                                    <i class="bi bi-info-circle text-muted" title="Количество × (текущая цена + НКД по облигациям)"></i>
+                                </th>
+                                <th class="text-end">Если закрыть по цене покупки</th>
+                                <th class="text-end">Если закрыть по номиналу
+                                    <i class="bi bi-info-circle text-muted" title="Для облигаций — по номиналу, для остальных бумаг — по средней цене покупки"></i>
+                                </th>
+                                <th class="text-end" style="min-width:110px">Таргет, ₽</th>
+                                <th class="text-end">Если закрыть по таргету</th>
                             </tr>
                         </thead>
-                        <tbody>
+                        <tbody id="instrBody">
                         {% for i in instruments %}
-                            <tr>
+                            <tr data-code="{{ i.security_code }}"
+                                data-qty="{{ i.qty }}"
+                                data-cost="{{ '{:.2f}'.format(i.total_cost) }}"
+                                data-fees="{{ '{:.2f}'.format(i.buy_fees) }}">
                                 <td><small>{{ i.security_name }} ({{ i.security_code }})</small></td>
                                 <td class="text-end">{{ i.qty }}</td>
                                 <td class="text-end">{{ '{:,.2f}'.format(i.avg_price) }}</td>
                                 <td class="text-end">{{ '{:,.2f}'.format(i.total_cost) }}</td>
+                                <td class="text-end">
+                                    {% if i.market_value is not none %}{{ '{:,.2f}'.format(i.market_value) }}{% else %}—{% endif %}</td>
+                                <td class="text-end {{ 'profit-positive' if i.close_at_cost >= 0 else 'profit-negative' }}">
+                                    {{ i.close_at_cost | pl_total }}</td>
+                                <td class="text-end {{ 'profit-positive' if i.close_at_nominal is not none and i.close_at_nominal >= 0 else 'profit-negative' }}"
+                                    {% if i.nominal_price %}title="Номинал {{ '{:,.2f}'.format(i.nominal_price) }} ₽ за бумагу"{% else %}title="Не облигация — как по средней цене"{% endif %}>
+                                    {{ i.close_at_nominal | pl_total }}</td>
+                                <td class="text-end">
+                                    <input type="number" step="any" min="0" class="form-control form-control-sm text-end target-input"
+                                           style="font-size:12px;padding:1px 4px"
+                                           data-code="{{ i.security_code }}"
+                                           value="{{ '{:.4f}'.format(i.target_price).rstrip('0').rstrip('.') if i.target_price else '' }}"
+                                           placeholder="—">
+                                </td>
+                                <td class="text-end target-cell {{ 'profit-positive' if i.close_at_target is not none and i.close_at_target >= 0 else 'profit-negative' }}">
+                                    {% if i.close_at_target is not none %}{{ i.close_at_target | pl_total }}{% else %}—{% endif %}</td>
                             </tr>
                         {% endfor %}
                         </tbody>
@@ -425,6 +516,34 @@
                                 <td class="text-end">{{ instruments | sum(attribute='qty') }}</td>
                                 <td></td>
                                 <td class="text-end">{{ '{:,.2f}'.format(instruments | sum(attribute='total_cost')) }}</td>
+                                <td class="text-end">{{ '{:,.2f}'.format(market_value_sum) }}</td>
+                                <td class="text-end {{ 'profit-positive' if close_cost_sum >= 0 else 'profit-negative' }}">
+                                    {{ close_cost_sum | pl_total }}</td>
+                                <td class="text-end {{ 'profit-positive' if close_nominal_sum >= 0 else 'profit-negative' }}">
+                                    {{ close_nominal_sum | pl_total }}</td>
+                                <td></td>
+                                <td class="text-end target-cell {{ 'profit-positive' if close_target_sum >= 0 else 'profit-negative' }}"
+                                    id="targetTotal">
+                                    {{ close_target_sum | pl_total }}</td>
+                            </tr>
+                            {# Стоимость: цена покупки / текущая оценка / таргеты #}
+                            <tr>
+                                <td colspan="3" class="text-muted">Стоимость по цене покупки <small>(вложено в открытые позиции)</small></td>
+                                <td class="text-end">{{ '{:,.2f}'.format(instruments | sum(attribute='total_cost')) }}</td>
+                                <td></td><td></td><td></td><td></td><td></td>
+                            </tr>
+                            <tr>
+                                <td colspan="3" class="text-muted">Стоимость по текущим ценам <small>(с НКД)</small></td>
+                                <td></td>
+                                <td class="text-end fw-bold">{{ '{:,.2f}'.format(market_value_sum) }}</td>
+                                <td></td><td></td><td></td><td></td>
+                            </tr>
+                            <tr>
+                                <td colspan="3" class="text-muted">Стоимость по таргетам <small>(только бумаги с заданным таргетом)</small></td>
+                                <td></td><td></td><td></td><td></td><td></td>
+                                <td class="text-end" id="targetValueTotal"
+                                    title="Σ (кол-во × таргет) по бумагам с заданным таргетом">
+                                    {{ '{:,.2f}'.format(target_value_sum) if target_value_sum else '—' }}</td>
                             </tr>
                         </tfoot>
                     </table>
@@ -627,19 +746,16 @@ function toggleOpenOnly() {
     // Итоги: пересчитать по видимым строкам или показать оригинал
     if (checked) {
         tfoot.style.display = 'none';
-        // Пересчитать по видимым строкам
-        // Колонок шесть: 2 — Куп., 3 — Вал.приб., 4 — Комис.,
-        // 5 — Тек.цена, 6 — Финрез. Чистая прибыль отдельной колонки
-        // не имеет и лежит в data-net на строке.
-        let buyQty = 0, gross = 0, fees = 0, totalPl = 0;
+        // Колонки: 2 — Куп., 3 — За период, 4 — По открытым, 5 — Всего, 6 — Тек.цена.
+        let buyQty = 0, period = 0, open = 0, all = 0;
         tbody.querySelectorAll('tr').forEach(tr => {
             if (tr.style.display === 'none') return;
             const cells = tr.querySelectorAll('td');
             if (cells.length < 6) return;
             buyQty += parseInt(parseNum(cells[1]?.textContent));
-            gross += parseNum(cells[2]?.textContent);
-            fees += parseNum(cells[3]?.textContent);
-            totalPl += parseNum(cells[5]?.textContent);
+            period += parseNum(cells[2]?.textContent);
+            open += parseNum(cells[3]?.textContent);
+            all += parseNum(cells[4]?.textContent);
         });
         let el = document.getElementById('profitFilteredTotal');
         if (!el) {
@@ -648,10 +764,11 @@ function toggleOpenOnly() {
             el.className = 'p-2 small text-muted border-top text-center';
             tfoot.parentElement.after(el);
         }
-        el.innerHTML = `Показаны только открытые позиции: ` +
+        el.innerHTML = `Показаны только позиции с открытой частью: ` +
             `${buyQty.toLocaleString()} шт, ` +
-            `финрез <b>${fmtPlTotal(totalPl)}</b>` +
-            ` (вал.${fmtPlTotal(gross)}, ком.${fees.toFixed(2)})`;
+            `зафикс. <b>${fmtPlTotal(period)}</b>, ` +
+            `открытая <b>${fmtPlTotal(open)}</b>, ` +
+            `всего <b>${fmtPlTotal(all)}</b>`;
         el.style.display = '';
     } else {
         tfoot.style.display = '';
@@ -669,6 +786,15 @@ function fmtPrice(p) {
     return p.toFixed(2);
 }
 
+// Изменение цены к предыдущему дню (в процентах, цветом) — в одну строку с ценой
+function fmtChange(prevClose, price) {
+    if (!prevClose || !price) return '';
+    const pct = (price / prevClose - 1) * 100;
+    const cls = pct >= 0 ? 'profit-positive' : 'profit-negative';
+    const sign = pct >= 0 ? '+' : '';
+    return '<span class="chg-val ' + cls + '">' + sign + pct.toFixed(2) + '%</span>';
+}
+
 // Обновление индикатора QUIK
 async function refreshQuikStatus() {
     try {
@@ -678,6 +804,9 @@ async function refreshQuikStatus() {
         if (data.connected) {
             el.className = 'badge bg-success';
             el.innerHTML = '● QUIK подключён';
+        } else if (data.tinkoff) {
+            el.className = 'badge bg-info';
+            el.innerHTML = '◐ Цены: T-Invest';
         } else {
             el.className = 'badge bg-secondary';
             el.innerHTML = '○ QUIK не активен';
@@ -800,7 +929,8 @@ async function refreshForecast() {
         let tb = document.querySelector('#profitTable tbody');
         if (!tb) return;
 
-        let totalFinrez = 0;
+        let openTotal = 0;
+        let allSum = 0;
         for (let tr of tb.querySelectorAll('tr[data-code]')) {
             let code = tr.dataset.code;
             let info = data[code];
@@ -808,38 +938,51 @@ async function refreshForecast() {
 
             let isOpen = tr.dataset.isOpen === 'true';
 
-            // Колонок шесть: 5 — Тек.цена, 6 — Финрез
-            let priceCell = tr.querySelector('td:nth-child(5)');
-            let finrezCell = tr.querySelector('td:nth-child(6)');
-            if (!finrezCell || !priceCell) continue;
+            // Колонки: 3 — За период, 4 — По открытым, 5 — Всего, 6 — Тек.цена
+            let priceCell = tr.querySelector('td:nth-child(6)');
+            let openCell = tr.querySelector('td:nth-child(4)');
+            let allCell = tr.querySelector('td:nth-child(5)');
+            if (!priceCell || !openCell || !allCell) continue;
 
             let cur = info.current_price || 0;
 
-            // Текущая цена (для всех строк — открытых и закрытых)
-            priceCell.textContent = cur ? (cur < 10 ? cur.toFixed(4) : cur.toFixed(2)) : '—';
+            // Текущая цена. Изменение к предыдущему дню показываем только у
+            // позиции, которая ещё открыта: у закрытой цена справочная.
+            priceCell.innerHTML = (cur ? fmtPrice(cur) : '—') +
+                (isOpen ? fmtChange(info.prev_close, cur) : '');
             priceCell.className = 'text-end price-cell';
 
-            // Чистая прибыль колонки больше не имеет — берём из data-net.
-            // У открытой позиции финрез = реализованное + прогноз.
-            let net = parseNum(tr.dataset.net);
-            let tVal = isOpen ? net + (info.forecast || 0) : net;
+            // Открытая — текущая переоценка незакрытой позиции (сервер
+            // считает её по лотам, присланным в /api/forecast).
+            const openVal = info.forecast || 0;
+            openCell.textContent = fmtPlTotal(openVal);
+            openCell.className = 'text-end open-cell ' +
+                (openVal >= 0 ? 'profit-positive' : 'profit-negative');
+            openTotal += openVal;
 
-            finrezCell.textContent = fmtPlTotal(tVal);
-            finrezCell.className = 'text-end fw-bold finrez-cell ' +
-                (tVal >= 0 ? 'profit-positive bg-profit-positive' : 'profit-negative bg-profit-negative');
-
-            totalFinrez += tVal;
+            // Всего — весь реализованный результат за историю + переоценка.
+            const allVal = (info.realized_all || 0) + openVal;
+            allCell.textContent = fmtPlTotal(allVal);
+            allCell.className = 'text-end fw-bold all-cell ' +
+                (allVal >= 0 ? 'profit-positive' : 'profit-negative');
+            allSum += allVal;
         }
 
-        // Обновить итоговую строку (tfoot)
         let tfoot = document.querySelector('#profitTable tfoot');
         if (tfoot) {
-            let tc = tfoot.querySelector('td:nth-child(6)');
-            if (tc) {
-                tc.textContent = fmtPlTotal(totalFinrez);
-                tc.className = 'text-end finrez-cell ' +
-                    (totalFinrez >= 0 ? 'profit-positive bg-profit-positive' : 'profit-negative bg-profit-negative');
-            }
+            const repo = parseFloat(tfoot.dataset.repo) || 0;
+            const setCell = (rowId, column, value, extraClass) => {
+                const row = document.getElementById(rowId);
+                if (!row) return;
+                const cell = row.querySelector('td:nth-child(' + column + ')');
+                if (!cell) return;
+                cell.textContent = fmtPlTotal(value);
+                cell.className = 'text-end ' + (extraClass || '') + ' ' +
+                    (value >= 0 ? 'profit-positive' : 'profit-negative');
+            };
+            setCell('tfOpen', 4, openTotal, 'open-cell');
+            setCell('tfAll', 5, allSum, 'all-cell');
+            setCell('tfFinal', 5, allSum - repo, 'all-cell');
         }
 
         let upd = document.getElementById('forecastUpdated');
@@ -853,7 +996,7 @@ async function refreshOpenTrades() {
     try {
         let prices = await getPrices();
         let pmap = {};
-        for (let p of prices) pmap[p.sec_code] = p.price;
+        for (let p of prices) pmap[p.sec_code] = p;
 
         let tb = document.querySelector('#openTradesTable tbody');
         if (!tb) return;
@@ -863,11 +1006,13 @@ async function refreshOpenTrades() {
             let qty = parseFloat(row.dataset.qty) || 0;
             let buyPrice = parseFloat(row.dataset.buyPrice) || 0;
             let totalCost = parseFloat(row.dataset.totalCost) || 0;
-            let curPrice = pmap[code];
-            if (curPrice == null) continue;
+            let quote = pmap[code];
+            if (!quote) continue;
+            let curPrice = quote.price;
+            if (!(curPrice > 0)) continue;   // цены нет — не пересчитываем убыток «-100%»
 
             // Update current price cell (col 6 — колонки: ЦБ, Кол-во, Дата, Цена, Стоимость, Комиссия, Тек.цена, Прогноз P&L, %)
-            row.cells[6].innerHTML = fmtPrice(curPrice);
+            row.cells[6].innerHTML = fmtPrice(curPrice) + fmtChange(quote.prev_close, curPrice);
             row.cells[6].className = 'text-end fw-bold';
 
             // Recalc P&L
@@ -896,11 +1041,15 @@ async function refreshOpenTrades() {
         for (let row of tb.rows) {
             let code = row.dataset.code;
             if (!code) continue;
+            // Переоценку считаем только по лотам с известной ценой: иначе
+            // «нулевая» цена даёт ложный убыток −100%.
+            let quote = pmap[code];
+            if (!quote || !(quote.price > 0)) continue;
             if (!groups[code]) groups[code] = [];
             let qty = parseFloat(row.dataset.qty) || 0;
             let buyPrice = parseFloat(row.dataset.buyPrice) || 0;
             let totalCost = parseFloat(row.dataset.totalCost) || 0;
-            let curPrice = pmap[code] || 0;
+            let curPrice = quote.price;
             let buyFee = totalCost * TRADE_FEE_RATE;
             let sellFee = curPrice * qty * TRADE_FEE_RATE;
             let grossPl = (curPrice - buyPrice) * qty;
@@ -964,6 +1113,80 @@ async function refreshOpenTrades() {
         }
     } catch(e) {}
 }
+
+// ── Таргеты по открытым позициям ────────────────────────────
+// Целевая цена вводится вручную и сохраняется в price_target; результат
+// «если закрыть по таргету» считается на клиенте и при загрузке страницы
+// приходит с сервера (чтобы не ждать JS).
+function recalcTargetRow(tr) {
+    const input = tr.querySelector('.target-input');
+    const cell = tr.querySelector('.target-cell');
+    if (!input || !cell) return;
+    const target = parseFloat(input.value);
+    const qty = parseFloat(tr.dataset.qty) || 0;
+    const cost = parseFloat(tr.dataset.cost) || 0;
+    const fees = parseFloat(tr.dataset.fees) || 0;
+    if (!(target > 0)) {
+        cell.textContent = '—';
+        cell.className = 'text-end target-cell';
+        return;
+    }
+    const value = qty * target;
+    const pl = value - cost - fees - value * TRADE_FEE_RATE;
+    cell.textContent = fmtPlTotal(pl);
+    cell.className = 'text-end target-cell ' + (pl >= 0 ? 'profit-positive' : 'profit-negative');
+}
+
+function recalcTargetTotal() {
+    const body = document.getElementById('instrBody');
+    const total = document.getElementById('targetTotal');
+    const valueTotal = document.getElementById('targetValueTotal');
+    if (!body) return;
+    let sum = 0;
+    let valueSum = 0;
+    for (const tr of body.rows) {
+        const input = tr.querySelector('.target-input');
+        const cell = tr.querySelector('.target-cell');
+        if (!input || !cell) continue;
+        const target = parseFloat(input.value);
+        if (target > 0) {
+            valueSum += (parseFloat(tr.dataset.qty) || 0) * target;
+        }
+        if (cell.textContent.trim() !== '—') sum += parseNum(cell.textContent);
+    }
+    if (total) {
+        total.textContent = fmtPlTotal(sum);
+        total.className = 'text-end target-cell ' + (sum >= 0 ? 'profit-positive' : 'profit-negative');
+    }
+    if (valueTotal) {
+        valueTotal.textContent = valueSum
+            ? valueSum.toLocaleString('ru', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+            : '—';
+    }
+}
+
+const _targetTimers = {};
+function saveTarget(code, value) {
+    fetch('/api/target', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sec_code: code, price: parseFloat(value) || 0 })
+    }).catch(function () {});
+}
+
+(function bindTargets() {
+    const body = document.getElementById('instrBody');
+    if (!body) return;
+    body.addEventListener('input', function (e) {
+        const input = e.target.closest ? e.target.closest('.target-input') : null;
+        if (!input) return;
+        recalcTargetRow(input.closest('tr'));
+        recalcTargetTotal();
+        const code = input.dataset.code;
+        clearTimeout(_targetTimers[code]);
+        _targetTimers[code] = setTimeout(function () { saveTarget(code, input.value); }, 600);
+    });
+})();
 
 // Запуск
 toggleOpenOnly();  // применить фильтр "только открытые" при загрузке

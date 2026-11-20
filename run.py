@@ -64,6 +64,17 @@ if __name__ == '__main__':
     else:
         print('  Скринер: выключен (нет TINKOFF_TOKEN)')
 
+    # Сигналы стратегии считаем постоянно в фоне, а не при открытии страницы.
+    from app.signals_cache import start_background_refresh
+    start_background_refresh()
+    print('  Сигналы: фоновый пересчёт запущен')
+
+    # Индивидуальные параметры на инструмент + донастройка после сделок.
+    from app import adaptive
+    adaptive.start_background_adaptation()
+    adaptive.seed_universe()
+    print('  Адаптивная стратегия: донастройка параметров запущена')
+
     # Настройки хоста/порта из переменных окружения (для Docker)
     flask_host = os.environ.get('FLASK_HOST', '127.0.0.1')
     flask_port = int(os.environ.get('FLASK_PORT', 5000))

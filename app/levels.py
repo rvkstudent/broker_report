@@ -40,11 +40,18 @@ class LevelsError(ValueError):
     """Некорректный запрос уровней."""
 
 
-def _price_bounds(conn, ticker: str, from_ns: int, to_ns: int) -> tuple[float, float, int] | None:
+def _price_bounds(conn, ticker: str, from_ns: int, to_ns: int,
+                  uid: str = '') -> tuple[float, float, int] | None:
+    # Сделки фильтруем по instrument_uid (индекс idx_market_trade_uid_ts).
+    # По ticker индекса нет — это был полный скан таблицы на 5 млн строк.
+    if uid:
+        trade_where, trade_args = 'instrument_uid = ?', (uid, from_ns, to_ns)
+    else:
+        trade_where, trade_args = 'ticker = ? COLLATE NOCASE', (ticker, from_ns, to_ns)
     row = conn.execute(
-        '''SELECT MIN(price) AS lo, MAX(price) AS hi, COUNT(*) AS n FROM market_trade
-           WHERE ticker = ? COLLATE NOCASE AND ts_ns >= ? AND ts_ns < ?''',
-        (ticker, from_ns, to_ns)).fetchone()
+        f'''SELECT MIN(price) AS lo, MAX(price) AS hi, COUNT(*) AS n FROM market_trade
+           WHERE {trade_where} AND ts_ns >= ? AND ts_ns < ?''',
+        trade_args).fetchone()
     if row and row['n']:
         return float(row['lo']), float(row['hi']), int(row['n'])
     row = conn.execute(
@@ -58,9 +65,12 @@ def _price_bounds(conn, ticker: str, from_ns: int, to_ns: int) -> tuple[float, f
 
 def _profile_from_trades(conn, ticker: str, from_ns: int, to_ns: int,
                          lo: float, step: float, buckets: int,
-                         large_rub: float) -> list[dict]:
+                         large_rub: float, uid: str = '') -> list[dict]:
+    trade_where = 'instrument_uid = :uid' if uid else 'ticker = :ticker COLLATE NOCASE'
+    params = {'lo': lo, 'step': step, 'large': large_rub, 'ticker': ticker,
+              'uid': uid, 'from': from_ns, 'to': to_ns}
     rows = conn.execute(
-        '''SELECT CAST((price - :lo) / :step AS INTEGER) AS b,
+        f'''SELECT CAST((price - :lo) / :step AS INTEGER) AS b,
                   SUM(CASE WHEN side='buy'  THEN shares ELSE 0 END) AS buy_shares,
                   SUM(CASE WHEN side='sell' THEN shares ELSE 0 END) AS sell_shares,
                   SUM(CASE WHEN side='buy'  THEN value  ELSE 0 END) AS buy_value,
@@ -69,10 +79,9 @@ def _profile_from_trades(conn, ticker: str, from_ns: int, to_ns: int,
                   SUM(CASE WHEN side='sell' AND value >= :large THEN value ELSE 0 END) AS large_sell,
                   COUNT(*) AS trades
            FROM market_trade
-           WHERE ticker = :ticker COLLATE NOCASE AND ts_ns >= :from AND ts_ns < :to
+           WHERE {trade_where} AND ts_ns >= :from AND ts_ns < :to
            GROUP BY b''',
-        {'lo': lo, 'step': step, 'large': large_rub, 'ticker': ticker,
-         'from': from_ns, 'to': to_ns}).fetchall()
+        params).fetchall()
     profile = [{'bucket': i, 'price': lo + (i + 0.5) * step, 'buy_shares': 0,
                 'sell_shares': 0, 'buy_value': 0.0, 'sell_value': 0.0,
                 'large_buy': 0.0, 'large_sell': 0.0, 'trades': 0}
@@ -256,20 +265,26 @@ def _recent_delta(conn, ticker: str, from_ns: int, to_ns: int, minutes: int = 30
 
 
 def _build_profile(conn, ticker: str, from_ns: int, to_ns: int, buckets: int,
-                   large_rub: float) -> dict | None:
+                   large_rub: float, uid: str = '') -> dict | None:
     """Профиль объёма по цене за окно: сделки, а если их нет — минутки."""
-    bounds = _price_bounds(conn, ticker, from_ns, to_ns)
+    bounds = _price_bounds(conn, ticker, from_ns, to_ns, uid=uid)
     if not bounds:
         return None
     lo, hi, points = bounds
     if hi <= lo:
         hi = lo + max(lo * 0.001, 1e-6)
     step = (hi - lo) / buckets
-    has_trades = conn.execute(
-        'SELECT 1 FROM market_trade WHERE ticker = ? COLLATE NOCASE '
-        'AND ts_ns >= ? AND ts_ns < ? LIMIT 1', (ticker, from_ns, to_ns)).fetchone()
+    if uid:
+        has_trades = conn.execute(
+            'SELECT 1 FROM market_trade WHERE instrument_uid = ? '
+            'AND ts_ns >= ? AND ts_ns < ? LIMIT 1', (uid, from_ns, to_ns)).fetchone()
+    else:
+        has_trades = conn.execute(
+            'SELECT 1 FROM market_trade WHERE ticker = ? COLLATE NOCASE '
+            'AND ts_ns >= ? AND ts_ns < ? LIMIT 1', (ticker, from_ns, to_ns)).fetchone()
     if has_trades:
-        profile = _profile_from_trades(conn, ticker, from_ns, to_ns, lo, step, buckets, large_rub)
+        profile = _profile_from_trades(conn, ticker, from_ns, to_ns, lo, step, buckets,
+                                       large_rub, uid=uid)
         source = 'trades'
     else:
         profile = _profile_from_bars(conn, ticker, from_ns, to_ns, lo, step, buckets, large_rub)
@@ -299,7 +314,8 @@ def analyze(ticker: str, from_ns: int, to_ns: int, *, buckets: int = DEFAULT_BUC
             (ticker,)).fetchone()
         uid = uid_row['instrument_uid'] if uid_row else None
 
-        period = _build_profile(conn, ticker, from_ns, to_ns, buckets, large_rub)
+        period = _build_profile(conn, ticker, from_ns, to_ns, buckets, large_rub,
+                                uid=uid or '')
         if period is None:
             raise LevelsError(f'Нет данных по {ticker} за выбранный период')
 

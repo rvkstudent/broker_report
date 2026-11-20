@@ -99,6 +99,8 @@
         .arrow-up { color: #198754; font-size: 14px; display: inline-block; vertical-align: middle; line-height: 1; }
         .arrow-down { color: #dc3545; font-size: 14px; display: inline-block; vertical-align: middle; line-height: 1; }
         .pl-cell { white-space: nowrap; display: inline-flex; align-items: center; gap: 2px; justify-content: flex-end; }
+        /* Изменение цены к предыдущему дню — в одну строку с ценой */
+        .chg-val { font-size: .72rem; margin-left: .25rem; font-weight: 600; }
         .table-fixed { table-layout: fixed; }
         .table-fixed td, .table-fixed th { overflow: hidden; text-overflow: ellipsis; }
         .ref-table tbody { min-height: 180px; }
@@ -348,6 +350,11 @@
                     <li class="nav-item">
                         <a class="nav-link {% if request.path == '/trades' %}active{% endif %}" href="/trades">
                             <i class="bi bi-list-columns-reverse"></i> Сделки
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.path == '/portfolio-growth' %}active{% endif %}" href="/portfolio-growth">
+                            <i class="bi bi-graph-up-arrow"></i> Рост портфеля
                         </a>
                     </li>
                     <li class="nav-item">

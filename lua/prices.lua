@@ -63,14 +63,17 @@ local SEND_INTERVAL = 1        -- секунд между отправками �
 local SEND_TRADES_INTERVAL = 3 -- секунд между отправками сделок
 local REFRESH_INSTRUMENTS = 300 -- секунд между обновлением списка инструментов (5 мин)
 local MAX_TRADE_BATCH = 100    -- макс сделок за одну отправку
+local MAX_PRICES_IN_CACHE = 1500 -- предохранитель: макс инструментов в кэше цен
 local BROKER_NAME = "sber"    -- название брокера для тега сделок: "sber" или "vtb"
 local LOG_FILE = os.getenv("TEMP") and (os.getenv("TEMP") .. "\\brokerreport_prices.log") or nil
+local LOG_MAX_BYTES = 20 * 1024 * 1024  -- лог больше 20 МБ пересоздаём при старте
 
 -- Список инструментов для отслеживания (sec_code, class_code).
 -- Загружается с API /api/instruments при старте и периодически обновляется.
 -- Если API недоступен, можно задать вручную:
 local INSTRUMENTS = {}
 local INSTRUMENT_CLASSES = {}  -- sec_code => class_code (из API)
+local INSTRUMENT_SET = {}      -- sec_code => true (проверка «мой инструмент» за O(1))
 
 -- Фильтр по class_code, если INSTRUMENTS пуст после загрузки
 -- (например, только "TQBR" для акций, "TQOB" для облигаций)
@@ -78,10 +81,27 @@ local FILTER_CLASS_CODES = {"TQBR", "TQOB", "TQTD", "TQBS", "SPBFUT"}
 -- ===================================================
 
 local price_cache = {}   -- sec_code => { price, qty, value, class_code, time }
+local price_cache_n = 0  -- сколько ключей реально в price_cache: #table для хэша
+                         -- всегда 0, из-за чего лог писал «preparing 0 items»
 local trade_cache = {}   -- array of trade objects for batch send
 local last_send_time = 0
 local last_send_trades = 0
+local last_price_log = 0 -- время последней записи «отправлено N цен» (анти-спам)
 local all_trades_count = 0
+
+-- Кладём цену в кэш с учётом предохранителя по размеру.
+-- Объявлено ДО refresh_futures_prices/OnAllTrade/OnTrade: в Lua локальная
+-- функция видна только после объявления.
+local function price_cache_put(sec_code, info)
+    if price_cache[sec_code] == nil then
+        if price_cache_n >= MAX_PRICES_IN_CACHE then
+            return false
+        end
+        price_cache_n = price_cache_n + 1
+    end
+    price_cache[sec_code] = info
+    return true
+end
 
 -- Логирование
 local function log_msg(level, msg)
@@ -100,6 +120,20 @@ end
 
 local function log_info(msg)  log_msg("INFO", msg)  end
 local function log_error(msg) log_msg("ERROR", msg) end
+
+-- Лог когда-то дорос до 400+ МБ (строка писалась на каждую отправку цен).
+-- Если файл при старте больше лимита — пересоздаём, иначе он съедает диск.
+if LOG_FILE then
+    local probe = io.open(LOG_FILE, "r")
+    if probe then
+        local sz = probe:seek("end") or 0
+        probe:close()
+        if sz > LOG_MAX_BYTES then
+            local fw = io.open(LOG_FILE, "w")
+            if fw then fw:close() end
+        end
+    end
+end
 
 -- Единая отправка запроса к API.
 -- Сама выбирает http или https по схеме URL, подставляет X-API-Token,
@@ -193,19 +227,29 @@ local function fetch_instruments()
         return false
     end
 
-    -- Очищаем и заполняем список инструментов
-    INSTRUMENTS = {}
-    INSTRUMENT_CLASSES = {}
+    -- Заполняем список инструментов. Пустой ответ НЕ должен обнулять рабочий
+    -- список: иначе включается фолбэк по классам и в кэш цен попадает весь
+    -- рынок (тысячи бумаг) — это раздувало память и валило скрипт.
+    local new_instruments, new_classes, new_set = {}, {}, {}
     for _, item in ipairs(data) do
         local sec_code = item.sec_code
         if sec_code and #sec_code > 0 then
-            table.insert(INSTRUMENTS, sec_code)
+            table.insert(new_instruments, sec_code)
+            new_set[sec_code] = true
             local cc = item.class_code or ""
             if cc and #cc > 0 then
-                INSTRUMENT_CLASSES[sec_code] = cc
+                new_classes[sec_code] = cc
             end
         end
     end
+    if #new_instruments == 0 then
+        log_error("fetch_instruments: API вернул пустой список, оставляю прежний ("
+            .. #INSTRUMENTS .. " инструментов)")
+        return false
+    end
+    INSTRUMENTS = new_instruments
+    INSTRUMENT_CLASSES = new_classes
+    INSTRUMENT_SET = new_set
 
     log_info(string.format("Loaded %d instruments from API: %s",
         #INSTRUMENTS, table.concat(INSTRUMENTS, ", ")))
@@ -258,12 +302,10 @@ end
 
 -- Отправка пачки цен на API
 local function send_prices()
-    if not next(price_cache) then
-        -- Нет данных для отправки — не логируем каждый раз, только при пустом кеше
+    if price_cache_n == 0 or not next(price_cache) then
+        -- Нет данных для отправки
         return
     end
-
-    log_info(string.format("send_prices: preparing %d items", tonumber(#price_cache) or 0))
 
     local prices = {}
     for sec_code, info in pairs(price_cache) do
@@ -296,9 +338,17 @@ local function send_prices()
             log_error("Отказано в доступе: проверьте api_token в lua/config.local.lua")
         end
     else
-        log_info(string.format("Sent %d prices, response: %s", #prices, tostring(resp_body)))
+        -- Логируем не чаще раза в минуту: раньше строка писалась каждую
+        -- секунду, и лог дорос до сотен МБ.
+        local now = os.time()
+        if now - last_price_log >= 60 then
+            log_info(string.format("Sent %d prices (всего в кэше %d)",
+                #prices, price_cache_n))
+            last_price_log = now
+        end
         -- Очищаем кеш после успешной отправки (оставляем только неподтверждённые)
         price_cache = {}
+        price_cache_n = 0
     end
 end
 
@@ -373,13 +423,13 @@ local function refresh_futures_prices()
                 -- Множитель контракта (STEPPRICE/PRICESTEP или из сделки)
                 local mult = futures_multiplier(cc, sec_code)
                 price = price * mult
-                price_cache[sec_code] = {
+                price_cache_put(sec_code, {
                     price = price,
                     qty = 0,
                     value = 0,
                     class_code = cc,
                     time = os.time()
-                }
+                })
             end
         end
     end
@@ -448,21 +498,19 @@ local function send_trades()
     batch = nil
 end
 
--- Проверка, нужно ли отслеживать инструмент
+-- Проверка, нужно ли отслеживать инструмент.
+-- OnAllTrade вызывается на КАЖДУЮ сделку всего рынка, поэтому проверка должна
+-- быть максимально дешёвой: хэш-таблица INSTRUMENT_SET (O(1)) вместо линейного
+-- перебора INSTRUMENTS, и без записи в лог на каждый пропуск.
 local should_track_count = 0
 local should_track_skip = 0
 local function should_track(sec_code, class_code)
     if #INSTRUMENTS > 0 then
         -- Отслеживаем только инструменты из списка (по sec_code)
-        for _, sc in ipairs(INSTRUMENTS) do
-            if sc == sec_code then
-                return true
-            end
+        if INSTRUMENT_SET[sec_code] then
+            return true
         end
         should_track_skip = should_track_skip + 1
-        if should_track_skip <= 5 then
-            log_info(string.format("should_track: SKIP %s/%s (not in my instruments)", sec_code, class_code))
-        end
         return false
     end
 
@@ -474,9 +522,6 @@ local function should_track(sec_code, class_code)
             end
         end
         should_track_skip = should_track_skip + 1
-        if should_track_skip <= 5 then
-            log_info(string.format("should_track: SKIP %s/%s (class filter)", sec_code, class_code))
-        end
         return false
     end
 
@@ -554,19 +599,25 @@ function OnAllTrade(alltrade)
     local sec_code = alltrade.sec_code
     local class_code = alltrade.class_code or ""
 
-    -- Фильтруем только мои инструменты
-    if #INSTRUMENTS > 0 and not should_track(sec_code, class_code) then
+    -- Фильтруем только мои инструменты.
+    -- ВАЖНО: should_track() вызывается ВСЕГДА. Раньше было
+    -- `if #INSTRUMENTS > 0 and not should_track(...)`: при не загруженном
+    -- списке инструментов фильтр не работал вообще, в кэш попадали цены ВСЕГО
+    -- рынка, память Lua раздувалась до сотен МБ, и скрипт падал
+    -- (ACCESS VIOLATION). При пустом списке фолбэк по FILTER_CLASS_CODES
+    -- отрабатывает внутри should_track().
+    if not should_track(sec_code, class_code) then
         return
     end
 
     -- Обновляем цену (только последнюю, в trade_cache НЕ добавляем)
-    price_cache[sec_code] = {
+    price_cache_put(sec_code, {
         price = futures_price(tonumber(alltrade.price) or 0, class_code, sec_code),
         qty = tonumber(alltrade.qty) or 0,
         value = tonumber(alltrade.value) or 0,
         class_code = class_code,
         time = os.time()
-    }
+    })
 end
 
 -- Callback QUIK: твои собственные сделки (покупка/продажа)
@@ -599,7 +650,7 @@ function OnTrade(trade)
         end
     end
 
-    price_cache[sec_code] = {
+    price_cache_put(sec_code, {
         -- Для фьючерсов (SPBFUT) цена сделки — за единицу; приводим к стоимости
         -- контракта (× lotsize), иначе прогноз P&L будет показывать ложный -99%.
         price = futures_price(price, class_code, sec_code),
@@ -607,7 +658,7 @@ function OnTrade(trade)
         value = value,
         class_code = class_code,
         time = os.time()
-    }
+    })
 
     -- Определяем сторону сделки (см. side_from_flags).
     local raw_flags = tonumber(trade.flags) or 0
@@ -806,9 +857,18 @@ function main()
     log_info("Socket: " .. tostring(socket._VERSION)
         .. (socket.settimeout and "" or " (без socket.settimeout, таймаут через http.TIMEOUT)"))
 
-    -- Загружаем список инструментов с API при старте
+    -- Загружаем список инструментов с API при старте.
+    -- Раньше одиночный сбой (напр. ACCESS VIOLATION в HTTPS-модуле) оставлял
+    -- скрипт без списка инструментов, и в кэш цен попадал весь рынок.
     local oki, erri = pcall(fetch_instruments)
     if not oki then log_error("fetch_instruments crashed: " .. tostring(erri)) end
+    for attempt = 1, 3 do
+        if #INSTRUMENTS > 0 then break end
+        log_info(string.format("fetch_instruments: повтор %d/3 через 5 с", attempt))
+        socket.sleep(5)
+        local ok2, err2 = pcall(fetch_instruments)
+        if not ok2 then log_error("fetch_instruments crashed: " .. tostring(err2)) end
+    end
     local oks, errs = pcall(send_instrument_params)
     if not oks then log_error("send_instrument_params crashed: " .. tostring(errs)) end
     if #INSTRUMENTS == 0 then
@@ -867,16 +927,17 @@ function main()
             for k, v in pairs(price_cache) do
                 if v.time and v.time < stale_cutoff then
                     price_cache[k] = nil
+                    price_cache_n = price_cache_n - 1
                 end
             end
+            if price_cache_n < 0 then price_cache_n = 0 end
         end
 
         -- Heartbeat раз в 10 секунд (показывает что main() жив)
         if now - last_heartbeat >= 10 then
             local mem_kb = collectgarbage("count")
-            local pc_count = 0; for _ in pairs(price_cache) do pc_count = pc_count + 1 end
     log_info(string.format("HEARTBEAT: all_trades=%d tracked=%d price_cache=%d trade_queue=%d instruments=%d mem=%.0fKB",
-                all_trades_count, should_track_count, pc_count, #trade_cache, #INSTRUMENTS, mem_kb))
+                all_trades_count, should_track_count, price_cache_n, #trade_cache, #INSTRUMENTS, mem_kb))
             last_heartbeat = now
         end
 
@@ -884,9 +945,8 @@ function main()
         if now - last_log_time >= 60 then
             collectgarbage("collect")
             local mem_kb = collectgarbage("count")
-            local pc_count = 0; for _ in pairs(price_cache) do pc_count = pc_count + 1 end
     log_info(string.format("Stats: all_trades=%d, cached_prices=%d, trade_queue=%d, tracked=%d, mem=%.0fKB",
-                all_trades_count, pc_count, #trade_cache, #INSTRUMENTS, mem_kb))
+                all_trades_count, price_cache_n, #trade_cache, #INSTRUMENTS, mem_kb))
             last_log_time = now
         end
 

@@ -138,13 +138,13 @@
             </a>
             <select class="form-select form-select-sm" id="ch-range" style="width:96px">
                 <option value="today">сегодня</option>
-                <option value="3d">3 дня</option>
+                <option value="3d" selected>3 дня</option>
                 <option value="7d">7 дней</option>
                 <option value="30d">30 дней</option>
             </select>
             <div class="btn-group btn-group-sm" role="group" id="ch-interval">
-                <button type="button" class="btn btn-outline-primary active" data-interval="1">1м</button>
-                <button type="button" class="btn btn-outline-primary" data-interval="5">5м</button>
+                <button type="button" class="btn btn-outline-primary" data-interval="1">1м</button>
+                <button type="button" class="btn btn-outline-primary active" data-interval="5">5м</button>
                 <button type="button" class="btn btn-outline-primary" data-interval="15">15м</button>
                 <button type="button" class="btn btn-outline-primary" data-interval="60">1ч</button>
             </div>
@@ -163,7 +163,7 @@
             <div class="form-check form-check-inline mb-0">
                 <input class="form-check-input" type="checkbox" id="ch-signals" checked>
                 <label class="form-check-label" for="ch-signals" style="font-size:.72rem"
-                       title="Сигналы на покупку по уровням">сигналы</label>
+                       title="Сигналы на покупку по уровням: зелёные — приняты фильтром R:R, серые «отсеян» — цель ближе стопа">сигналы</label>
             </div>
             <div class="form-check form-check-inline mb-0">
                 <input class="form-check-input" type="checkbox" id="ch-nostop">
@@ -247,10 +247,13 @@
             <span><i class="bi bi-lightning-charge"></i> Сигналы на покупку</span>
             <span class="text-muted fw-normal" style="font-size:.68rem" id="sig-count"></span>
         </div>
-        <div class="table-responsive" style="max-height:170px;overflow:auto">
+        <div class="table-responsive" style="max-height:320px;overflow:auto">
             <table class="table table-sm mb-0" data-no-stack>
                 <thead class="table-light"><tr>
-                    <th class="ps-2">время</th><th>тип</th>
+                    <th class="ps-2" id="sig-date-head" style="cursor:pointer"
+                        title="Клик — сменить порядок сортировки">дата
+                        <span class="text-muted" id="sig-sort-dir">↑</span></th>
+                    <th>время</th><th>тип</th>
                     <th class="text-end">зона</th><th class="text-end">цена</th>
                     <th class="text-end">дельта</th><th class="text-end">объём</th>
                     <th class="text-end" title="Принят ли вход фильтром риск/прибыль">вход</th>
@@ -578,35 +581,74 @@
     let candlesCache = [];
     let levelsData = null;
     let zoneLines = [];
-    let currentInterval = 1;
-    let currentRange = 'today';
+    let currentInterval = 5;
+    let currentRange = '3d';
     let priceMarkers = [];
     let backtestMarkers = [];
     let signalMarkers = [];
 
     function applyMarkers() {
-        // Приоритет: результат бэктеста → сигналы стратегии → сделки из ленты
-        const list = backtestMarkers.length ? backtestMarkers
-            : (signalMarkers.length ? signalMarkers : priceMarkers);
+        // Приоритет: результат бэктеста → сигналы стратегии → сделки из ленты.
+        // Отсеянные сигналы (серые) показываем всегда, в том числе поверх
+        // бэктеста: иначе на графике «исчезают» сигналы, которые видит скринер.
+        const rejected = signalMarkers.filter((m) => m.text === 'отсеян');
+        let list;
+        if (backtestMarkers.length) list = [...backtestMarkers, ...rejected];
+        else if (signalMarkers.length) list = signalMarkers;
+        else list = priceMarkers;
         candleSeries.setMarkers([...list].sort((a, b) => a.time - b.time));
     }
 
+    let sigSortDesc = false;
+    let signalRowsCache = [];
+
+    const ddmm = (t) => {
+        const iso = new Date(t * 1000).toISOString();
+        return iso.slice(8, 10) + '.' + iso.slice(5, 7) + '.' + iso.slice(0, 4);
+    };
+
+    function signalStatus(row) {
+        const seen = row.first_seen_at ? ` · зафиксирован ${row.first_seen_at}` : '';
+        if (row.taken !== false) {
+            return '<span class="badge bg-success" '
+                + `title="Вход принят в момент появления${seen}">принят</span>`;
+        }
+        const rr = (row.rr === null || row.rr === undefined) ? '' : ` · R:R ${row.rr}`;
+        return `<span class="badge bg-secondary" `
+            + `title="Цель ближе стопа — вход отсеян${rr}${seen}">отсеян</span>`;
+    }
+
     function renderSignalRows(rows) {
+        signalRowsCache = rows || [];
         const body = document.getElementById('sig-rows');
-        const taken = rows.filter((r) => r.taken !== false).length;
-        document.getElementById('sig-count').textContent = rows.length
-            ? `сигналов ${rows.length}, принято ${taken}` : '';
-        body.innerHTML = rows.map((row) => `<tr class="${row.taken === false ? 'text-muted' : ''}">
-            <td class="ps-2 text-muted">${hhmm(row.time)}</td>
+        const taken = signalRowsCache.filter((r) => r.taken !== false).length;
+        document.getElementById('sig-count').textContent = signalRowsCache.length
+            ? `сигналов ${signalRowsCache.length}, принято ${taken}` : '';
+        if (!signalRowsCache.length) {
+            body.innerHTML = '<tr><td colspan="8" class="text-muted">сигналов нет</td></tr>';
+            return;
+        }
+        const list = [...signalRowsCache].sort(
+            (a, b) => (sigSortDesc ? b.time - a.time : a.time - b.time));
+        body.innerHTML = list.map((row) => `<tr>
+            <td class="ps-2 text-muted">${row.date || ddmm(row.time)}</td>
+            <td class="text-muted">${row.time_label || hhmm(row.time)}</td>
             <td class="${row.kind === 'breakout' ? 'text-success' : 'text-primary'}">${row.kind_label}</td>
             <td class="text-end">${Number(row.zone_price).toFixed(3)}</td>
             <td class="text-end">${Number(row.price).toFixed(3)}</td>
             <td class="text-end ${row.delta >= 0 ? 'text-success' : 'text-danger'}">${row.delta >= 0 ? '+' : ''}${row.delta}</td>
             <td class="text-end text-muted">×${row.volume_ratio}</td>
-            <td class="text-end">${row.taken === false
-                ? '<span title="Цель ближе стопа — вход отсеян">—</span>'
-                : '<span class="text-success" title="Вход принят">✓</span>'}</td>
-        </tr>`).join('') || '<tr><td colspan="7" class="text-muted">сигналов нет</td></tr>';
+            <td class="text-end">${signalStatus(row)}</td>
+        </tr>`).join('');
+    }
+
+    const sigDateHead = document.getElementById('sig-date-head');
+    if (sigDateHead) {
+        sigDateHead.addEventListener('click', () => {
+            sigSortDesc = !sigSortDesc;
+            document.getElementById('sig-sort-dir').textContent = sigSortDesc ? '↓' : '↑';
+            renderSignalRows(signalRowsCache);
+        });
     }
 
     async function loadSignals() {

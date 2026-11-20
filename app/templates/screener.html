@@ -96,8 +96,15 @@
                     {% endfor %}
                 </select>
             </div>
-            <div class="col-6 col-md-3 text-end">
-                <span class="text-muted small" id="scr-updated">—</span>
+            <div class="col-6 col-md-3">
+                <div class="d-flex justify-content-end align-items-center gap-3">
+                    <div class="form-check mb-0">
+                        <input class="form-check-input" type="checkbox" id="scr-only-taken">
+                        <label class="form-check-label small" for="scr-only-taken"
+                               title="Оставить бумаги, у которых сигнал прошёл фильтр R:R (не «отсеян»)">Только принятые</label>
+                    </div>
+                    <span class="text-muted small text-nowrap" id="scr-updated">—</span>
+                </div>
             </div>
         </div>
     </div>
@@ -129,12 +136,55 @@
                 <th class="text-end d-none d-md-table-cell">Оценка</th>
                 <th>Сигнал</th>
                 <th class="text-end" id="scr-signals-head" style="cursor:pointer"
-                    title="Сигналы стратегии «покупка от уровней» за сегодня. Клик — сменить порядок">
+                    title="Сигналы стратегии «покупка от уровней» за сегодня: принято / всего. Клик — сменить порядок">
                     Сигн. <span class="text-muted" id="scr-signals-dir">↓</span></th>
+                <th class="text-end d-none d-lg-table-cell"
+                    title="Качество прошлых сигналов инструмента: winrate · profit factor · сделок">Качество</th>
             </tr>
             </thead>
             <tbody id="scr-body">
-            <tr><td colspan="13" class="text-center text-muted py-4">Загрузка…</td></tr>
+            <tr><td colspan="14" class="text-center text-muted py-4">Загрузка…</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+{# ── Сигналы на покупку за сегодня ── #}
+<div class="card mt-3">
+    <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+        <span><i class="bi bi-lightning-charge"></i> Сигналы на покупку
+            <span class="text-muted fw-normal" style="font-size:.68rem">
+                за сегодня · по моменту появления, статус фиксируется один раз
+            </span>
+        </span>
+        <div class="d-flex align-items-center gap-3">
+            <div class="form-check mb-0">
+                <input class="form-check-input" type="checkbox" id="scr-sig-only-taken">
+                <label class="form-check-label small" for="scr-sig-only-taken"
+                       title="Скрыть сигналы, отсеянные фильтром риск/прибыль">Только принятые</label>
+            </div>
+            <span class="text-muted small text-nowrap" id="scr-sig-count">—</span>
+        </div>
+    </div>
+    <div class="table-responsive" style="max-height:340px;overflow:auto">
+        <table class="table table-sm table-hover align-middle mb-0" data-no-stack>
+            <thead class="table-light">
+            <tr>
+                <th class="ps-3" id="scr-sig-date-head" style="cursor:pointer"
+                    title="Клик — сменить порядок сортировки">Дата
+                    <span class="text-muted" id="scr-sig-dir">↑</span></th>
+                <th class="text-end">Время</th>
+                <th>Тикер</th>
+                <th>Тип</th>
+                <th class="text-end" title="Цена уровня, от которого строился вход">Зона</th>
+                <th class="text-end">Цена</th>
+                <th class="text-end">Дельта</th>
+                <th class="text-end" title="Объём бара относительно среднего">Объём</th>
+                <th>Вход</th>
+            </tr>
+            </thead>
+            <tbody id="scr-sig-body">
+            <tr><td colspan="9" class="text-center text-muted py-3">Загрузка…</td></tr>
             </tbody>
         </table>
     </div>
@@ -215,14 +265,127 @@
 
     let signalSortAsc = false;
 
+    let sigSortDesc = false;
+
+    function signalStatusCell(sig) {
+        const seen = sig.first_seen_at ? ` · зафиксирован ${sig.first_seen_at}` : '';
+        if (sig.taken) {
+            return '<span class="badge bg-success" '
+                + `title="Вход принят в момент появления${seen}">принят</span>`;
+        }
+        const rr = (sig.rr === null || sig.rr === undefined) ? '' : ` · R:R ${sig.rr}`;
+        return `<span class="badge bg-secondary" `
+            + `title="Цель ближе стопа — вход отсеян${rr}${seen}">отсеян</span>`;
+    }
+
+    function renderSignals(rows) {
+        const body = document.getElementById('scr-sig-body');
+        const countEl = document.getElementById('scr-sig-count');
+        const onlyTakenEl = document.getElementById('scr-sig-only-taken');
+        const all = rows || [];
+        const takenTotal = all.filter((s) => s.taken).length;
+        let list = all;
+        if (onlyTakenEl && onlyTakenEl.checked) list = list.filter((s) => s.taken);
+        list = [...list].sort((a, b) => (sigSortDesc ? b.time - a.time : a.time - b.time));
+        countEl.textContent = all.length
+            ? `сигналов ${all.length}, принято ${takenTotal}` : 'сигналов нет';
+        if (!list.length) {
+            body.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-3">'
+                + (all.length ? 'Все сигналы отсеяны фильтром R:R: цель ближе стопа.'
+                              : 'За сегодня сигналов не было.')
+                + '</td></tr>';
+            return;
+        }
+        body.innerHTML = list.map((s) => {
+            const kindCls = s.kind === 'breakout'
+                ? 'bg-success-subtle text-success-emphasis'
+                : 'bg-primary-subtle text-primary-emphasis';
+            const deltaCls = Number(s.delta) >= 0 ? 'text-success' : 'text-danger';
+            return `<tr>
+                <td class="ps-3 text-muted">${s.date || '—'}</td>
+                <td class="text-end text-muted">${s.time_label || '—'}</td>
+                <td><a class="text-decoration-none fw-semibold"
+                       href="/chart/${s.ticker}">${s.ticker}</a>
+                    <div class="text-muted text-truncate"
+                         style="font-size:.72rem;max-width:140px">${(s.name || '').slice(0, 26)}</div></td>
+                <td><span class="badge ${kindCls}">${s.kind_label}</span></td>
+                <td class="text-end">${fmtPrice(s.zone_price)}</td>
+                <td class="text-end">${fmtPrice(s.price)}</td>
+                <td class="text-end ${deltaCls}">${fmtSigned(s.delta, 2)}</td>
+                <td class="text-end text-muted">×${Number(s.volume_ratio || 0).toFixed(2)}</td>
+                <td>${signalStatusCell(s)}</td>
+            </tr>`;
+        }).join('');
+    }
+
+    const sigDateHead = document.getElementById('scr-sig-date-head');
+    if (sigDateHead) {
+        sigDateHead.addEventListener('click', () => {
+            sigSortDesc = !sigSortDesc;
+            document.getElementById('scr-sig-dir').textContent = sigSortDesc ? '↓' : '↑';
+            renderSignals(window.__lastSignals || []);
+        });
+    }
+    const sigOnlyTakenEl = document.getElementById('scr-sig-only-taken');
+    if (sigOnlyTakenEl) {
+        sigOnlyTakenEl.addEventListener('change', () => {
+            renderSignals(window.__lastSignals || []);
+        });
+    }
+
+    function signalHint(r) {
+        const kinds = (r.signal_kinds || []).join(', ') || 'сигналов не было';
+        const total = r.signal_count || 0;
+        const taken = r.signal_taken || 0;
+        if (!total) return kinds;
+        return `${kinds}. Принято ${taken} из ${total}` +
+            (total > taken ? `, отсеяно ${total - taken} (цель ближе стопа)` : '');
+    }
+
+    function signalBadges(r) {
+        const total = r.signal_count || 0;
+        const taken = r.signal_taken || 0;
+        if (!total) return '<span class="text-muted">—</span>';
+        const cls = taken > 0 ? 'bg-success' : 'bg-secondary';
+        return `<span class="badge ${cls}" title="принято / всего">${taken}✓ / ${total}</span>`;
+    }
+
+    function qualityCell(r) {
+        const n = r.quality_trades || 0;
+        if (!n) {
+            return '<span class="text-muted" title="Пока нет закрытых сделок — параметры базовые">—</span>';
+        }
+        const wr = Math.round((r.quality_win_rate || 0) * 100);
+        const pfRaw = Number(r.quality_pf || 0);
+        const pf = pfRaw >= 99 ? '∞' : pfRaw.toFixed(2);
+        const net = Number(r.quality_net || 0);
+        const cls = net >= 0 ? 'bg-success' : 'bg-danger';
+        const p = r.adaptive_params || {};
+        const title = `win ${wr}% · PF ${pf} · сделок ${n} · net ${Math.round(net)} ₽`
+            + ` · RR ${p.min_rr} · SL ${p.stop_loss_pct}% · TP ${p.take_profit_pct}%`
+            + ` · Δ ${p.confirm_delta} · vol×${p.volume_factor}`;
+        return `<span class="badge ${cls}" title="${title}">${wr}% · ${pf}</span>`;
+    }
+
     function renderRows(rows) {
         const body = document.getElementById('scr-body');
+        const onlyTaken = document.getElementById('scr-only-taken');
+        const onlyTakenChecked = !!(onlyTaken && onlyTaken.checked);
+        if (onlyTakenChecked) {
+            rows = rows.filter((r) => (r.signal_taken || 0) > 0);
+        }
         if (signalSortAsc) {
-            rows = [...rows].sort((a, b) => (a.signal_count || 0) - (b.signal_count || 0));
+            rows = [...rows].sort((a, b) =>
+                ((a.signal_taken || 0) - (b.signal_taken || 0)) ||
+                ((a.signal_count || 0) - (b.signal_count || 0)));
         }
         if (!rows.length) {
-            body.innerHTML = '<tr><td colspan="13" class="text-center text-muted py-4">' +
-                'Нет данных. Сборщик только запустился или сделок за окно не было.</td></tr>';
+            const msg = onlyTakenChecked
+                ? 'Нет бумаг с принятыми сигналами: кэш сигналов ещё считается '
+                  + 'или все сигналы отсеяны по R:R. Снимите галку «Только принятые».'
+                : 'Нет данных. Сборщик только запустился или сделок за окно не было.';
+            body.innerHTML = '<tr><td colspan="14" class="text-center text-muted py-4">'
+                + msg + '</td></tr>';
             return;
         }
         body.innerHTML = rows.map((r) => {
@@ -244,10 +407,8 @@
                 <td class="text-end d-none d-lg-table-cell ${r.activity_ratio >= 1.5 ? 'fw-semibold' : 'text-muted'}">${r.activity_ratio.toFixed(2)}×</td>
                 <td class="text-end d-none d-md-table-cell">${scoreBar(r.score)}</td>
                 <td><span class="badge ${badge}">${r.signal_label}</span></td>
-                <td class="text-end" title="${(r.signal_kinds || []).join(', ') || 'сигналов не было'}">
-                    ${r.signal_count
-                        ? `<span class="badge bg-success">${r.signal_count}</span>`
-                        : '<span class="text-muted">—</span>'}</td>
+                <td class="text-end" title="${signalHint(r)}">${signalBadges(r)}</td>
+                <td class="text-end d-none d-lg-table-cell">${qualityCell(r)}</td>
             </tr>`;
         }).join('');
     }
@@ -291,7 +452,9 @@
             if (!resp.ok) throw new Error('HTTP ' + resp.status);
             const data = await resp.json();
             window.__lastScreenerRows = data.rows || [];
+            window.__lastSignals = data.signals || [];
             renderRows(window.__lastScreenerRows);
+            renderSignals(window.__lastSignals);
             renderStatus(data.status || {});
             document.getElementById('scr-updated').textContent =
                 'обновлено ' + new Date().toLocaleTimeString('ru-RU');
@@ -390,6 +553,12 @@
     ['scr-window', 'scr-min-turnover', 'scr-signal'].forEach((id) => {
         document.getElementById(id).addEventListener('change', load);
     });
+    const onlyTakenEl = document.getElementById('scr-only-taken');
+    if (onlyTakenEl) {
+        onlyTakenEl.addEventListener('change', () => {
+            if (window.__lastScreenerRows) renderRows(window.__lastScreenerRows);
+        });
+    }
     document.getElementById('scr-min-turnover').addEventListener('input', () => {
         clearTimeout(window.__scrDebounce);
         window.__scrDebounce = setTimeout(load, 400);
