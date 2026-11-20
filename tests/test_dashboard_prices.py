@@ -2,6 +2,7 @@
 
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 from app import dashboard_prices
 
@@ -101,6 +102,38 @@ class PrevCloseTests(unittest.TestCase):
         """23:30 UTC — это уже следующий день по Москве."""
         late_utc = datetime(2026, 11, 18, 23, 30, tzinfo=timezone.utc)
         self.assertEqual(dashboard_prices._candle_day(ns(late_utc)), '2026-11-19')
+
+
+class AccruedInterestTests(unittest.TestCase):
+    """НКД из карточки T-Invest — для оценки стоимости «с НКД»."""
+
+    def setUp(self):
+        dashboard_prices._aci_cache.clear()
+
+    def tearDown(self):
+        dashboard_prices._aci_cache.clear()
+
+    def test_bond_aci_returned(self):
+        detail = {'aci': {'units': 12, 'nano': 340000000, 'currency': 'rub'}}
+        with mock.patch.object(dashboard_prices, 'enabled', return_value=True), \
+             mock.patch.object(dashboard_prices, '_get_client', return_value=object()), \
+             mock.patch.object(dashboard_prices, '_find',
+                               lambda c, code, cc: {'instrumentType': 'bond', 'uid': code}), \
+             mock.patch.object(dashboard_prices, '_details', lambda c, ins: detail):
+            out = dashboard_prices.accrued_interests({'SU26243': ''})
+        self.assertAlmostEqual(out['SU26243'], 12.34, places=2)
+
+    def test_non_bond_skipped(self):
+        with mock.patch.object(dashboard_prices, 'enabled', return_value=True), \
+             mock.patch.object(dashboard_prices, '_get_client', return_value=object()), \
+             mock.patch.object(dashboard_prices, '_find',
+                               lambda c, code, cc: {'instrumentType': 'share', 'uid': code}):
+            out = dashboard_prices.accrued_interests({'SBER': 'TQBR'})
+        self.assertEqual(out, {})
+
+    def test_disabled_returns_empty(self):
+        with mock.patch.object(dashboard_prices, 'enabled', return_value=False):
+            self.assertEqual(dashboard_prices.accrued_interests({'SU26243': ''}), {})
 
 
 if __name__ == '__main__':

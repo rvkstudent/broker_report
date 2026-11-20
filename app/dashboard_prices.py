@@ -387,6 +387,7 @@ def _refresh_prev_closes(today: str, items: list) -> None:
 
 _fv_cache: dict = {}       # sec_code -> (дата МСК, номинал | None)
 _fv_lock = threading.Lock()
+_aci_cache: dict = {}      # sec_code -> (дата МСК, НКД на бумагу | None)
 
 
 def face_values(instruments: dict) -> dict:
@@ -427,6 +428,46 @@ def face_values(instruments: dict) -> dict:
             _fv_cache[sec_code] = (today, nominal)
         if nominal:
             result[sec_code] = nominal
+    return result
+
+
+def accrued_interests(instruments: dict) -> dict:
+    """``{sec_code: НКД в рублях на одну бумагу}`` — только для облигаций.
+
+    НКД (накопленный купонный доход) берётся из карточки T-Invest (поле ``aci``).
+    Нужен для оценки «с НКД» (грязная цена = текущая цена + НКД). Кэш — на день,
+    как у номиналов: НКД меняется плавно, лишние запросы к API не нужны.
+    """
+    if not instruments or not enabled():
+        return {}
+    client = _get_client()
+    if client is None:
+        return {}
+
+    today = _msk_now().strftime('%Y-%m-%d')
+    result = {}
+    for sec_code, class_code in list(instruments.items())[:MAX_INSTRUMENTS]:
+        with _fv_lock:
+            cached = _aci_cache.get(sec_code)
+        if cached and cached[0] == today:
+            if cached[1]:
+                result[sec_code] = cached[1]
+            continue
+
+        ins = _find(client, sec_code, class_code or '')
+        aci = None
+        if ins and (ins.get('instrumentType') or '').lower() == 'bond':
+            detail = _details(client, ins)
+            aci_obj = detail.get('aci') or {}
+            value = _quotation_to_float(aci_obj)
+            currency = (aci_obj.get('currency') or '').lower()
+            if value > 0 and currency in ('', 'rub'):
+                aci = round(value, 4)
+
+        with _fv_lock:
+            _aci_cache[sec_code] = (today, aci)
+        if aci:
+            result[sec_code] = aci
     return result
 
 

@@ -74,7 +74,7 @@
             </div>
             <div class="col-auto form-check d-flex align-items-end mb-1">
                 <input type="checkbox" class="form-check-input me-1" id="showOpenOnly"
-                       onchange="toggleOpenOnly()">
+                       checked onchange="toggleOpenOnly()">
                 <label class="form-check-label small" for="showOpenOnly">Только открытые</label>
             </div>
             <div class="col-auto">
@@ -471,7 +471,7 @@
                                 <th class="text-end">Ср. цена</th>
                                 <th class="text-end">Стоимость</th>
                                 <th class="text-end">Рын. стоимость
-                                    <i class="bi bi-info-circle text-muted" title="Количество × текущая цена (по облигациям без НКД)"></i>
+                                    <i class="bi bi-info-circle text-muted" title="Количество × (текущая цена + НКД по облигациям)"></i>
                                 </th>
                                 <th class="text-end">Если закрыть по цене покупки</th>
                                 <th class="text-end">Если закрыть по номиналу
@@ -533,7 +533,7 @@
                                 <td></td><td></td><td></td><td></td><td></td>
                             </tr>
                             <tr>
-                                <td colspan="3" class="text-muted">Стоимость по текущим ценам <small>(без НКД)</small></td>
+                                <td colspan="3" class="text-muted">Стоимость по текущим ценам <small>(с НКД)</small></td>
                                 <td></td>
                                 <td class="text-end fw-bold">{{ '{:,.2f}'.format(market_value_sum) }}</td>
                                 <td></td><td></td><td></td><td></td>

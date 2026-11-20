@@ -845,6 +845,12 @@ def index():
     for alias, canonical in _PRICE_CODE_ALIASES.items():
         if nominals.get(canonical) and not nominals.get(alias):
             nominals[alias] = nominals[canonical]
+    # НКД (накопленный купонный доход) на бумагу — для оценки «с НКД».
+    accrued = tinkoff_prices.accrued_interests(
+        {i['security_code']: '' for i in instruments} if instruments else {})
+    for alias, canonical in _PRICE_CODE_ALIASES.items():
+        if accrued.get(canonical) and not accrued.get(alias):
+            accrued[alias] = accrued[canonical]
 
     for i in instruments or []:
         code = i['security_code']
@@ -854,7 +860,10 @@ def index():
         # Р В Р’В Р РЋРІР‚в„–Р В Р вЂ¦Р В РЎвЂўР РЋРІР‚РЋР В Р вЂ¦Р В Р’В°Р РЋР РЏ Р РЋР С“Р РЋРІР‚С™Р В РЎвЂўР В РЎвЂР В РЎВР В РЎвЂўР РЋР С“Р РЋРІР‚С™Р РЋР Р‰ Р В РЎвЂ”Р В РЎвЂў Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋРЎвЂњР РЋРІР‚В°Р В Р’ВµР В РІвЂћвЂ“ Р РЋРІР‚В Р В Р’ВµР В Р вЂ¦Р В Р’Вµ: Р вЂ™Р’В«Р В Р Р‹Р РЋРІР‚С™Р В РЎвЂўР В РЎвЂР В РЎВР В РЎвЂўР РЋР С“Р РЋРІР‚С™Р РЋР Р‰Р вЂ™Р’В» Р В Р вЂ  Р РЋРІР‚С™Р В Р’В°Р В Р’В±Р В Р’В»Р В РЎвЂР РЋРІР‚В Р В Р’Вµ Р Р†Р вЂљРІР‚Сњ Р РЋР РЉР РЋРІР‚С™Р В РЎвЂў Р РЋРІР‚В Р В Р’ВµР В Р вЂ¦Р В Р’В°
         # Р В РЎвЂ”Р В РЎвЂўР В РЎвЂќР РЋРЎвЂњР В РЎвЂ”Р В РЎвЂќР В РЎвЂ, Р В РЎвЂ Р В РЎвЂ”Р РЋРЎвЂњР РЋРІР‚С™Р В Р’В°Р РЋРІР‚С™Р РЋР Р‰ Р В Р’ВµР РЋРІР‚В Р РЋР С“ Р РЋРІР‚С™Р В Р’ВµР В РЎвЂќР РЋРЎвЂњР РЋРІР‚В°Р В Р’ВµР В РІвЂћвЂ“ Р В РЎвЂўР РЋРІР‚В Р В Р’ВµР В Р вЂ¦Р В РЎвЂќР В РЎвЂўР В РІвЂћвЂ“ Р В Р вЂ¦Р В Р’ВµР В Р’В»Р РЋР Р‰Р В Р’В·Р РЋР РЏ.
         i['price_now'] = price_map.get(code) or 0
-        i['market_value'] = round(qty * i['price_now'], 2) if i['price_now'] else None
+        i['nkd'] = accrued.get(code) or 0
+        # Рыночная стоимость — с НКД (грязная цена): цена + накопленный купон.
+        unit_price = (i['price_now'] + i['nkd']) if i['price_now'] else 0
+        i['market_value'] = round(qty * unit_price, 2) if unit_price else None
         i['close_at_cost'] = round(-(buy_fees + cost * TRADE_FEE_RATE), 2)
         nominal = nominals.get(code)
         if nominal:
