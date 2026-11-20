@@ -529,12 +529,16 @@ def init_db():
         cur.execute("ALTER TABLE report ADD COLUMN source_type TEXT DEFAULT ''")
 
     # Set broker for existing reports
-    # Сначала чистим осиротевшие записи (без данных) — чтобы автоимпорт их пересоздал
+    # Сначала чистим осиротевшие записи (без данных) — чтобы автоимпорт их пересоздал.
+    # Учитываем ВСЕ дочерние таблицы: иначе отчёт, у которого есть только остатки
+    # позиций (portfolio) или налоговый раздел, удаляется и падает FOREIGN KEY.
     cur.execute("""
         DELETE FROM report WHERE id NOT IN (
-            SELECT DISTINCT report_id FROM trade
-            UNION SELECT DISTINCT report_id FROM cash_flow
-            UNION SELECT DISTINCT report_id FROM repo
+            SELECT DISTINCT report_id FROM trade WHERE report_id IS NOT NULL
+            UNION SELECT DISTINCT report_id FROM cash_flow WHERE report_id IS NOT NULL
+            UNION SELECT DISTINCT report_id FROM repo WHERE report_id IS NOT NULL
+            UNION SELECT DISTINCT report_id FROM portfolio WHERE report_id IS NOT NULL
+            UNION SELECT DISTINCT report_id FROM financial_result WHERE report_id IS NOT NULL
         ) AND filename != '_quik_ontrade_'
     """)
     # openbroker и my_trades приравниваем к ВТБ
@@ -602,6 +606,7 @@ def init_db():
     cur.execute("DELETE FROM cash_flow_category")
     seed_mapping = [
         # ── SBER ──
+        ('sber', 'вариационной маржи',        'contains', 'Вариационная маржа', 1, 'ГО по фьючерсам: зачисления и списания нетто'),
         ('sber', 'Выплата дивидендов',        'contains', 'Дивиденд',     1, 'Дивиденды с удержанным налогом'),
         ('sber', 'Выплата купонов',           'contains', 'Купон',        1, 'Купонный доход по облигациям'),
         ('sber', 'Зачисление',                'prefix',   'Пополнение',   2, 'Пополнение счёта / бонусы / акции'),
@@ -610,6 +615,12 @@ def init_db():
         ('sber', 'Комиссия',                  'prefix',   'Операционные', 0, 'Комиссии биржи и брокера'),
         ('sber', 'Сделка от',                 'prefix',   'Операционные', 0, 'Расчёты по сделкам'),
         # ── VTB ──
+        ('vtb', 'вариационной маржи',         'contains', 'Вариационная маржа', 1, 'ГО по фьючерсам: зачисления и списания нетто'),
+        # Открытие / ЕБС (эти же правила работают для отчётов, приведённых к source='vtb')
+        ('vtb', 'Поставлены на торги средства', 'prefix', 'Пополнение',  1, 'Пополнение счёта (Открытие)'),
+        ('vtb', 'Списаны средства',            'prefix',   'Вывод ДС',     1, 'Вывод средств (Открытие)'),
+        ('vtb', 'Выплата дохода',              'prefix',   'Дивиденд',     1, 'Дивиденды/купон (Открытие)'),
+        ('vtb', 'Удержан налог',               'prefix',   'Налог',        1, 'Налог (Открытие)'),
         ('vtb', 'Вознаграждение',             'prefix',   'Операционные', 0, 'Комиссии брокера'),
         ('vtb', 'Дивиденды —',                'prefix',   'Дивиденд',     1, 'Дивиденды по акциям'),
         ('vtb', 'Дивиденды ',                 'prefix',   'Дивиденд',     1, 'Дивиденды (альт. формат)'),
@@ -626,6 +637,8 @@ def init_db():
             "INSERT INTO cash_flow_category(source, pattern, match_mode, category, priority, comment) VALUES (?,?,?,?,?,?)",
             (src, pat, mode, cat, prio, comment)
         )
+    # Маппинг перечитается при следующем обращении (кэш уровня модуля)
+    globals()['_cf_category_cache'] = None
 
     conn.commit()
     conn.close()
@@ -840,13 +853,8 @@ def _categorize_cash_flow(description: str, source: str) -> str:
     return 'Прочее'
 
 
-def get_cash_flow_summary(report_id=None, date_from=None, date_to=None, broker=None):
-    """Get non-operational cash flow grouped by category.
-
-    Исключаются операционные движения (Сделка, Комиссия) —
-    они уже учтены в trade-расчётах. Остаются только:
-    Налог, Дивиденд, Купон, Пополнение, Вывод ДС, Переводы.
-    """
+def _cash_flow_groups(report_id=None, date_from=None, date_to=None, broker=None):
+    """Движения ДС, сгруппированные по описанию и источнику."""
     conn = get_connection()
     where_clauses, params = _date_where('cash_flow', date_from, date_to, date_col='date')
     if report_id is not None:
@@ -865,14 +873,21 @@ def get_cash_flow_summary(report_id=None, date_from=None, date_to=None, broker=N
         ORDER BY description
     """, params).fetchall()
     conn.close()
+    return rows
 
+
+def get_cash_flow_summary(report_id=None, date_from=None, date_to=None, broker=None):
+    """Get non-operational cash flow grouped by category.
+
+    Исключаются операционные движения (Сделка, Комиссия) —
+    они уже учтены в trade-расчётах. Остаются только:
+    Налог, Дивиденд, Купон, Пополнение, Вывод ДС, Переводы,
+    а всё без правила категоризации сводится в «Прочее».
+    """
     result = {}
-    for row in rows:
-        desc = row['description']
-        src = row['source']
+    for row in _cash_flow_groups(report_id, date_from, date_to, broker):
         amount = row['credits'] - row['debits']
-
-        cat = _categorize_cash_flow(desc, src)
+        cat = _categorize_cash_flow(row['description'], row['source'])
 
         # Пропускаем операционные движения
         if cat == 'Операционные':
@@ -880,6 +895,25 @@ def get_cash_flow_summary(report_id=None, date_from=None, date_to=None, broker=N
 
         result[cat] = {'amount': round(result.get(cat, {'amount': 0})['amount'] + amount, 2)}
     return result
+
+
+def get_cash_flow_other_details(report_id=None, date_from=None, date_to=None, broker=None):
+    """Из чего складывается категория «Прочее» — для пояснения в дашборде.
+
+    Возвращает список ``{'description': str, 'amount': float}`` по убыванию
+    модуля суммы. Нулевые движения (строки-заголовки таблиц отчётов) не
+    попадают: они ничего не объясняют.
+    """
+    details = []
+    for row in _cash_flow_groups(report_id, date_from, date_to, broker):
+        if _categorize_cash_flow(row['description'], row['source']) != 'Прочее':
+            continue
+        amount = round(row['credits'] - row['debits'], 2)
+        if abs(amount) < 0.005:
+            continue
+        details.append({'description': row['description'], 'amount': amount})
+    details.sort(key=lambda d: -abs(d['amount']))
+    return details
 
 
 def _normalize_sec_code(code: str) -> str:
@@ -892,9 +926,12 @@ def _normalize_sec_code(code: str) -> str:
     """
     if not code:
         return code
-    # ISIN → ticker mapping (ОФЗ)
+    # ISIN → ticker mapping (ОФЗ). Отчёты Сбера дают ISIN, отчёты
+    # Газпромбанка/Ньютона и QUIK — гос. рег. номер; без склейки одна и та же
+    # бумага считается двумя позициями и сделки дублируются.
     isin_map = {
         'RU000A105FZ9': 'SU26241RMFS8',  # ОФЗ 26241
+        'RU000A106E90': 'SU26243RMFS4',  # ОФЗ 26243
     }
     if code in isin_map:
         return isin_map[code]
@@ -1171,7 +1208,10 @@ def _match_trades_lifo(report_id=None, date_from=None, date_to=None, broker=None
         trades = []
         seen_deals = set()
         for t in trades_raw:
-            key = (t['security_code'] or t['security_name'], t['deal_number'])
+            # Ключ дедупликации — нормализованный код: одну и ту же сделку
+            # брокерский отчёт может отдать по ISIN, а QUIK — по гос. номеру.
+            code_key = _normalize_sec_code(t['security_code'] or t['security_name'])
+            key = (code_key, t['deal_number'])
             if key in seen_deals:
                 continue
             seen_deals.add(key)
@@ -1307,7 +1347,8 @@ def get_reports_list():
         SELECT id, filename, contract, investor, period_start, period_end, created_at,
                COALESCE(source_type, '') AS source_type,
                COALESCE(broker, '') AS broker
-        FROM report ORDER BY created_at DESC
+        FROM report WHERE COALESCE(source_type, '') != 'boundary'
+        ORDER BY created_at DESC
     """).fetchall()
     conn.close()
     result = []
@@ -1702,6 +1743,164 @@ def save_quik_trades(trades: list):
         push_to_cloud()
     except Exception:
         pass  # Firebase недоступен — не фатально, данные есть локально
+
+
+def normalize_trades_scale(report_id: int, dry_run: bool = False) -> dict:
+    """Привести количество и цену сделок отчёта к масштабу цен T-Invest.
+
+    Зачем: в отчётах до корпоративных действий количество бумаг указано в
+    «старом» масштабе. Пример — ВТБ: до обратного сплита 1:5000 в отчёте
+    3 000 000 шт по 0,023 ₽, а цены T-Invest и текущие позиции уже укрупнённые
+    (≈115 ₽). Если сложить как есть, позиция и стоимость завышаются в 5000 раз.
+
+    Для каждой сделки сравниваем цену сделки с ценой T-Invest на ту же дату:
+    отношение 1, 10, 100, 1000, 5000… — это коэффициент дробления. Делим на
+    него количество и умножаем цену, сумма сделки не меняется.
+    """
+    from app import dashboard_prices as tinvest
+
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT id, security_code, coalesce(class_code,'') AS class_code,
+               trade_date, price, quantity
+        FROM trade WHERE report_id=? AND quantity > 0
+    """, (report_id,)).fetchall()
+    if not rows:
+        conn.close()
+        return {}
+
+    client = tinvest._get_client()
+    if client is None:
+        conn.close()
+        return {}
+
+    codes = {r['security_code']: r['class_code'] for r in rows}
+    nominals = tinvest.face_values(dict(codes)) or {}
+
+    nice = (1, 10, 100, 1000, 5000, 10000, 100000)
+    series_cache = {}
+
+    def series_for(code, class_code):
+        if code in series_cache:
+            return series_cache[code]
+        ins = tinvest._find(client, code, class_code or '')
+        data = {}
+        if ins and ins.get('uid'):
+            try:
+                candles = client.candles(
+                    ins['uid'],
+                    datetime(2018, 1, 1, tzinfo=timezone.utc),
+                    datetime.now(timezone.utc))
+                for c in candles:
+                    px = tinvest._convert(client, ins, c['close'])
+                    if px:
+                        day = (datetime.utcfromtimestamp(c['ts_ns'] / 1e9)
+                               + timedelta(hours=3)).strftime('%Y-%m-%d')
+                        data[day] = px
+            except Exception:  # noqa: BLE001
+                data = {}
+        series_cache[code] = data
+        return data
+
+    changed = {}
+    for r in rows:
+        day = _norm_date(r['trade_date'])
+        iso = f'{day[:4]}-{day[4:6]}-{day[6:8]}'
+        data = series_for(r['security_code'], r['class_code'])
+        if not data:
+            continue
+        before = [d for d in data if d <= iso]
+        ref = data[max(before)] if before else data[min(data)]
+        price = r['price'] or 0
+        nominal = nominals.get(r['security_code'])
+        if nominal and 0 < price <= 300:     # облигация: % от номинала → рубли
+            price = price / 100.0 * nominal
+        if not ref or not price:
+            continue
+        ratio = ref / price
+        factor = next((float(n) for n in nice if 0.7 * n <= ratio <= 1.4 * n), 1.0)
+        if factor <= 1:
+            continue
+        new_qty = int(round(r['quantity'] / factor)) or 1
+        new_price = (r['price'] or 0) * factor
+        if not dry_run:
+            conn.execute("UPDATE trade SET quantity=?, price=? WHERE id=?",
+                         (new_qty, new_price, r['id']))
+        changed[r['security_code']] = changed.get(r['security_code'], 0) + 1
+
+    if changed and not dry_run:
+        conn.commit()
+    conn.close()
+    return changed
+
+
+def get_price_targets():
+    conn = get_connection()
+    conn.execute('CREATE TABLE IF NOT EXISTS price_target ('
+                 'sec_code TEXT PRIMARY KEY, price REAL NOT NULL, '
+                 "updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')))")
+    rows = conn.execute('SELECT sec_code, price FROM price_target').fetchall()
+    conn.close()
+    return {r['sec_code']: r['price'] for r in rows}
+
+
+def set_price_target(sec_code: str, price):
+    """Задать (или снять, при ``price=None``) целевую цену по инструменту."""
+    conn = get_connection()
+    conn.execute('CREATE TABLE IF NOT EXISTS price_target ('
+                 'sec_code TEXT PRIMARY KEY, price REAL NOT NULL, '
+                 "updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')))")
+    if not price or price <= 0:
+        conn.execute('DELETE FROM price_target WHERE sec_code=?', (sec_code,))
+    else:
+        conn.execute(
+            'INSERT INTO price_target(sec_code, price, updated_at) '
+            "VALUES (?, ?, datetime('now', 'localtime')) "
+            'ON CONFLICT(sec_code) DO UPDATE SET price=excluded.price, '
+            'updated_at=excluded.updated_at',
+            (sec_code, float(price)))
+    conn.commit()
+    conn.close()
+
+
+def _manual_flow_ddl(conn):
+    conn.execute('CREATE TABLE IF NOT EXISTS manual_flow ('
+                 'id INTEGER PRIMARY KEY AUTOINCREMENT, flow_date TEXT NOT NULL, '
+                 'amount REAL NOT NULL, description TEXT DEFAULT "", '
+                 "updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')))")
+
+
+def get_manual_flows():
+    """Ручные потоки денег — переводы, которых нет в отчётах.
+
+    ``[{'id', 'date', 'amount', 'description'}]``; ввод — плюс, вывод — минус.
+    """
+    conn = get_connection()
+    _manual_flow_ddl(conn)
+    rows = conn.execute('SELECT id, flow_date, amount, description FROM manual_flow '
+                        'ORDER BY flow_date').fetchall()
+    conn.close()
+    return [{'id': r['id'], 'date': r['flow_date'], 'amount': r['amount'],
+             'description': r['description'] or ''} for r in rows]
+
+
+def add_manual_flow(day: str, amount, description: str = ''):
+    conn = get_connection()
+    _manual_flow_ddl(conn)
+    cur = conn.execute('INSERT INTO manual_flow(flow_date, amount, description) VALUES (?,?,?)',
+                       (day, float(amount), (description or '')[:200]))
+    conn.commit()
+    flow_id = cur.lastrowid
+    conn.close()
+    return flow_id
+
+
+def delete_manual_flow(flow_id) -> None:
+    conn = get_connection()
+    _manual_flow_ddl(conn)
+    conn.execute('DELETE FROM manual_flow WHERE id=?', (flow_id,))
+    conn.commit()
+    conn.close()
 
 
 def get_current_prices():

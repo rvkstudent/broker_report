@@ -10,6 +10,8 @@ Firebase) должны существовать в единственном эк
 достигается потоками: ``--workers 1 --threads 8``.
 """
 
+import os
+
 from app.envfile import load_env_file
 
 # В Docker переменные приходят из env_file; локальный запуск gunicorn без
@@ -30,20 +32,29 @@ def _bootstrap():
     print('  [ok] База данных инициализирована', flush=True)
 
     try:
-        init_replication()  # pull из Firebase при старте + фоновый sync
+        if os.environ.get('BROKER_DISABLE_REPLICATION') == '1':
+            print('  Репликация Firebase отключена (BROKER_DISABLE_REPLICATION=1)', flush=True)
+        else:
+            init_replication()  # pull из Firebase при старте + фоновый sync
     except Exception as e:
         print(f'  [warn] Firebase недоступен: {e}', flush=True)
 
-    try:
-        cnt = _auto_import()
-        print(f'  Отчётов загружено: {cnt}', flush=True)
-        if cnt:
-            push_to_cloud()
-    except Exception as e:
-        print(f'  [warn] Автоимпорт отчётов: {e}', flush=True)
+    # Автоимпорт отчётов включается только явно (BROKER_AUTO_IMPORT=1).
+    # Молчаливый импорт всех файлов из reports/ — источник сюрпризов: отчёты за
+    # годы до корпоративных действий (сплит ВТБ 1:5000) ломают позиции.
+    if os.environ.get('BROKER_AUTO_IMPORT') == '1':
+        try:
+            cnt = _auto_import()
+            print(f'  Отчётов загружено: {cnt}', flush=True)
+            if cnt:
+                push_to_cloud()
+        except Exception as e:
+            print(f'  [warn] Автоимпорт отчётов: {e}', flush=True)
 
-    start_watcher(interval=60)
-    print('  Фоновый дозор: проверка новых отчётов каждые 60с', flush=True)
+        start_watcher(interval=60)
+        print('  Фоновый дозор: проверка новых отчётов каждые 60с', flush=True)
+    else:
+        print('  Автоимпорт отчётов выключен (BROKER_AUTO_IMPORT!=1)', flush=True)
 
     if start_screener_collector():
         print('  Скринер: сбор сделок T-Invest запущен', flush=True)

@@ -33,6 +33,7 @@
 Источник (source) = 'vtb' (Открытие приравнено к ВТБ).
 """
 
+import math
 import re
 import os
 from datetime import datetime
@@ -112,6 +113,58 @@ def _fmt_time(val):
     if m:
         return m.group(1) + ':00'
     return ''
+
+
+def _parse_cash_section(df, cur, report_id, section_start, max_row):
+    """Секция «Прочие зачисления/списания денежных средств» → cash_flow.
+
+    В ЕБС-отчётах Открытия движения денег лежат отдельной таблицей:
+    Дата | … | Валюта | … | Сумма | … | Описание. Раньше парсер её не читал,
+    из-за чего пополнения/выводы за 2022–2023 отсутствовали в базе.
+    """
+    header_row = section_start + 1
+    if header_row >= max_row:
+        return 0
+
+    cols = {}
+    for c in range(min(df.shape[1], 80)):
+        cell = str(df.iloc[header_row, c]).strip().lower()
+        if not cell or cell == 'nan':
+            continue
+        if 'дата' in cell and 'date' not in cols:
+            cols['date'] = c
+        elif 'валют' in cell and 'currency' not in cols:
+            cols['currency'] = c
+        elif cell.startswith('сумма') and 'amount' not in cols:
+            cols['amount'] = c
+        elif cell.startswith('описан') and 'desc' not in cols:
+            cols['desc'] = c
+    if not {'date', 'amount', 'desc'} <= set(cols):
+        return 0
+
+    count = 0
+    for r in range(header_row + 1, max_row):
+        date_val = df.iloc[r, cols['date']]
+        if pd.isna(date_val):
+            continue
+        date_str = _fmt_date(date_val)
+        if not date_str or len(date_str) != 10:
+            continue
+        amount = parse_float(df.iloc[r, cols['amount']])
+        desc = str(df.iloc[r, cols['desc']]).strip()
+        if not amount or desc in ('', 'nan'):
+            continue
+        currency = str(df.iloc[r, cols['currency']]).strip() if 'currency' in cols else 'RUB'
+        if currency in ('', 'nan'):
+            currency = 'RUB'
+        credit = amount if amount > 0 else 0
+        debit = abs(amount) if amount < 0 else 0
+        cur.execute("""
+            INSERT INTO cash_flow(report_id, date, description, currency, credit, debit, source)
+            VALUES (?,?,?,?,?,?,?)
+        """, (report_id, date_str, desc[:200], currency, credit, debit, 'vtb'))
+        count += 1
+    return count
 
 
 def _find_section(headers, section_keywords, col_b):
@@ -288,7 +341,7 @@ def _parse_trade_section(df, cur, report_id, section_start, header_row, section_
     return count
 
 
-def parse_openbroker_report(filepath):
+def parse_openbroker_report(filepath, include_trades=True):
     """Parse Open Broker / BM-Bank XLSX report and persist to DB. Returns report_id."""
     if pd is None:
         raise ImportError('pandas is required. Install with: pip install pandas openpyxl')
@@ -312,7 +365,8 @@ def parse_openbroker_report(filepath):
         period_end = ''
         for r in range(min(10, max_row)):
             txt = str(df.iloc[r, 0]).strip()
-            m = re.search(r'за период\s+(\S+)\s+[-–]\s+(\S+)', txt)
+            m = (re.search(r'за период\s+(\S+)\s+[-–]\s+(\S+)', txt)
+                 or re.search(r'за период\s+с\s+(\S+)\s+по\s+(\S+)', txt))
             if m:
                 period_start = _fmt_date(m.group(1))
                 period_end = _fmt_date(m.group(2))
@@ -383,6 +437,58 @@ def parse_openbroker_report(filepath):
             print(f'  [open] {section_kw[:40]}: {cnt} сделок')
 
         conn.commit()
+
+        # Движения денежных средств (Открытие/ЕБС)
+        cash_kw = 'Прочие зачисления/списания денежных средств'
+        cash_start = next((i for i, v in enumerate(col_a)
+                           if v.startswith(cash_kw) or v == cash_kw), None)
+        if cash_start is not None:
+            cash_end = max_row
+            for j in range(cash_start + 2, max_row):
+                v = str(df.iloc[j, 0]).strip() if not pd.isna(df.iloc[j, 0]) else ''
+                if v.startswith('Прочие зачисления/списания ценных бумаг'):
+                    cash_end = j
+                    break
+            cnt = _parse_cash_section(df, cur, report_id, cash_start, cash_end)
+            conn.commit()
+            print(f'  [open] движения денежных средств: {cnt}')
+
+        # Вариационная маржа по срочному рынку: в отчёте она дана одной суммой
+        # за период в сводке, а не строкой в списке движений. Без неё убыток
+        # по фьючерсам (например −176 200,64 за 2020) в дашборде не виден.
+        for r in range(min(60, max_row)):
+            label = str(df.iloc[r, 0]).strip()
+            if not label.lower().startswith('вариационная маржа'):
+                continue
+            value = None
+            found = []
+            for c in range(1, df.shape[1]):
+                raw = df.iloc[r, c]
+                try:
+                    v = float(str(raw).replace(' ', '').replace('\u00a0', '').replace(',', '.'))
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(v) and v:
+                    found.append(v)
+            if found:
+                value = found[0]
+            if value:
+                cur.execute(
+                    'INSERT INTO cash_flow(report_id, date, description, credit, debit, currency) '
+                    "VALUES (?,?,?,?,?,'RUB')",
+                    (report_id, period_end,
+                     'Вариационная маржа/Сумма выплаты (итог за период)',
+                     value if value > 0 else 0, -value if value < 0 else 0))
+                conn.commit()
+                print(f'  [open] вариационная маржа за период: {value:,.2f}')
+            break
+
+        if not include_trades:
+            # Сделки 2016–2020 без парных продаж 2021 года оставляют «висящие»
+            # лоты открытыми до сегодня — такие отчёты грузим только по деньгам.
+            cur.execute('DELETE FROM trade WHERE report_id=?', (report_id,))
+            conn.commit()
+
         print(f'[open] Загружено {total_count} сделок из {filename} (report_id={report_id})')
         return report_id
     except Exception:

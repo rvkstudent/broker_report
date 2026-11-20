@@ -1,0 +1,436 @@
+{% extends "base.html" %}
+{% block title %}Рост портфеля — Анализ брокерских отчетов{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-3">
+
+    {% if data.invested and data.invested.net_invested %}
+    {% set inv = data.invested %}
+    <div class="card mb-3">
+        <div class="card-header bg-white">
+            <i class="bi bi-wallet2"></i> Доходность вложенных денег
+            <small class="text-muted">с {{ inv.first_flow }} · потоков: {{ inv.flows }}</small>
+        </div>
+        <div class="card-body">
+            <div class="row text-center g-3">
+                <div class="col-6 col-lg">
+                    <div class="text-muted small">Вложено всего</div>
+                    <div class="fw-bold profit-positive">{{ '{:,.2f}'.format(inv.connected) }} ₽</div>
+                </div>
+                <div class="col-6 col-lg">
+                    <div class="text-muted small">Выведено</div>
+                    <div class="fw-bold profit-negative">{{ '{:,.2f}'.format(-inv.withdrawn) }} ₽</div>
+                </div>
+                <div class="col-6 col-lg">
+                    <div class="text-muted small">Нетто вложено</div>
+                    <div class="fw-bold">{{ '{:,.2f}'.format(inv.net_invested) }} ₽</div>
+                </div>
+                <div class="col-6 col-lg">
+                    <div class="text-muted small">Сейчас</div>
+                    <div class="fw-bold">{{ '{:,.2f}'.format(inv.value) }} ₽</div>
+                </div>
+                <div class="col-6 col-lg">
+                    <div class="text-muted small">Прибыль</div>
+                    <div class="fw-bold {{ 'profit-positive' if inv.profit is not none and inv.profit >= 0 else 'profit-negative' }}">
+                        {% if inv.profit is not none %}{{ '{:+,.2f}'.format(inv.profit) }} ₽{% else %}—{% endif %}
+                    </div>
+                </div>
+                <div class="col-6 col-lg">
+                    <div class="text-muted small">Доходность</div>
+                    <div class="fw-bold {{ 'profit-positive' if inv.simple_pct is not none and inv.simple_pct >= 0 else 'profit-negative' }}">
+                        {% if inv.simple_pct is not none %}{{ '{:+,.2f}'.format(inv.simple_pct) }}%{% else %}—{% endif %}
+                    </div>
+                </div>
+                <div class="col-6 col-lg">
+                    <div class="text-muted small" title="Годовая доходность с учётом дат вводов и выводов">Годовая (XIRR)</div>
+                    <div class="fw-bold {{ 'profit-positive' if inv.xirr is not none and inv.xirr >= 0 else 'profit-negative' }}">
+                        {% if inv.xirr is not none %}{{ '{:+,.2f}'.format(inv.xirr) }}%{% else %}—{% endif %}
+                    </div>
+                </div>
+            </div>
+            <div class="small mt-2">
+                <b>Если закрыть все позиции по таргетам:</b>
+                стоимость {{ '{:,.2f}'.format(inv.value_at_target) if inv.value_at_target else '—' }} ₽
+                (прирост {{ '{:+,.2f}'.format(inv.uplift or 0) }} ₽) →
+                XIRR всей истории
+                <span class="fw-bold {{ 'profit-positive' if inv.xirr_target is not none and inv.xirr_target >= 0 else 'profit-negative' }}">
+                    {% if inv.xirr_target is not none %}{{ '{:+,.2f}'.format(inv.xirr_target) }}%{% else %}—{% endif %}</span>,
+                текущего портфеля
+                <span class="fw-bold {{ 'profit-positive' if inv.xirr_target_period is not none and inv.xirr_target_period >= 0 else 'profit-negative' }}">
+                    {% if inv.xirr_target_period is not none %}{{ '{:+,.2f}'.format(inv.xirr_target_period) }}%{% else %}—{% endif %}</span>.
+                Таргеты заданы не по всем бумагам — по остальным взята текущая цена.
+            </div>
+            <div class="small mt-2">
+                <b>Годовая доходность текущего портфеля{% if inv.period_start %} (с {{ inv.period_start }}, старт {{ '{:,.2f}'.format(inv.period_start_value) }} ₽){% endif %}:</b>
+                <span class="fw-bold {{ 'profit-positive' if inv.xirr_period is not none and inv.xirr_period >= 0 else 'profit-negative' }}">
+                    {% if inv.xirr_period is not none %}{{ '{:+,.2f}'.format(inv.xirr_period) }}%{% else %}—{% endif %}</span>
+                <span class="text-muted">— считается только по текущей истории: общая цифра ({{ '{:+,.2f}'.format(inv.xirr) }}%)
+                    включает убыточные 2016–2020 годы другого счёта и разрыв 2021-го.</span>
+            </div>
+            <div class="small text-muted mt-2">
+                <b>Сверка (деньги + результаты = портфель):</b>
+                нетто вложено {{ '{:,.2f}'.format(inv.net_invested) }} +
+                дивиденды/купоны {{ '{:,.2f}'.format(inv.income or 0) }} +
+                торговый результат {{ '{:+,.2f}'.format(inv.trading or 0) }} +
+                <span title="Разница между текущей ценой и ценой покупки по открытым позициям">
+                    просадка по открытым позициям {{ '{:+,.2f}'.format(inv.unrealized or 0) }}</span> +
+                <span title="Комиссии, налоги, а также расхождение по 2021 году — отчёта за него нет">прочее {{ '{:+,.2f}'.format(inv.other or 0) }}</span> =
+                <b>{{ '{:,.2f}'.format(inv.value) }} ₽</b> — текущая стоимость портфеля.
+                В «прочее» сидят комиссии, налоги и расхождение по 2021 году: отчётов за него нет,
+                поэтому стоимость на конец 2020 (591 606 ₽) и на начало 2022 не связаны документально.
+            </div>
+            <div class="small text-muted mt-1">
+                Проверка: Сейчас − Нетто вложено = {{ '{:,.2f}'.format(inv.value) }} −
+                {{ '{:,.2f}'.format(inv.net_invested) }} =
+                <b class="{{ 'profit-positive' if inv.profit is not none and inv.profit >= 0 else 'profit-negative' }}">
+                    {{ '{:+,.2f}'.format(inv.profit) if inv.profit is not none else '—' }} ₽</b>
+                (то же, что «Прибыль»). Выведено больше вложенного — это нормально: вы забирали
+                прибыль и переводили деньги между счетами; доходность считается по срокам, поэтому
+                XIRR и не «ломается».
+            </div>
+            <div class="row text-center g-3 mt-2 pt-2 border-top">
+                <div class="col-6 col-lg-3">
+                    <div class="text-muted small">Сейчас в USD{% if inv.usd_rate_now %} (курс {{ '{:,.2f}'.format(inv.usd_rate_now) }}){% endif %}</div>
+                    <div class="fw-bold">{% if inv.usd_value %}{{ '{:,.2f}'.format(inv.usd_value) }} $ {% else %}—{% endif %}</div>
+                </div>
+                <div class="col-6 col-lg-3">
+                    <div class="text-muted small">Прибыль в USD</div>
+                    <div class="fw-bold {{ 'profit-positive' if inv.usd_profit is not none and inv.usd_profit >= 0 else 'profit-negative' }}">
+                        {% if inv.usd_profit is not none %}{{ '{:+,.2f}'.format(inv.usd_profit) }} $ {% else %}—{% endif %}
+                    </div>
+                </div>
+                <div class="col-6 col-lg-3">
+                    <div class="text-muted small" title="Вводы пересчитаны по курсу на дату каждого пополнения">Годовая (XIRR) в USD</div>
+                    <div class="fw-bold {{ 'profit-positive' if inv.usd_xirr is not none and inv.usd_xirr >= 0 else 'profit-negative' }}">
+                        {% if inv.usd_xirr is not none %}{{ '{:+,.2f}'.format(inv.usd_xirr) }}%{% else %}—{% endif %}
+                    </div>
+                    {% if inv.usd_start_value %}
+                    <div class="small text-muted" style="white-space:nowrap">
+                        с {{ inv.usd_since }}, старт {{ '{:,.2f}'.format(inv.usd_start_value) }} $
+                    </div>
+                    {% endif %}
+                </div>
+                <div class="col-6 col-lg-3">
+                    <div class="text-muted small">Нетто вложено, $</div>
+                    <div class="fw-bold">
+                        {% if inv.usd_connected %}
+                        {{ '{:,.2f}'.format(inv.usd_connected + inv.usd_withdrawn) }} $
+                        {% else %}—{% endif %}
+                    </div>
+                    {% if inv.usd_connected %}
+                    <div class="small" style="white-space:nowrap">
+                        <span class="profit-positive">{{ '{:,.2f}'.format(inv.usd_connected) }}</span>
+                        <span class="text-muted">/</span>
+                        <span class="profit-negative">{{ '{:,.2f}'.format(-inv.usd_withdrawn) }}</span>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+            <div class="small text-muted mt-2">
+                Переводы между брокерами не считаются вводом/выводом. Прибыль = текущая стоимость
+                бумаг минус вложенные деньги.
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <div class="card mb-3">
+        <div class="card-body small text-muted">
+            Ввод считается по операциям «Зачисление денежных средств» и «Поставлены на торги средства»,
+            вывод — по «Вывод денежных средств»; внутренние «Перечисления» между счетами отброшены,
+            дубли схлопнуты по дате и сумме. Стоимость на {{ data.invested.as_of }} — по отчётам:
+            {% for fam, val in data.invested.by_broker.items() %}{{ fam }} {{ '{:,.2f}'.format(val) }} ₽{% if not loop.last %}, {% endif %}{% endfor %}.
+        </div>
+    </div>
+
+    {% if data.portfolio_now and data.portfolio_now.total %}
+    {% set pn = data.portfolio_now %}
+    <div class="card mb-3">
+        <div class="card-header bg-white">
+            <i class="bi bi-pie-chart"></i> Текущий портфель
+            <small class="text-muted">на {{ pn.as_of }} · структура, доходность по выплатам, скользящая XIRR</small>
+        </div>
+        <div class="card-body">
+            <div class="row g-3">
+                <div class="col-lg-5">
+                    <div class="small text-muted mb-1">Структура</div>
+                    <table class="table table-sm mb-0" style="font-size:13px">
+                        <tbody>
+                        {% for row in pn.structure %}
+                            <tr>
+                                <td>{{ row.label }}</td>
+                                <td class="text-end">{{ '{:,.2f}'.format(row.value) }} ₽</td>
+                                <td class="text-end fw-bold" style="width:70px">{{ '{:.1f}'.format(row.pct) }}%</td>
+                            </tr>
+                        {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                <div class="col-lg-7">
+                    <div class="row text-center g-3">
+                        <div class="col-6 col-lg-4">
+                            <div class="text-muted small" title="Доход (купоны+дивиденды) за 12 мес / стоимость портфеля">Доходность по выплатам<small class="d-block">за 12 мес</small></div>
+                            <div class="fw-bold {{ 'profit-positive' if pn.yield_total_pct is not none and pn.yield_total_pct >= 0 else 'profit-negative' }}">
+                                {% if pn.yield_total_pct is not none %}{{ '{:+.2f}'.format(pn.yield_total_pct) }}%{% else %}—{% endif %}</div>
+                        </div>
+                        <div class="col-6 col-lg-4">
+                            <div class="text-muted small">Ожидаемый доход<small class="d-block">за год (по факту 12 мес)</small></div>
+                            <div class="fw-bold profit-positive">{{ '{:+,.2f}'.format(pn.income_12m) }} ₽</div>
+                        </div>
+                        <div class="col-6 col-lg-4">
+                            <div class="text-muted small">Кэш</div>
+                            <div class="fw-bold">{{ '{:,.2f}'.format(pn.cash_value) }} ₽</div>
+                        </div>
+                        <div class="col-6 col-lg-6">
+                            <div class="text-muted small" title="Money-weighted доходность за последние 12 месяцев">XIRR, 12 мес</div>
+                            <div class="fw-bold {{ 'profit-positive' if pn.rolling_xirr_12m is not none and pn.rolling_xirr_12m >= 0 else 'profit-negative' }}">
+                                {% if pn.rolling_xirr_12m is not none %}{{ '{:+.2f}'.format(pn.rolling_xirr_12m) }}%{% else %}—{% endif %}</div>
+                        </div>
+                        <div class="col-6 col-lg-6">
+                            <div class="text-muted small" title="Money-weighted доходность за последние 36 месяцев">XIRR, 3 года</div>
+                            <div class="fw-bold {{ 'profit-positive' if pn.rolling_xirr_36m is not none and pn.rolling_xirr_36m >= 0 else 'profit-negative' }}">
+                                {% if pn.rolling_xirr_36m is not none %}{{ '{:+.2f}'.format(pn.rolling_xirr_36m) }}%{% else %}—{% endif %}</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="small text-muted mt-2">
+                Структура — по текущим позициям и рыночным ценам; «Кэш» — остаток до стоимости портфеля по отчётам.
+                «Доходность по выплатам» = фактические купоны и дивиденды за 12 мес / стоимость портфеля
+                {% if pn.yield_bonds_pct is not none %}(по облигациям ≈ {{ '{:.2f}'.format(pn.yield_bonds_pct) }}%){% endif %} —
+                это денежная доходность, а не полная YTM (для неё нужен график купонов и даты погашения).
+                Скользящая XIRR показывает, как работает именно текущий портфель, без старой истории 2016–2020.
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <div class="card">
+        <div class="card-header bg-white d-flex justify-content-between align-items-center">
+            <div>
+                <i class="bi bi-graph-up-arrow"></i> Рост портфеля по годам
+                <small class="text-muted">стоимость — из отчётов брокеров (оценка активов на дату)</small>
+            </div>
+            <small class="text-muted">{{ data.start }} — {{ data.end }}</small>
+        </div>
+        <div class="card-body p-0">
+            {% if data.error %}
+            <div class="alert alert-warning rounded-0 mb-0">
+                {{ data.error }}. Загрузите отчёты брокеров — снимки активов соберутся автоматически.
+            </div>
+            {% elif data.years %}
+            <div class="table-responsive">
+                <table class="table table-sm table-hover mb-0" style="font-size:13px">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Год</th>
+                            <th class="text-end">Стоимость на конец</th>
+                            <th class="text-end">Прирост<br><small class="text-muted">результат за год</small></th>
+                            <th class="text-end">Внесено / выведено<br><small class="text-muted">справочно</small></th>
+                            <th class="text-end">Дивиденды/купоны</th>
+                            <th class="text-end">Торговый результат</th>
+                            <th class="text-end">Доходность (TWR)</th>
+                            <th class="text-end">XIRR<br><small class="text-muted">за год</small></th>
+                            <th class="text-end">MCFTR</th>
+                            <th class="text-end">Курс USD</th>
+                            <th class="text-end">В USD</th>
+                            <th class="text-end">USD, %</th>
+                            <th class="text-end">Снимков</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    {% for y in data.years %}
+                        <tr>
+                            <td class="fw-bold">{{ y.year }}</td>
+                            <td class="text-end">
+                                {% if y.total is not none %}{{ '{:,.2f}'.format(y.total) }}{% else %}—{% endif %}</td>
+                            <td class="text-end fw-bold {{ 'profit-positive' if y.pnl is not none and y.pnl >= 0 else 'profit-negative' }}">
+                                {% if y.pnl is not none %}{{ '{:+,.2f}'.format(y.pnl) }}{% else %}—{% endif %}</td>
+                            <td class="text-end" style="white-space:nowrap;font-size:12px">
+                                <span class="profit-positive">{{ '{:,.2f}'.format(y.deposits) }}</span>
+                                <span class="text-muted">/</span>
+                                <span class="profit-negative">{{ '{:,.2f}'.format(y.withdrawals) }}</span>
+                            </td>
+                            <td class="text-end {{ 'profit-positive' if y.income >= 0 else 'profit-negative' }}">
+                                {% if y.income %}{{ '{:+,.2f}'.format(y.income) }}{% else %}—{% endif %}</td>
+                            <td class="text-end {{ 'profit-positive' if y.trading >= 0 else 'profit-negative' }}">
+                                {% if y.trading %}{{ '{:+,.2f}'.format(y.trading) }}{% else %}—{% endif %}</td>
+                            <td class="text-end fw-bold {{ 'profit-positive' if y.twr is not none and y.twr >= 0 else 'profit-negative' }}">
+                                {% if y.twr is not none %}{{ '{:+,.2f}'.format(y.twr) }}%{% else %}—{% endif %}</td>
+                            <td class="text-end fw-bold {{ 'profit-positive' if y.xirr is not none and y.xirr >= 0 else 'profit-negative' }}"
+                                title="Доходность года с учётом дат вводов и выводов">
+                                {% if y.xirr is not none %}{{ '{:+,.2f}'.format(y.xirr) }}%{% else %}—{% endif %}</td>
+                            <td class="text-end {{ 'profit-positive' if y.benchmark is not none and y.benchmark >= 0 else 'profit-negative' }}">
+                                {% if y.benchmark is not none %}{{ '{:+,.2f}'.format(y.benchmark) }}%{% else %}—{% endif %}</td>
+                            <td class="text-end">{{ '{:,.2f}'.format(y.usd_rate) if y.usd_rate else '—' }}</td>
+                            <td class="text-end">{{ '{:,.2f}'.format(y.usd_total) if y.usd_total else '—' }}</td>
+                            <td class="text-end {{ 'profit-positive' if y.usd_pct is not none and y.usd_pct >= 0 else 'profit-negative' }}">
+                                {% if y.usd_pct is not none %}{{ '{:+,.2f}'.format(y.usd_pct) }}%{% else %}—{% endif %}</td>
+                            <td class="text-end text-muted">{{ y.snapshots }}</td>
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <div class="px-3 py-2 small text-muted border-top">
+                Пополнения и выводы взяты из движений денежных средств; переводы между брокерами
+                взаимно погашены{% if data.transfers %} (погашено {{ '{:,.2f}'.format(data.transfers) }} ₽){% endif %}.
+                Доходность — TWR: не зависит от того, сколько и когда вносили.<br>
+                <strong>Прирост</strong> = стоимость на конец − стоимость на начало − внесено + выведено.
+                Он складывается из дивидендов/купонов, торгового результата и изменения цен бумаг.
+                2021 год в таблице отсутствует: отчётов за него нет, поэтому стоимость 2020 года
+                (591 606 ₽) и начало 2022-го документально не связаны — расхождение показано
+                в строке «прочее» блока сверки.
+            </div>
+            {% endif %}
+        </div>
+    </div>
+
+    {% if data.series %}
+    <div class="card mt-3">
+        <div class="card-header bg-white">
+            <i class="bi bi-activity"></i> Стоимость портфеля и {{ data.benchmark }}
+            <small class="text-muted">приведено к стартовой стоимости</small>
+        </div>
+        <div class="card-body p-0"><div id="growthChart" style="height:360px"></div></div>
+    </div>
+    {% endif %}
+
+    {# Ручные потоки: переводы между брокерами, которых нет в отчётах #}
+    <div class="card mt-3">
+        <div class="card-header bg-white">
+            <i class="bi bi-arrow-left-right"></i> Ручные потоки
+            <small class="text-muted">переводы между брокерами, которых нет в загруженных отчётах:
+                ввод — плюс, вывод — минус</small>
+        </div>
+        <div class="card-body">
+            <div class="row g-2 align-items-end">
+                <div class="col-auto">
+                    <label class="form-label small mb-0">Дата</label>
+                    <input type="date" class="form-control form-control-sm" id="mfDate">
+                </div>
+                <div class="col-auto">
+                    <label class="form-label small mb-0">Сумма, ₽</label>
+                    <input type="text" class="form-control form-control-sm" id="mfAmount"
+                           placeholder="-591606" style="width:130px">
+                </div>
+                <div class="col-auto">
+                    <label class="form-label small mb-0">Описание</label>
+                    <input type="text" class="form-control form-control-sm" id="mfDesc"
+                           placeholder="Перевод в Инвестиционную палату" style="width:280px">
+                </div>
+                <div class="col-auto">
+                    <button class="btn btn-sm btn-primary" id="mfAdd">Добавить</button>
+                </div>
+            </div>
+            {% if manual_flows %}
+            <table class="table table-sm mt-3 mb-0" style="font-size:12px">
+                <thead class="table-light">
+                    <tr><th>Дата</th><th class="text-end">Сумма</th><th>Описание</th><th></th></tr>
+                </thead>
+                <tbody>
+                {% for m in manual_flows %}
+                    <tr>
+                        <td>{{ m.date }}</td>
+                        <td class="text-end {{ 'profit-positive' if m.amount >= 0 else 'profit-negative' }}">
+                            {{ '{:+,.2f}'.format(m.amount) }}</td>
+                        <td class="text-muted">{{ m.description }}</td>
+                        <td class="text-end">
+                            <button class="btn btn-sm btn-outline-danger mf-del" data-id="{{ m.id }}">×</button>
+                        </td>
+                    </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <div class="small text-muted mt-2">Пока не добавлено ни одного ручного потока.</div>
+            {% endif %}
+        </div>
+    </div>
+
+    {% if data.snapshots %}
+    <div class="card mt-3">
+        <div class="card-header bg-white">
+            <i class="bi bi-file-earmark-text"></i> Снимки активов из отчётов
+            <span class="badge bg-secondary">{{ data.snapshots | length }}</span>
+        </div>
+        <div class="card-body p-0">
+            <div class="table-responsive" style="max-height:340px;overflow:auto">
+                <table class="table table-sm table-hover mb-0" style="font-size:12px">
+                    <thead class="table-light">
+                        <tr><th>Дата</th><th>Брокер</th><th>Файл</th>
+                            <th class="text-end">Оценка активов</th><th class="text-end">Деньги</th></tr>
+                    </thead>
+                    <tbody>
+                    {% for s in data.snapshots %}
+                        <tr>
+                            <td>{{ s.snapshot_date }}</td>
+                            <td>{{ s.family }}</td>
+                            <td><small class="text-muted">{{ s.filename[:60] }}</small></td>
+                            <td class="text-end">{{ '{:,.2f}'.format(s.assets) }}</td>
+                            <td class="text-end">{{ '{:,.2f}'.format(s.cash) }}</td>
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+{% if data.series %}
+<script src="{{ url_for('static', filename='vendor/lightweight-charts-4.2.3/lightweight-charts.standalone.production.js') }}"></script>
+<script>
+(function () {
+    const rows = {{ data.series | tojson }};
+    const el = document.getElementById('growthChart');
+    const chart = LightweightCharts.createChart(el, {
+        height: 360,
+        layout: { background: { color: '#fff' }, textColor: '#333' },
+        grid: { vertLines: { color: '#f0f0f0' }, horzLines: { color: '#f0f0f0' } },
+        rightPriceScale: { borderColor: '#ddd' },
+        timeScale: { borderColor: '#ddd' },
+        localization: { locale: 'ru-RU' },
+    });
+    const portfolio = chart.addLineSeries({ color: '#2563eb', lineWidth: 2, title: 'Портфель' });
+    portfolio.setData(rows.filter(r => r.total).map(r => ({ time: r.date, value: r.total })));
+    const bench = chart.addLineSeries({ color: '#94a3b8', lineWidth: 2, title: '{{ data.benchmark }}' });
+    bench.setData(rows.filter(r => r.benchmark).map(r => ({ time: r.date, value: r.benchmark })));
+    new ResizeObserver(() => chart.applyOptions({ width: el.clientWidth })).observe(el);
+    chart.applyOptions({ width: el.clientWidth });
+})();
+</script>
+{% endif %}
+
+<script>
+(function () {
+    const addBtn = document.getElementById('mfAdd');
+    if (!addBtn) return;
+    function reload() { window.location.reload(); }
+    addBtn.addEventListener('click', async function () {
+        const date = document.getElementById('mfDate').value;
+        const amount = document.getElementById('mfAmount').value;
+        const description = document.getElementById('mfDesc').value;
+        if (!date || !amount) { alert('Укажите дату и сумму'); return; }
+        const r = await fetch('/api/manual-flow', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ date: date, amount: amount, description: description })
+        });
+        if (r.ok) reload(); else alert('Не удалось сохранить поток');
+    });
+    document.querySelectorAll('.mf-del').forEach(function (b) {
+        b.addEventListener('click', async function () {
+            if (!confirm('Удалить поток?')) return;
+            const r = await fetch('/api/manual-flow/delete', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: b.dataset.id })
+            });
+            if (r.ok) reload();
+        });
+    });
+})();
+</script>
+{% endblock %}

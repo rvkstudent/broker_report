@@ -16,9 +16,11 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 
-from app.tinkoff_api import TinkoffAPIError, TinkoffClient, _quotation_to_float
+from app.tinkoff_api import (TinkoffAPIError, TinkoffClient, _quotation_to_float,
+                             trading_days_ago)
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +44,10 @@ _uid_cache: dict = {}      # (sec_code, class_code) -> InstrumentShort | None
 _detail_cache: dict = {}   # uid -> полная карточка
 _prices_cache: dict = {}   # sec_code -> row
 _prices_at = 0.0
+_prev_close_cache: dict = {}   # sec_code -> (дата МСК, закрытие пред. дня | None)
+_prev_close_lock = threading.Lock()
+_prev_close_day = ''           # день, для которого кэш уже прочитан из БД
+_prev_close_refreshing = False
 
 
 def token() -> str:
@@ -121,6 +127,15 @@ def _find(client: TinkoffClient, sec_code: str, class_code: str) -> dict | None:
                 if (ins.get('classCode') or '').upper() == wanted_class:
                     found = ins
                     break
+            if found is None and matches:
+                # Класс из QUIK может не совпадать с классом T-Invest (ОФЗ в
+                # QUIK помечены SIRMR_BND, облигация RU000A10C3M0 — TQBR).
+                # Тогда берём MOEX-запись, как и при неизвестном классе, но
+                # чужие листинги (PTEQ и т.п.) по-прежнему не подставляем.
+                matches.sort(key=_class_preference)
+                best = matches[0]
+                if (best.get('classCode') or '').upper() in PREFERRED_CLASSES:
+                    found = best
             if found is None:
                 log.warning(
                     'FindInstrument %s: нет инструмента в классе %s — '
@@ -257,3 +272,189 @@ def get_prices(instruments: dict, force: bool = False) -> dict:
         return dict(rows)
     finally:
         _fetch_lock.release()
+
+
+# ── Изменение к предыдущему дню ──────────────────────────────
+# В ``current_price`` хранится только последняя цена, истории в БД нет,
+# поэтому закрытие предыдущего торгового дня берём из дневных свечей T-Invest.
+# Закрытие за сутки не меняется — кэш на календарный день по Москве.
+
+def _msk_now() -> datetime:
+    return datetime.now(timezone.utc) + timedelta(hours=3)
+
+
+def _candle_day(ts_ns: int) -> str:
+    """Дата свечи (МСК) в формате YYYY-MM-DD."""
+    utc = datetime.fromtimestamp(ts_ns / 1_000_000_000, tz=timezone.utc)
+    return (utc.replace(tzinfo=None) + timedelta(hours=3)).strftime('%Y-%m-%d')
+
+
+def _prev_close(client: TinkoffClient, ins: dict) -> float | None:
+    """Закрытие предыдущего торгового дня в рублях за бумагу (как current_price)."""
+    uid = ins.get('uid')
+    if not uid:
+        return None
+    try:
+        candles = client.candles(uid, trading_days_ago(10), datetime.now(timezone.utc))
+    except TinkoffAPIError as exc:
+        log.warning('Дневные свечи %s: %s', ins.get('ticker'), exc)
+        return None
+
+    today = _msk_now().strftime('%Y-%m-%d')
+    prev = None
+    for candle in candles:
+        if _candle_day(candle['ts_ns']) < today:
+            prev = candle
+    if prev is None:
+        return None
+    converted = _convert(client, ins, prev['close'])
+    return converted if converted and converted > 0 else None
+
+
+def _prev_close_conn():
+    from app.db import get_connection
+    return get_connection()
+
+
+def _load_prev_closes(today: str) -> None:
+    """Прочитать закрытия из БД, чтобы не тянуть свечи при каждом рестарте."""
+    global _prev_close_day
+    with _prev_close_lock:
+        if _prev_close_day == today:
+            return
+        _prev_close_day = today
+    try:
+        conn = _prev_close_conn()
+        conn.execute('CREATE TABLE IF NOT EXISTS prev_close ('
+                     'sec_code TEXT PRIMARY KEY, day TEXT NOT NULL, price REAL NOT NULL)')
+        conn.commit()
+        rows = conn.execute('SELECT sec_code, day, price FROM prev_close').fetchall()
+        conn.close()
+    except Exception as exc:  # noqa: BLE001
+        log.warning('Закрытия предыдущего дня из БД: %s', exc)
+        return
+    with _prev_close_lock:
+        _prev_close_cache.clear()
+        for row in rows:
+            if row['day'] == today:
+                _prev_close_cache[row['sec_code']] = (row['day'], row['price'])
+
+
+def _store_prev_closes(today: str, values: dict) -> None:
+    if not values:
+        return
+    try:
+        conn = _prev_close_conn()
+        conn.execute('CREATE TABLE IF NOT EXISTS prev_close ('
+                     'sec_code TEXT PRIMARY KEY, day TEXT NOT NULL, price REAL NOT NULL)')
+        conn.executemany(
+            'INSERT INTO prev_close (sec_code, day, price) VALUES (?,?,?) '
+            'ON CONFLICT(sec_code) DO UPDATE SET day=excluded.day, price=excluded.price',
+            [(code, today, price) for code, price in values.items()])
+        conn.commit()
+        conn.close()
+    except Exception as exc:  # noqa: BLE001
+        log.warning('Сохранение закрытий предыдущего дня: %s', exc)
+
+
+def _refresh_prev_closes(today: str, items: list) -> None:
+    """Дозагрузить закрытия по бумагам, которых нет в кэше (фоновый поток)."""
+    global _prev_close_refreshing
+    try:
+        client = _get_client()
+        if client is None:
+            return
+
+        # Свечи по каждой бумаге — отдельный запрос: последовательно это
+        # несколько секунд, поэтому поток фоновый, а страница берёт кэш.
+        def load(item):
+            sec_code, class_code = item
+            ins = _find(client, sec_code, class_code or '')
+            return sec_code, (_prev_close(client, ins) if ins else None)
+
+        values = {}
+        with ThreadPoolExecutor(max_workers=min(4, len(items))) as pool:
+            for sec_code, value in pool.map(load, items):
+                with _prev_close_lock:
+                    _prev_close_cache[sec_code] = (today, value)
+                if value:
+                    values[sec_code] = value
+        _store_prev_closes(today, values)
+    finally:
+        with _prev_close_lock:
+            _prev_close_refreshing = False
+
+
+_fv_cache: dict = {}       # sec_code -> (дата МСК, номинал | None)
+_fv_lock = threading.Lock()
+
+
+def face_values(instruments: dict) -> dict:
+    """``{sec_code: номинал в рублях}`` — только для облигаций.
+
+    Нужен для сценария «закрыть по номиналу». Номинал берётся из карточки
+    T-Invest (оттуда же, откуда пересчёт % → рубли для цен). Кэш — на день:
+    номинал за сутки не меняется, а запросов к API лишних не хочется.
+    """
+    if not instruments or not enabled():
+        return {}
+    client = _get_client()
+    if client is None:
+        return {}
+
+    today = _msk_now().strftime('%Y-%m-%d')
+    result = {}
+    for sec_code, class_code in list(instruments.items())[:MAX_INSTRUMENTS]:
+        with _fv_lock:
+            cached = _fv_cache.get(sec_code)
+        if cached and cached[0] == today:
+            if cached[1]:
+                result[sec_code] = cached[1]
+            continue
+
+        ins = _find(client, sec_code, class_code or '')
+        nominal = None
+        if ins and (ins.get('instrumentType') or '').lower() == 'bond':
+            detail = _details(client, ins)
+            nom = detail.get('nominal') or {}
+            value = _quotation_to_float(nom)
+            currency = (nom.get('currency') or '').lower()
+            # Валютный номинал без курса пересчитать нечем — сценарий не считаем.
+            if value > 0 and currency in ('', 'rub'):
+                nominal = round(value, 2)
+
+        with _fv_lock:
+            _fv_cache[sec_code] = (today, nominal)
+        if nominal:
+            result[sec_code] = nominal
+    return result
+
+
+def previous_closes(instruments: dict) -> dict:
+    """``{sec_code: закрытие предыдущего дня}`` для ``{sec_code: class_code}``.
+
+    Нужно для процента изменения текущей цены к предыдущему дню. Ответ
+    собирается из кэша (и из БД — переживает рестарт), а недостающие бумаги
+    догружаются в фоне: страница не ждёт сеть.
+    """
+    global _prev_close_refreshing
+    if not instruments or not enabled():
+        return {}
+
+    today = _msk_now().strftime('%Y-%m-%d')
+    _load_prev_closes(today)
+
+    items = [(code, cc) for code, cc in list(instruments.items())[:MAX_INSTRUMENTS]]
+    with _prev_close_lock:
+        missing = [(code, cc) for code, cc in items
+                   if _prev_close_cache.get(code, ('', None))[0] != today]
+        start_worker = bool(missing) and not _prev_close_refreshing
+        if start_worker:
+            _prev_close_refreshing = True
+        result = {code: value for code, (day, value) in _prev_close_cache.items()
+                  if day == today and value}
+
+    if start_worker:
+        threading.Thread(target=_refresh_prev_closes, args=(today, missing),
+                         daemon=True, name='prev-close').start()
+    return result

@@ -301,6 +301,70 @@ def _parse_vtb_cash_flow(df, cur, report_id, sections, max_row, max_col):
         """, (report_id, date_str, full_desc[:200], currency_str, credit, debit, 'vtb'))
 
 
+# Индексы колонок таблицы сделок в старом шаблоне VTB (44 колонки).
+# В новых отчётах шаблон сдвинут (39 колонок), поэтому колонки сначала
+# ищутся по заголовкам, а эти индексы используются как fallback.
+_TRADE_COLUMNS = {
+    'sec_info': 1,
+    'date': 2,
+    'side': 5,
+    'qty': 7,
+    'price': 9,
+    'currency': 11,
+    'amount': 12,
+    'nkd': 14,
+    'broker_fee': 15,
+    'exchange_fee': 17,
+    'settle_date': 18,
+    'deal_number': 25,
+    'deal_number2': 28,
+    'venue': 38,
+    'comment': 43,
+}
+
+_TRADE_HEADER_PREFIXES = (
+    ('sec_info', 'наименование ценной бумаги'),
+    ('date', 'дата и время заключения'),
+    ('side', 'вид сделки'),
+    ('qty', 'количество'),
+    ('price', 'цена'),
+    ('currency', 'валюта расчет'),
+    ('amount', 'сумма сделки'),
+    ('nkd', 'нкд'),
+    ('broker_fee', 'комиссия банка за расчет'),
+    ('exchange_fee', 'комиссия банка за заключение'),
+    ('settle_date', 'плановая дата поставки'),
+    ('deal_number2', '№ сделки у'),
+    ('venue', 'место заключения сделки'),
+    ('comment', 'комментарий'),
+)
+
+
+def _norm_header(val):
+    s = str(val).replace('\xa0', ' ').replace('\n', ' ').lower().replace('ё', 'е')
+    return re.sub(r'\s+', ' ', s).strip()
+
+
+def _resolve_trade_columns(df, header_row, max_col):
+    """Индексы колонок сделок: по заголовкам шаблона, с fallback на старый."""
+    resolved = dict(_TRADE_COLUMNS)
+    headers = {}
+    for c in range(min(max_col, df.shape[1])):
+        key = _norm_header(df.iloc[header_row, c])
+        if key and key != 'nan':
+            headers.setdefault(key, c)
+    for name, prefix in _TRADE_HEADER_PREFIXES:
+        for key, c in headers.items():
+            if key.startswith(prefix):
+                resolved[name] = c
+                break
+    # «№ сделки» ищем точным совпадением: «№ сделки у организатора» — другая колонка
+    exact = headers.get('№ сделки')
+    if exact is not None:
+        resolved['deal_number'] = exact
+    return resolved
+
+
 def _parse_vtb_trade_section(df, cur, report_id, section_title, sections, max_row, max_col):
     start, end = _find_section(sections, section_title)
     if start is None:
@@ -310,22 +374,28 @@ def _parse_vtb_trade_section(df, cur, report_id, section_title, sections, max_ro
     if data_start >= min(end, max_row):
         return
 
+    cols = _resolve_trade_columns(df, start + 1, max_col)
+
+    def cell(r, name):
+        c = cols[name]
+        return df.iloc[r, c] if c < df.shape[1] else None
+
     for r in range(data_start, min(end, max_row)):
-        sec_info = df.iloc[r, 1]
-        date_val = df.iloc[r, 2]
-        side = df.iloc[r, 5] if max_col >= 6 else None
-        qty = df.iloc[r, 7] if max_col >= 8 else None
-        price = df.iloc[r, 9] if max_col >= 10 else None
-        settle_currency = df.iloc[r, 11] if max_col >= 12 else None
-        amount = df.iloc[r, 12] if max_col >= 13 else None
-        nkd = df.iloc[r, 14] if max_col >= 15 else None
-        broker_fee = df.iloc[r, 15] if max_col >= 16 else None
-        exchange_fee = df.iloc[r, 17] if max_col >= 18 else None
-        settle_date = df.iloc[r, 18] if max_col >= 19 else None
-        deal_number = df.iloc[r, 25] if max_col >= 26 else None
-        deal_number2 = df.iloc[r, 28] if max_col >= 29 else None
-        venue = df.iloc[r, 38] if max_col >= 39 else None
-        comment = df.iloc[r, 43] if max_col >= 44 else None
+        sec_info = cell(r, 'sec_info')
+        date_val = cell(r, 'date')
+        side = cell(r, 'side')
+        qty = cell(r, 'qty')
+        price = cell(r, 'price')
+        settle_currency = cell(r, 'currency')
+        amount = cell(r, 'amount')
+        nkd = cell(r, 'nkd')
+        broker_fee = cell(r, 'broker_fee')
+        exchange_fee = cell(r, 'exchange_fee')
+        settle_date = cell(r, 'settle_date')
+        deal_number = cell(r, 'deal_number')
+        deal_number2 = cell(r, 'deal_number2')
+        venue = cell(r, 'venue')
+        comment = cell(r, 'comment')
 
         if pd.isna(sec_info) or pd.isna(date_val):
             continue
