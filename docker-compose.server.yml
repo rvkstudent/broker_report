@@ -74,6 +74,10 @@ services:
     networks:
       - broker-net
     profiles: ["tunnel"]
+    # Нужен, чтобы туннель видел сервисы, запущенные на самом хосте
+    # (english-api на 127.0.0.1:8081), а не только контейнеры стека.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     logging:
       driver: json-file
       options:

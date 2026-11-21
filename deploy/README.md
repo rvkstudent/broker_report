@@ -26,10 +26,27 @@ QUIK (prices.lua) ──HTTPS──┐
 | DNS | зона `roman-it.dev` на Cloudflare (`newt`/`grannbo.ns.cloudflare.com`); запись `broker` — CNAME на `<tunnel-id>.cfargotunnel.com`, прокси включён |
 | Туннель | `broker-report`, ID `8f70e77d-a6ce-4fc3-b573-53a4bf18627c`; ingress: `broker.roman-it.dev` и `broker-cf.roman-it.dev` → `http://broker-report:5000` |
 | Порты снаружи | только 22 (ufw); 80/443 закрыты — TLS даёт Cloudflare |
+| Второй сайт | `english.roman-it.dev` — тот же туннель, маршрут на `http://host.docker.internal:8081` |
 
 > **Важно:** A-запись `broker → <IP>` удалена. Отдельный nginx больше не нужен:
 > cloudflared сам публикует приложение. Если понадобится вернуть схему с IP —
 > см. «Вариант B» ниже, но тогда нужен nginx + TLS и открытые 80/443.
+
+### English trainer (`english.roman-it.dev`)
+
+Переехал вместе с брокером и теперь тоже идёт через туннель:
+
+* код и venv — `/opt/english` (systemd-юнит `english-api`, слушает `127.0.0.1:8766`);
+* аудио — `/var/www/english` (1,9 ГБ);
+* nginx — `listen 8081` (терминирует не он: TLS на Cloudflare), конфиг
+  `/etc/nginx/sites-available/english`; наружу порт закрыт, доступен только
+  контейнерам Docker (`ufw allow from 172.16.0.0/12 to any port 8081`);
+* маршрут туннеля: `english.roman-it.dev` → `http://host.docker.internal:8081`
+  (в compose у `cloudflared` добавлен `extra_hosts: host.docker.internal:host-gateway`);
+* ключ для проверки фраз — `/root/.opencode-go-key` (600), читается приложением.
+
+Проверка после обновления: `curl -o /dev/null -w '%{http_code}' https://english.roman-it.dev/`
+(200), `/api/auth/check` без сессии — 401, `/audio/` без сессии — 403.
 
 **Первичная настройка чистого сервера** — `deploy/bootstrap-server.sh`
 (обновления, swap 2 ГБ, Docker CE + compose, пользователь `roman`, ufw, автообновления):
