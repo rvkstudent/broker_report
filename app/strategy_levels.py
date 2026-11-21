@@ -31,6 +31,8 @@ DESCRIPTION = ('Разворот от поддержки или продолже
 # Параметры в минутах и процентах — не зависят от выбранного таймфрейма.
 PARAMS = [
     {'key': 'warmup_min', 'label': 'Прогрев уровней, минут', 'default': 60, 'min': 0, 'max': 240, 'step': 5},
+    {'key': 'trend_ema_min', 'label': 'Фильтр тренда: EMA, минут (0 — выкл.)',
+     'default': 240, 'min': 0, 'max': 1440, 'step': 30},
     {'key': 'approach_pct', 'label': 'Подход к зоне, %', 'default': 0.05, 'min': 0.01, 'max': 1.0, 'step': 0.01},
     {'key': 'break_margin_pct', 'label': 'Пробой за зону, %', 'default': 0.03, 'min': 0.01, 'max': 1.0, 'step': 0.01},
     {'key': 'confirm_min', 'label': 'Подтверждение дельтой, минут', 'default': 5, 'min': 1, 'max': 60, 'step': 1},
@@ -423,6 +425,38 @@ def _markers(trades: list[dict]) -> list[dict]:
     return markers
 
 
+def _ema_series(bars: list[dict], period: int) -> list[float]:
+    """EMA по закрытиям. Используется как фильтр тренда: контртрендовые
+    входы (лонг под падающей средней) дают сигналы, которые не зарабатывают."""
+    if period <= 0 or not bars:
+        return []
+    k = 2.0 / (period + 1)
+    out: list[float] = []
+    prev = float(bars[0].get('close') or 0)
+    for bar in bars:
+        close = float(bar.get('close') or prev)
+        prev = close if not out else prev + k * (close - prev)
+        out.append(prev)
+    return out
+
+
+def _trend_skipped(bars: list[dict], found: list[dict], period_bars: int) -> dict[int, str]:
+    """Сигналы против тренда: лонг ниже EMA — не торгуем, помечаем причину."""
+    if period_bars <= 0 or not bars:
+        return {}
+    ema = _ema_series(bars, period_bars)
+    index = {bar['minute_ns']: i for i, bar in enumerate(bars)}
+    out: dict[int, str] = {}
+    for item in found:
+        i = index.get(item['time'])
+        if i is None or i >= len(ema):
+            continue
+        close = float(bars[i].get('close') or 0)
+        if close < ema[i]:
+            out[item['time']] = 'контртренд: цена ниже EMA'
+    return out
+
+
 def analyze_range(ticker: str, from_ns: int, to_ns: int, raw_params: dict | None = None, *,
                   interval: int = 1, notional: float = 100_000.0,
                   fee_pct: float = 0.05) -> dict:
@@ -439,7 +473,15 @@ def analyze_range(ticker: str, from_ns: int, to_ns: int, raw_params: dict | None
     zones = zones_before(ticker, warmup_ns)
     start_index = next((i for i, b in enumerate(bars) if b['minute_ns'] >= warmup_ns), len(bars))
     found = signals(ticker, bars, zones, params, start_index)
-    result = simulate(bars, found, params, notional=notional, fee_pct=fee_pct, zones=zones,
+
+    # Фильтр тренда: лонг против падающей EMA не торгуем.
+    step_min = 1
+    if len(bars) > 1:
+        step_min = max(1, round((bars[1]['minute_ns'] - bars[0]['minute_ns']) / 60e9))
+    trend_period = int(round((params.get('trend_ema_min') or 0) / step_min))
+    trend_skips = _trend_skipped(bars, found, trend_period)
+    tradable = [item for item in found if item['time'] not in trend_skips]
+    result = simulate(bars, tradable, params, notional=notional, fee_pct=fee_pct, zones=zones,
                       ticker=ticker)
 
     skipped = set(result.get('skipped_times', []))
@@ -448,7 +490,9 @@ def analyze_range(ticker: str, from_ns: int, to_ns: int, raw_params: dict | None
     for item in found:
         date_label, time_label = _signal_moment(item['time'])
         signal_rows.append({
-            'taken': item['time'] not in skipped,
+            'taken': item['time'] not in skipped and item['time'] not in trend_skips,
+            'skip_reason': trend_skips.get(item['time'])
+                           or ('R:R ниже порога' if item['time'] in skipped else ''),
             'time': item['time'] // 1_000_000_000 + 3 * 3600,
             'date': date_label,
             'time_label': time_label,
@@ -480,6 +524,9 @@ def analyze_range(ticker: str, from_ns: int, to_ns: int, raw_params: dict | None
         'metrics': result['metrics'],
         'markers': result['markers'],
         'stop_enabled': result['stop_enabled'],
+        'trend_filter': {'ema_min': params.get('trend_ema_min') or 0,
+                         'skipped': len(trend_skips)},
+        'skipped_total': len(skipped) + len(trend_skips),
         'no_stop_tickers': sorted(no_stop_tickers()),
     }
 
@@ -498,8 +545,9 @@ def signal_markers(rows: list[dict]) -> list[dict]:
             'position': 'belowBar' if taken else 'aboveBar',
             'color': '#1a7f37' if taken else '#adb5bd',
             'shape': 'arrowUp' if taken else 'circle',
-            'text': ('Покупка' if row['kind'] == 'breakout' else 'Отскок') if taken
-                    else 'отсеян',
+            'text': (('Покупка' if row['kind'] == 'breakout' else 'Отскок') if taken
+                     else ('контртренд' if 'тренд' in str(row.get('skip_reason'))
+                           else 'отсеян')),
         })
     markers.sort(key=lambda m: m['time'])
     return markers
