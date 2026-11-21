@@ -29,7 +29,7 @@ from app.db import get_connection
 
 TTL = 6 * 3600             # сигналы живут 6 часов
 CONTEXT_TTL = 3600         # рыночный контекст — час
-MAX_ITEMS = 12             # больше за раз не гоняем: модель дорогая и медленная
+MAX_ITEMS = 20             # с запасом: открытые позиции + ручной список
 
 _state = {'running': False, 'started': 0.0, 'done': 0, 'total': 0,
           'errors': [], 'finished': 0.0}
@@ -47,6 +47,138 @@ def items() -> list[dict]:
     except Exception:  # noqa: BLE001
         return []
     return [dict(r) for r in rows]
+
+
+def _resolve(code: str, snapshot: dict) -> tuple[dict, str] | None:
+    """Найти бумагу в снимке скринера по коду из позиций.
+
+    Позиции приходят то биржевым кодом (SU26243RMFS4), то ISIN, то кодом QUIK
+    (26254RMFS). Прямого совпадения может не быть — тогда ищем ISIN через
+    справочник bond_ladder (он уже кэширован и при промахе обновляется с ISS).
+    """
+    found = _find(snapshot, code)
+    if found:
+        return found
+    try:
+        from app import bond_ladder
+        refs = bond_ladder._load_cache()
+        ref = bond_ladder._ref_for(code, refs)
+        if not ref:
+            bond_ladder.refresh([code])
+            ref = bond_ladder._ref_for(code, bond_ladder._load_cache())
+        isin = (ref or {}).get('isin')
+        if isin:
+            return _find(snapshot, isin)
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _fallback_row(code: str) -> tuple[dict, str] | None:
+    """Факты для бумаги, которой нет в скринере (неликвидна или вне досок).
+
+    Открытая позиция важнее ликвидности: если бумаги нет в снимке скринера,
+    берём её из лестницы (bond_ladder), где есть YTM, дюрация и купон.
+    """
+    try:
+        from app import bond_ladder
+        data = bond_ladder.build()
+    except Exception:  # noqa: BLE001
+        return None
+    key = (code or '').upper()
+    for row in data.get('rows') or []:
+        if key not in ((row.get('code') or '').upper(), (row.get('isin') or '').upper()):
+            continue
+        currency = row.get('currency') or 'RUB'
+        return {
+            'code': row.get('code') or key,
+            'name': row.get('name') or key,
+            'ytm': row.get('ytm'),
+            'duration': row.get('duration'),
+            'matdate': row.get('matdate'),
+            'years': row.get('years'),
+            'coupon_pct': row.get('coupon_pct'),
+            'coupon_freq': row.get('coupon_freq'),
+            'price': row.get('price_pct'),
+            'value': row.get('value'),
+            'currency': currency,
+            'type': row.get('kind'),
+        }, ('fx' if currency != 'RUB' else 'bond')
+    return None
+
+
+def position_items(snapshot: dict | None = None) -> list[dict]:
+    """Открытые позиции портфеля — источник сигналов по умолчанию.
+
+    Для каждой позиции тянем факт владения (количество, средняя цена, вложено):
+    без него модель не может отличить «купить» от «докупать/сокращать».
+    Фьючерсы и фонды в скринер не попадают и в список не включаются.
+    """
+    from app.db import get_instrument_summary
+    snapshot = snapshot or _snapshot()
+    try:
+        positions = get_instrument_summary(None, '', '', 'all') or []
+    except Exception:  # noqa: BLE001
+        return []
+
+    out: list[dict] = []
+    by_key: dict[str, int] = {}
+    for pos in positions:
+        code = (pos.get('security_code') or '').strip().upper()
+        if not code:
+            continue
+        found = _resolve(code, snapshot) or _fallback_row(code)
+        if not found:
+            continue
+        row, kind = found
+        key = (row.get('code') or code).upper()
+        # Одна бумага может лежать двумя кодами (26254RMFS и RU000A10D533) —
+        # это одна позиция, количества складываем, иначе размер занижен.
+        if key in by_key:
+            merged = out[by_key[key]]['position']
+            qty = (merged.get('qty') or 0) + (pos.get('qty') or 0)
+            cost = (merged.get('cost') or 0) + (pos.get('total_cost') or 0)
+            merged['qty'] = qty
+            merged['cost'] = cost
+            merged['avg_price'] = round(cost / qty, 2) if qty else merged.get('avg_price')
+            continue
+        out.append({
+            'code': row.get('code') or code,
+            'kind': kind,
+            'name': row.get('name') or pos.get('security_name') or '',
+            'source': 'позиция',
+            'row': row,
+            'position': {
+                'qty': pos.get('qty'),
+                'avg_price': pos.get('avg_price'),
+                'cost': pos.get('total_cost'),
+            },
+        })
+    return out
+
+
+def effective_items(snapshot: dict | None = None) -> list[dict]:
+    """Что обрабатываем: открытые позиции + ручной список (без дублей)."""
+    snapshot = snapshot or _snapshot()
+    items_out: list[dict] = []
+    seen: set[str] = set()
+    for item in position_items(snapshot):
+        seen.add(item['code'].upper())
+        items_out.append(item)
+    for item in items():
+        code = (item.get('code') or '').upper()
+        if code in seen:
+            continue
+        seen.add(code)
+        found = _resolve(code, snapshot) or _fallback_row(code)
+        if not found:
+            continue
+        row, kind = found
+        items_out.append({**item, 'code': row.get('code') or code, 'kind': kind,
+                          'row': row,
+                          'name': row.get('name') or item.get('name') or '',
+                          'source': 'список'})
+    return items_out[:MAX_ITEMS]
 
 
 def add_item(code: str, kind: str = 'auto') -> tuple[bool, str]:
@@ -96,10 +228,20 @@ def _snapshot() -> dict:
 
 def _find(snapshot: dict, code: str) -> tuple[dict, str] | None:
     key = code.upper()
-    for kind, bucket in (('bond', 'bonds'), ('fx', 'fx_bonds'), ('stock', 'stocks')):
+    buckets = (('bond', 'bonds'), ('fx', 'fx_bonds'), ('stock', 'stocks'))
+    for kind, bucket in buckets:
         for row in snapshot.get(bucket) or []:
             if (row.get('code') or '').upper() == key:
                 return row, kind
+    # Код QUIK и код ISS не совпадают: «26254RMFS» против «SU26254RMFS1».
+    # Сравниваем по номеру выпуска — это надёжно для ОФЗ и не путает бумаги.
+    digits = ''.join(ch for ch in key if ch.isdigit())
+    if len(digits) >= 4:
+        for kind, bucket in buckets:
+            for row in snapshot.get(bucket) or []:
+                row_code = (row.get('code') or '').upper()
+                if digits in row_code:
+                    return row, kind
     return None
 
 
@@ -256,14 +398,16 @@ def _worker(watch: list[dict], snapshot: dict) -> None:
     _state.update({'running': True, 'started': time.time(), 'done': 0,
                    'total': len(watch), 'errors': []})
     for item in watch:
-        found = _find(snapshot, item['code'])
-        if not found:
-            _state['errors'].append(f"{item['code']}: нет в снимке")
+        found = (item.get('row'), item.get('kind')) if item.get('row') else _find(snapshot, item['code'])
+        if not found or not found[0]:
+            _state['errors'].append(f"{item['code']}: нет данных")
             _state['done'] += 1
             continue
         row, kind = found
         facts = {k: v for k, v in row.items() if v not in (None, '', [])}
         facts['kind'] = 'облигация' if kind in ('bond', 'fx') else 'акция'
+        if item.get('position'):
+            facts['position'] = item['position']   # уже в портфеле: qty/средняя/вложено
         try:
             facts['market'] = market_context(row, kind)
         except Exception:  # noqa: BLE001
@@ -280,16 +424,23 @@ def _worker(watch: list[dict], snapshot: dict) -> None:
     _state.update({'running': False, 'finished': time.time()})
 
 
-def generate_async() -> tuple[bool, str]:
-    """Запустить генерацию в фоне. Возвращает (запущено, сообщение)."""
+def generate_async(codes: list[str] | None = None) -> tuple[bool, str]:
+    """Запустить генерацию в фоне.
+
+    ``codes`` — какие бумаги считать (галочки на странице). Без него берём всё:
+    открытые позиции плюс ручной список.
+    """
     if _state['running']:
         return False, 'генерация уже идёт'
-    watch = items()
+    snapshot = _snapshot()
+    watch = effective_items(snapshot)
+    if codes:
+        wanted = {c.strip().upper() for c in codes if c and c.strip()}
+        watch = [w for w in watch if w['code'].upper() in wanted]
     if not watch:
-        return False, 'список пуст — добавьте бумаги'
+        return False, 'нечего обрабатывать: нет ни открытых позиций, ни бумаг в списке'
     if not llm_config():
         return False, 'нейросеть не настроена'
-    snapshot = _snapshot()
     threading.Thread(target=_worker, args=(watch, snapshot), name='ai-signals',
                      daemon=True).start()
     return True, f'генерация запущена: {len(watch)} бумаг(и)'
@@ -297,7 +448,7 @@ def generate_async() -> tuple[bool, str]:
 
 def cached() -> list[dict]:
     """Сохранённые сигналы для бумаг из вотчлиста (свежие сверху)."""
-    watch = {i['code']: i for i in items()}
+    watch = {i['code'].upper(): i for i in effective_items()}
     try:
         conn = get_connection()
         rows = conn.execute('SELECT code, payload, updated_at FROM ai_signals').fetchall()
@@ -324,6 +475,8 @@ def cached() -> list[dict]:
 
 def status() -> dict:
     return dict(_state,
+                positions=len(position_items()),
+                manual=len(items()),
                 llm_enabled=bool(llm_config()),
                 model=(llm_config() or {}).get('model', ''),
                 ttl_hours=TTL // 3600)

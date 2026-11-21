@@ -1406,6 +1406,7 @@ def ai_signals_view():
     message = request.args.get('msg', '')
     return render_template('ai_signals.html',
                            data={'watchlist': ai_signals.items(),
+                                 'positions': ai_signals.position_items(),
                                  'signals': ai_signals.cached(),
                                  'status': ai_signals.status(),
                                  'message': message,
@@ -1427,7 +1428,8 @@ def ai_signals_remove():
 
 @flask_app.route('/ai-signals/generate', methods=['POST'])
 def ai_signals_generate():
-    ok, msg = ai_signals.generate_async()
+    codes = request.form.getlist('codes')
+    ok, msg = ai_signals.generate_async(codes)
     return redirect(url_for('ai_signals_view', msg=msg))
 
 

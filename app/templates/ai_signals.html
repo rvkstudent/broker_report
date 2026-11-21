@@ -8,6 +8,19 @@
     .ui-compact table td, .ui-compact table th { padding: .22rem .4rem; vertical-align: top; }
     .ui-compact .form-control { font-size: .75rem; height: 28px; }
     .ui-compact .btn { --bs-btn-padding-y: .12rem; --bs-btn-padding-x: .5rem; --bs-btn-font-size: .74rem; }
+    /* Сигналы: текст переносится, таблица занимает ровно ширину экрана —
+       раньше длинные причины/риски растягивали её и появлялась прокрутка. */
+    #sig-table { width: 100%; table-layout: fixed; }
+    #sig-table td, #sig-table th { white-space: normal; word-break: break-word; overflow-wrap: anywhere; }
+    #sig-table ul { margin-bottom: 0; padding-left: 1rem; }
+    #sig-table .col-code { width: 11%; }
+    #sig-table .col-signal { width: 11%; }
+    #sig-table .col-entry { width: 9%; }
+    #sig-table .col-target { width: 9%; }
+    #sig-table .col-stop { width: 9%; }
+    #sig-table .col-why { width: 30%; }
+    #sig-table .col-risks { width: 21%; }
+    .pos-chip { cursor: pointer; }
     .sig-buy { border-left: 3px solid #198754; }
     .sig-wait { border-left: 3px solid #ffc107; }
     .sig-no { border-left: 3px solid #dc3545; }
@@ -25,7 +38,7 @@
       </div>
     </div>
     <form method="post" action="/ai-signals/generate" class="d-flex gap-2 align-items-center">
-      <button class="btn btn-primary" {{ 'disabled' if data.status.running or not data.watchlist }}>
+      <button class="btn btn-primary" {{ 'disabled' if data.status.running }}>
         <i class="bi bi-lightning-charge"></i>
         {{ 'идёт генерация…' if data.status.running else 'сгенерировать сигналы' }}
       </button>
@@ -56,8 +69,44 @@
   </div>
   {% endif %}
 
+  <form method="post" action="/ai-signals/generate" id="gen-form">
   <div class="card mb-3">
-    <div class="card-header"><i class="bi bi-list-check"></i> Мой список ({{ data.watchlist|length }} из {{ data.max_items }})</div>
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <div><i class="bi bi-briefcase"></i> Мои открытые позиции
+        <span class="badge bg-light text-dark border">{{ data.positions|length }}</span>
+        <small class="text-muted">по умолчанию считаем их — снимите галочку, чтобы исключить</small>
+      </div>
+      <button class="btn btn-primary" {{ 'disabled' if data.status.running }}>
+        <i class="bi bi-lightning-charge"></i>
+        {{ 'идёт генерация…' if data.status.running else 'сгенерировать по отмеченным' }}
+      </button>
+    </div>
+    <div class="card-body">
+      {% if data.positions %}
+      <div class="row g-1">
+        {% for p in data.positions %}
+        <div class="col-md-6 col-xl-4">
+          <label class="pos-chip d-flex align-items-center gap-2 border rounded px-2 py-1 w-100">
+            <input class="form-check-input m-0" type="checkbox" name="codes" value="{{ p.code }}" checked>
+            <span class="badge {{ 'bg-primary' if p.kind == 'bond' else ('bg-info text-dark' if p.kind == 'fx' else 'bg-secondary') }}">
+              {{ {'bond': 'ОФЗ/корп', 'fx': 'валютная', 'stock': 'акция'}.get(p.kind, p.kind) }}</span>
+            <b>{{ p.code }}</b>
+            <span class="text-muted text-truncate">{{ p.name }}</span>
+            {% if p.position and p.position.qty %}
+            <span class="hint ms-auto">{{ p.position.qty }} шт · ср. {{ '%.2f'|format(p.position.avg_price or 0) }}</span>
+            {% endif %}
+          </label>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="text-muted small">Открытых позиций нет — добавьте бумаги в список ниже.</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="card mb-3">
+    <div class="card-header"><i class="bi bi-list-check"></i> Дополнительный список ({{ data.watchlist|length }} из {{ data.max_items }})</div>
     <div class="card-body">
       <form method="post" action="/ai-signals/add" class="d-flex gap-2 mb-2">
         <input class="form-control" name="code" placeholder="тикер или ISIN, например MTSS или RU000A106E90" style="max-width:420px">
@@ -67,35 +116,39 @@
       {% if data.watchlist %}
       <div class="d-flex flex-wrap gap-2">
         {% for it in data.watchlist %}
-        <form method="post" action="/ai-signals/remove" class="d-flex align-items-center gap-1 border rounded px-2 py-1">
+        <div class="d-flex align-items-center gap-2 border rounded px-2 py-1">
+          <input class="form-check-input m-0" type="checkbox" name="codes" value="{{ it.code }}" checked>
           <span class="badge {{ 'bg-primary' if it.kind == 'bond' else ('bg-info text-dark' if it.kind == 'fx' else 'bg-secondary') }}">
             {{ {'bond': 'ОФЗ/корп', 'fx': 'валютная', 'stock': 'акция'}.get(it.kind, it.kind) }}</span>
           <b>{{ it.code }}</b> <span class="text-muted">{{ it.name }}</span>
-          <input type="hidden" name="code" value="{{ it.code }}">
-          <button class="btn btn-link p-0 ms-1 text-danger" title="убрать"><i class="bi bi-x-circle"></i></button>
-        </form>
+          <form method="post" action="/ai-signals/remove" class="d-inline">
+            <input type="hidden" name="code" value="{{ it.code }}">
+            <button class="btn btn-link p-0 text-danger" title="убрать"><i class="bi bi-x-circle"></i></button>
+          </form>
+        </div>
         {% endfor %}
       </div>
       {% else %}
-      <div class="text-muted small">Список пуст. Добавьте бумаги — по ним модель сгенерирует сигналы.</div>
+      <div class="text-muted small">Список пуст. Добавьте бумаги — по ним модель тоже сгенерирует сигналы.</div>
       {% endif %}
     </div>
   </div>
+  </form>
 
   {% if data.signals %}
   <div class="card">
     <div class="card-header"><i class="bi bi-graph-up-arrow"></i> Сигналы</div>
     <div class="card-body">
-      <table class="table table-sm mb-0">
+      <table class="table table-sm mb-0" id="sig-table">
         <thead>
           <tr>
-            <th style="width:12%">Бумага</th>
-            <th style="width:13%">Сигнал</th>
-            <th style="width:9%">Вход</th>
-            <th style="width:9%">Цель</th>
-            <th style="width:9%">Стоп</th>
-            <th>Почему</th>
-            <th style="width:20%">Риски</th>
+            <th class="col-code">Бумага</th>
+            <th class="col-signal">Сигнал</th>
+            <th class="col-entry">Вход</th>
+            <th class="col-target">Цель</th>
+            <th class="col-stop">Стоп</th>
+            <th class="col-why">Почему</th>
+            <th class="col-risks">Риски</th>
           </tr>
         </thead>
         <tbody>
@@ -111,13 +164,13 @@
             <td class="small">{{ s.target or '—' }}</td>
             <td class="small">{{ s.stop or '—' }}</td>
             <td class="small">
-              <ul class="mb-0 ps-3">
+              <ul>
                 {% for w in s.why %}<li>{{ w }}</li>{% endfor %}
               </ul>
               {% if s.updated_at %}<div class="hint">{{ s.updated_at }}{% if s.cached is defined and s.cached %} · из кэша{% endif %}</div>{% endif %}
             </td>
             <td class="small text-muted">
-              <ul class="mb-0 ps-3">
+              <ul>
                 {% for r in s.risks %}<li>{{ r }}</li>{% endfor %}
               </ul>
             </td>
@@ -138,6 +191,11 @@
       </h2>
       <div id="howto-body" class="accordion-collapse collapse" data-bs-parent="#howto">
         <div class="accordion-body py-2" style="font-size:.8rem">
+          <p class="mb-2"><b>По умолчанию считаются ваши открытые позиции.</b> Это то, что реально
+          лежит в портфеле: по каждой бумаге модель получает ещё и факт владения (количество, средняя
+          цена, вложено) — поэтому она может отличить «покупать» от «докупать» и «сокращать».
+          Галочками можно исключить бумаги; дополнительный список — для бумаг, которых у вас пока нет.</p>
+
           <p class="mb-2"><b>Зачем.</b> Скринер отвечает «какие бумаги вообще хороши по метрикам».
           Эта страница — про момент: по <b>выбранному вами списку</b> модель решает, есть ли
           сигнал на покупку <b>сейчас</b>, и объясняет, почему.</p>
