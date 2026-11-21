@@ -1233,10 +1233,28 @@
 
             if (m.profit_pct != null) {
                 const sign = m.profit_pct >= 0 ? '+' : '';
-                html += '<div class="mb-2">Ожидаемый ход до цели: <b>' + sign + m.profit_pct + '%</b>'
+                html += '<div class="mb-1">Ожидаемый ход до цели: <b>' + sign + m.profit_pct + '%</b>'
                      + (m.risk_pct != null ? ' · риск до стопа: <b>−' + m.risk_pct + '%</b>' : '')
                      + (m.rr != null ? ' · соотношение <b>' + m.rr + ' : 1</b>' : '')
                      + '</div>';
+                if (m.costs_pct != null) {
+                    const netCls = (m.net_profit_pct || 0) > 0 ? 'text-success' : 'text-danger';
+                    html += '<div class="mb-2 text-muted" style="font-size:.78rem">Издержки ~' + m.costs_pct
+                         + '% (комиссия + спред) · <b class="' + netCls + '">чистыми '
+                         + ((m.net_profit_pct > 0 ? '+' : '') + m.net_profit_pct) + '%</b>'
+                         + (m.min_move_pct ? ' · минимальный ход для сделки: ' + m.min_move_pct + '%' : '')
+                         + '</div>';
+                }
+                if (m.tradeable === false) {
+                    html += '<div class="alert alert-danger py-1 px-2 mb-2" style="font-size:.78rem">'
+                         + '<b>Сделки нет.</b> Ход до цели ' + m.profit_pct + '% не покрывает издержки '
+                         + m.costs_pct + '% и меньше минимального ' + (m.min_move_pct || '') + '%. '
+                         + 'Нужна цель дальше — ждём подход к уровню с объёмом.</div>';
+                } else if (m.tradeable === true) {
+                    html += '<div class="alert alert-success py-1 px-2 mb-2" style="font-size:.78rem">'
+                         + '<b>Сделка имеет смысл:</b> чистыми ' + m.net_profit_pct + '% при '
+                         + 'соотношении ' + m.rr + ' : 1.</div>';
+                }
             }
             html += '<div class="mb-2">Среднесрочно (месяц): <span class="badge bg-' + medCls + '">'
                  + (d.medium_term || '—') + '</span> ' + (d.medium_term_why || '') + '</div>';

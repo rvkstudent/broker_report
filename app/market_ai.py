@@ -114,6 +114,12 @@ PROMPT = """Ты — трейдер. Дай КОРОТКИЙ торговый п
 - Почему — максимум 3 пункта, каждый до 120 символов, без сырых счётчиков
   (никаких hold_rate, «22 пробоя»): пиши вывод, а не статистику.
 - Крупные игроки — одна фраза с цифрами (кто и где).
+- ЦЕЛЬ — ЗАРАБОТАТЬ. Сделка имеет смысл только если ход до цели заметно больше
+  издержек: комиссия ~0,05% на вход и выход, спред и проскальзывание ещё ~0,1%.
+  Поэтому ожидаемый ход должен быть не меньше max(0,4%, 0,5×ATR дня) — иначе
+  side = "нейтрально" и в why напиши «ход меньше издержек, торговать нечем».
+  Цель бери не ближайший шумовой уровень, а следующий значимый: зону с крупным
+  объёмом или месячный уровень. Соотношение цель/стоп должно быть ≥ 2:1.
 - Не выдумывай цены, не обещай доходность.
 
 СТРАТЕГИЯ (общий контекст, здесь речь о короткой сделке):
@@ -154,7 +160,8 @@ def _call(ticker: str, facts: dict) -> dict | None:
         text = message.get('content') or message.get('reasoning_content') or ''
     except Exception:  # noqa: BLE001
         return None
-    data = _parse(text)
+    atr = (facts.get('volatility') or {}).get('atr_pct')
+    data = _parse(text, atr_hint=atr)
     if data:
         data['model'] = cfg['model']
         data['ticker'] = ticker
@@ -169,7 +176,7 @@ def _num(value) -> float | None:
     return number if number > 0 else None
 
 
-def _parse(text: str) -> dict | None:
+def _parse(text: str, atr_hint: float | None = None) -> dict | None:
     body = (text or '').strip()
     if body.startswith('```'):
         body = body[3:].split('\n', 1)[-1].rsplit('```', 1)[0]
@@ -203,6 +210,25 @@ def _parse(text: str) -> dict | None:
     if metrics.get('profit_pct') and metrics.get('risk_pct'):
         metrics['rr'] = round(metrics['profit_pct'] / metrics['risk_pct'], 1)
 
+    # Издержки: ~0,05% комиссия на вход и выход + ~0,1% спред/проскальзывание.
+    COSTS_PCT = 0.2
+    MIN_NET_PCT = 0.4
+    atr_pct = atr_hint or 0.0
+    min_move = max(MIN_NET_PCT, round(atr_pct * 0.5, 2)) if atr_pct else MIN_NET_PCT
+    if metrics.get('profit_pct') is not None:
+        metrics['costs_pct'] = COSTS_PCT
+        metrics['net_profit_pct'] = round(metrics['profit_pct'] - COSTS_PCT, 2)
+        metrics['min_move_pct'] = min_move
+        tradeable = (side != 'нейтрально'
+                     and metrics['net_profit_pct'] >= MIN_NET_PCT
+                     and metrics['profit_pct'] >= min_move
+                     and (metrics.get('rr') or 0) >= 2)
+        metrics['tradeable'] = tradeable
+        if not tradeable and side != 'нейтрально':
+            # Сделка не окупает издержки — честнее сказать «нет сделки».
+            side = 'нейтрально'
+            doc['_downgraded'] = True
+
     def short_list(key: str, limit: int) -> list[str]:
         return [str(x)[:200] for x in (doc.get(key) or [])][:limit]
 
@@ -213,6 +239,9 @@ def _parse(text: str) -> dict | None:
     medium = str(doc.get('medium_term') or '').strip().lower()
     if medium not in ('покупать', 'держать', 'продавать'):
         medium = ''
+    why = short_list('why', 3)
+    if doc.get('_downgraded'):
+        why = ['Ожидаемый ход меньше издержек — сделки нет'] + why[:2]
     return {
         'direction': side,
         'confidence': max(0, min(100, confidence)),
@@ -224,7 +253,7 @@ def _parse(text: str) -> dict | None:
         'medium_term_why': str(doc.get('medium_term_why') or '')[:200],
         'big_players': str(doc.get('big_players') or '')[:300],
         'summary': str(doc.get('why') and ' '.join(short_list('why', 3)) or '')[:600],
-        'why': short_list('why', 3),
+        'why': why,
         'risks': short_list('risks', 2),
     }
 

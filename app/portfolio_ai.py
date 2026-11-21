@@ -28,18 +28,95 @@ def context() -> dict:
     from app import models, bond_ladder, instruments
     from app.db import get_instrument_summary
 
+    bond_ladder_rows: list[dict] = []
+    try:
+        bond_ladder_rows = bond_ladder.build().get('rows') or []
+    except Exception:  # noqa: BLE001
+        bond_ladder_rows = []
+
+    # Снимок скринера знает SECID и тип бумаги — по нему и классифицируем
+    # позиции: иначе рублёвые ОФЗ попадали в «акции».
+    screen: dict = {}
+    try:
+        screen = instruments.build()
+    except Exception:  # noqa: BLE001
+        screen = {}
+    bond_meta: dict[str, dict] = {}
+    for bucket in ('bonds', 'fx_bonds'):
+        for row in screen.get(bucket) or []:
+            for key in ((row.get('code') or '').upper(), (row.get('isin') or '').upper()):
+                if key:
+                    bond_meta[key] = row
+    stock_codes = {(s.get('code') or '').upper() for s in (screen.get('stocks') or [])}
+
+    # Облигации из лестницы: там есть валюта, тип и текущая стоимость —
+    # без этого модель не видит валютный хедж и пишет «валюты нет».
+    bond_by_code: dict[str, dict] = {}
+    try:
+        for row in (bond_ladder_rows or []):
+            for key in ((row.get('code') or '').upper(), (row.get('isin') or '').upper()):
+                if key:
+                    bond_by_code[key] = row
+    except Exception:  # noqa: BLE001
+        pass
+
     positions = []
     try:
         for pos in get_instrument_summary(None, '', '', 'all') or []:
             if (pos.get('qty') or 0) <= 0:
                 continue
+            code = (pos.get('security_code') or '').upper()
+            meta = bond_meta.get(code)
+            bond = bond_by_code.get(code)
+            if meta:
+                currency = meta.get('currency') or 'RUB'
+                kind = 'валютная облигация' if currency != 'RUB' else 'облигация'
+            elif code in stock_codes:
+                currency, kind = 'RUB', 'акция'
+            elif bond:
+                currency = bond.get('currency') or 'RUB'
+                kind = 'валютная облигация' if currency != 'RUB' else 'облигация'
+            else:
+                digits = ''.join(ch for ch in code if ch.isdigit())
+                guess = bond_by_code.get(digits) if digits else None
+                currency = (guess or {}).get('currency') or 'RUB'
+                kind = 'облигация' if (guess or code[:2] in ('SU', 'RU')) else 'акция'
+            value = ((meta or {}).get('value') or (bond or {}).get('value')
+                     or pos.get('total_cost') or 0)
             positions.append({'code': pos.get('security_code'),
                               'name': pos.get('security_name'),
                               'qty': pos.get('qty'),
                               'avg_price': pos.get('avg_price'),
-                              'cost': pos.get('total_cost')})
+                              'cost': pos.get('total_cost'),
+                              'value': round(float(value or 0), 0),
+                              'currency': currency,
+                              'kind': kind})
     except Exception:  # noqa: BLE001
         pass
+
+    # Доли по классам и валютам — прямо в фактах, чтобы модель не догадывалась.
+    total = sum(p['value'] for p in positions) or 1.0
+    fx_bonds = sum(p['value'] for p in positions if p['currency'] != 'RUB')
+    stocks = sum(p['value'] for p in positions if p['kind'] == 'акция')
+    rub_bonds = sum(p['value'] for p in positions
+                    if p['currency'] == 'RUB' and p['kind'] != 'акция')
+    allocation = {
+        'total_value': round(total, 0),
+        'bonds_rub_pct': round(rub_bonds / total * 100, 1),
+        'bonds_fx_pct': round(fx_bonds / total * 100, 1),
+        'stocks_pct': round(stocks / total * 100, 1),
+        'fx_share_pct': round(fx_bonds / total * 100, 1),
+        'fx_positions': [{'code': p['code'], 'name': p['name'],
+                          'currency': p['currency'], 'value': p['value'],
+                          'share_pct': round(p['value'] / total * 100, 1)}
+                         for p in positions if p['currency'] != 'RUB'],
+        'has_fx_hedge': fx_bonds > 0,
+    }
+    for p in positions:
+        p['share_pct'] = round(p['value'] / total * 100, 1)
+    positions.sort(key=lambda p: -(p['value'] or 0))
+    positions = [{k: p[k] for k in ('code', 'name', 'kind', 'currency',
+                                    'value', 'share_pct')} for p in positions[:15]]
 
     try:
         model = models.build(horizon=15, sigma_star=15.0, equity_pct=10.0, paths=2000)
@@ -56,14 +133,10 @@ def context() -> dict:
         if year:
             years[year] = round(years.get(year, 0.0) + (row.get('value') or 0), 0)
 
-    try:
-        screen = instruments.build()
-    except Exception:  # noqa: BLE001
-        screen = {}
-
     return {
         'today': datetime.now().strftime('%Y-%m-%d'),
         'positions': positions,
+        'allocation': allocation,
         'bonds': {'value': ladder.get('bond_value'),
                   'duration_avg': ladder.get('duration_avg'),
                   'ytm_avg': ladder.get('ytm_avg'),
@@ -99,8 +172,14 @@ PROMPT = """Ты — портфельный аналитик. Ниже факт�
 - rebalancing: 2–4 конкретных действия (что купить/продать/не наращивать), каждое
   с обоснованием и привязкой к цифрам. Суммы не выдумывай — говори в долях или
   рублях из фактов (например, «перевести ~200 тыс. ₽ из 2038 в 2033–2037»).
-- Если чего-то не хватает (нет данных о валюте/акциях) — так и скажи.
+- Валюту бери из allocation.fx_share_pct и fx_positions (там перечислены
+  валютные бумаги, например замещающие облигации). Если fx_share_pct > 0 —
+  хедж ЕСТЬ, назови его долю и эмитента; нельзя писать «валюты нет».
+- Недостаток формулируй только если fx_share_pct ниже 10% (мало) или выше 30%
+  (перекос).
 - Не обещай доходность и не советуй плечо.
+- Будь краток: summary ≤ 400 символов, каждый пункт pros/cons/risks ≤ 120 символов,
+  action/why ≤ 140 символов. Длинные ответы обрываются по лимиту токенов.
 
 СТРАТЕГИЯ:
 """ + STRATEGY_TEXT + """
@@ -124,7 +203,8 @@ def _call(facts: dict) -> dict | None:
     body = {'model': cfg['model'],
             'messages': [{'role': 'user',
                           'content': PROMPT.format(facts=json.dumps(facts, ensure_ascii=False, indent=1))}],
-            'temperature': 0.2, 'max_tokens': cfg['max_tokens']}
+            'temperature': 0.2,
+            'max_tokens': max(int(cfg['max_tokens']), 12000)}
     try:
         req = urllib.request.Request(cfg['url'], data=json.dumps(body).encode('utf-8'),
                                      headers=cfg['headers'], method='POST')
@@ -239,13 +319,17 @@ def status() -> dict:
     if _running['at']:
         return {'available': False, 'pending': True,
                 'seconds': round(time.time() - _running['at'])}
+    error = _failed.get('ai')
     cached = _load()
     if _fresh(cached):
         cached = dict(cached or {})
         cached['available'] = True
         cached['cached'] = True
+        if error:
+            # Показываем прошлую оценку, но честно говорим, что пересчёт не удался.
+            cached['stale'] = True
+            cached['error'] = error
         return cached
-    error = _failed.get('ai')
     if error:
         return {'available': False, 'error': error}
     return {'available': False, 'idle': True}
