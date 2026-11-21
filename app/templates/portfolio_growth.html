@@ -408,87 +408,24 @@
         <div class="card-body p-0"><div id="growthChart" style="height:360px"></div></div>
     </div>
     {% endif %}
-
-    {# Ручные потоки: переводы между брокерами, которых нет в отчётах #}
     <div class="card mt-3">
-        <div class="card-header bg-white">
-            <i class="bi bi-arrow-left-right"></i> Ручные потоки
-            <small class="text-muted">переводы между брокерами, которых нет в загруженных отчётах:
-                ввод — плюс, вывод — минус</small>
+        <div class="card-header bg-white d-flex justify-content-between align-items-center">
+            <span><i class="bi bi-stars"></i> ИИ-оценка портфеля
+                <small class="text-muted">преимущества, недостатки, прогноз доходности и что
+                    перебалансировать</small></span>
+            <button class="btn btn-outline-primary btn-sm" id="pa-run">
+                <i class="bi bi-lightning-charge"></i> оценить портфель</button>
         </div>
-        <div class="card-body">
-            <div class="row g-2 align-items-end">
-                <div class="col-auto">
-                    <label class="form-label small mb-0">Дата</label>
-                    <input type="date" class="form-control form-control-sm" id="mfDate">
-                </div>
-                <div class="col-auto">
-                    <label class="form-label small mb-0">Сумма, ₽</label>
-                    <input type="text" class="form-control form-control-sm" id="mfAmount"
-                           placeholder="-591606" style="width:130px">
-                </div>
-                <div class="col-auto">
-                    <label class="form-label small mb-0">Описание</label>
-                    <input type="text" class="form-control form-control-sm" id="mfDesc"
-                           placeholder="Перевод в Инвестиционную палату" style="width:280px">
-                </div>
-                <div class="col-auto">
-                    <button class="btn btn-sm btn-primary" id="mfAdd">Добавить</button>
-                </div>
-            </div>
-            {% if manual_flows %}
-            <table class="table table-sm mt-3 mb-0" style="font-size:12px">
-                <thead class="table-light">
-                    <tr><th>Дата</th><th class="text-end">Сумма</th><th>Описание</th><th></th></tr>
-                </thead>
-                <tbody>
-                {% for m in manual_flows %}
-                    <tr>
-                        <td>{{ m.date }}</td>
-                        <td class="text-end {{ 'profit-positive' if m.amount >= 0 else 'profit-negative' }}">
-                            {{ '{:+,.2f}'.format(m.amount) }}</td>
-                        <td class="text-muted">{{ m.description }}</td>
-                        <td class="text-end">
-                            <button class="btn btn-sm btn-outline-danger mf-del" data-id="{{ m.id }}">×</button>
-                        </td>
-                    </tr>
-                {% endfor %}
-                </tbody>
-            </table>
-            {% else %}
-            <div class="small text-muted mt-2">Пока не добавлено ни одного ручного потока.</div>
-            {% endif %}
+        <div class="card-body py-2" id="pa-body" style="font-size:.82rem">
+            <div class="text-muted">Нажмите кнопку: модель получит состав портфеля, дюрацию и
+            концентрацию, IRR после налогов, распределение Монте-Карло и текущий индекс страха —
+            и вернёт разбор с предложениями по ребалансировке.</div>
         </div>
     </div>
+
+
 
     {% if data.snapshots %}
-    <div class="card mt-3">
-        <div class="card-header bg-white">
-            <i class="bi bi-file-earmark-text"></i> Снимки активов из отчётов
-            <span class="badge bg-secondary">{{ data.snapshots | length }}</span>
-        </div>
-        <div class="card-body p-0">
-            <div class="table-responsive" style="max-height:340px;overflow:auto">
-                <table class="table table-sm table-hover mb-0" style="font-size:12px">
-                    <thead class="table-light">
-                        <tr><th>Дата</th><th>Брокер</th><th>Файл</th>
-                            <th class="text-end">Оценка активов</th><th class="text-end">Деньги</th></tr>
-                    </thead>
-                    <tbody>
-                    {% for s in data.snapshots %}
-                        <tr>
-                            <td>{{ s.snapshot_date }}</td>
-                            <td>{{ s.family }}</td>
-                            <td><small class="text-muted">{{ s.filename[:60] }}</small></td>
-                            <td class="text-end">{{ '{:,.2f}'.format(s.assets) }}</td>
-                            <td class="text-end">{{ '{:,.2f}'.format(s.cash) }}</td>
-                        </tr>
-                    {% endfor %}
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    </div>
     {% endif %}
 </div>
 {% endblock %}
@@ -504,9 +441,30 @@
         height: 360,
         layout: { background: { color: '#fff' }, textColor: '#333' },
         grid: { vertLines: { color: '#f0f0f0' }, horzLines: { color: '#f0f0f0' } },
-        rightPriceScale: { borderColor: '#ddd' },
-        timeScale: { borderColor: '#ddd' },
-        localization: { locale: 'ru-RU' },
+        rightPriceScale: {
+            borderColor: '#ddd',
+            // Разделители разрядов: 2 800 000 вместо 2800000
+            priceFormat: { type: 'custom', minMove: 1,
+                           formatter: (p) => Math.round(p).toLocaleString('ru-RU') },
+        },
+        timeScale: {
+            borderColor: '#ddd',
+            // Даты с месяцами и годами, без «мешанины» из дней:
+            // при коротком периоде — день.месяц, при длинном — месяц.год
+            timeVisible: false, secondsVisible: false,
+            tickMarkFormatter: (time) => {
+                const d = new Date(time * 1000);
+                const span = (Date.now() / 1000 - time) / 86400;
+                if (span > 200) {
+                    return d.toLocaleDateString('ru-RU', { month: 'short', year: '2-digit' });
+                }
+                return d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+            },
+        },
+        localization: {
+            locale: 'ru-RU',
+            priceFormatter: (p) => Math.round(p).toLocaleString('ru-RU'),
+        },
     });
     const portfolio = chart.addLineSeries({ color: '#2563eb', lineWidth: 2, title: 'Портфель' });
     portfolio.setData(rows.filter(r => r.total).map(r => ({ time: r.date, value: r.total })));
@@ -519,6 +477,85 @@
 {% endif %}
 
 <script>
+// ── ИИ-оценка портфеля ──────────────────────────────────────
+(function () {
+    const btn = document.getElementById('pa-run');
+    const body = document.getElementById('pa-body');
+    if (!btn || !body) return;
+    const list = (items) => items && items.length
+        ? '<ul class="mb-1 ps-3">' + items.map((x) => '<li>' + x + '</li>').join('') + '</ul>' : '';
+
+    function render(d) {
+        let html = '<div class="mb-2">' + (d.summary || '') + '</div>';
+        if (d.expected_return) {
+            const e = d.expected_return;
+            html += '<div class="mb-2"><b>Прогноз доходности:</b> '
+                 + '<span class="badge bg-secondary">база ' + (e.base || '—') + '</span> '
+                 + '<span class="badge bg-danger">плохо ' + (e.bad || '—') + '</span> '
+                 + '<span class="badge bg-success">хорошо ' + (e.good || '—') + '</span>'
+                 + (e.note ? '<div class="text-muted small mt-1">' + e.note + '</div>' : '') + '</div>';
+        }
+        if (d.pros && d.pros.length) {
+            html += '<div class="row"><div class="col-md-6"><b class="text-success">Преимущества</b>'
+                 + list(d.pros) + '</div>';
+        }
+        if (d.cons && d.cons.length) {
+            html += '<div class="col-md-6"><b class="text-danger">Недостатки</b>' + list(d.cons) + '</div></div>';
+        }
+        if (d.rebalancing && d.rebalancing.length) {
+            html += '<div class="mt-1"><b>Предложения по ребалансировке</b><ul class="mb-1 ps-3">';
+            d.rebalancing.forEach((r) => {
+                html += '<li><b>' + (r.action || '') + '</b>'
+                     + (r.size ? ' <span class="badge bg-light text-dark border">' + r.size + '</span>' : '')
+                     + (r.why ? '<div class="text-muted small">' + r.why + '</div>' : '') + '</li>';
+            });
+            html += '</ul></div>';
+        }
+        if (d.risks && d.risks.length) {
+            html += '<div class="text-muted"><b>Риски</b>' + list(d.risks) + '</div>';
+        }
+        html += '<div class="text-muted mt-1" style="font-size:.7rem">' + (d.model || '')
+             + (d.cached ? ' · из кэша' : '') + (d.updated_at ? ' · ' + d.updated_at : '') + '</div>';
+        body.innerHTML = html;
+    }
+
+    btn.addEventListener('click', async () => {
+        const started = Date.now();
+        btn.disabled = true;
+        body.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>модель изучает портфель — 30–60 с…';
+        try {
+            let data = null;
+            for (let i = 0; i < 45; i++) {
+                const resp = await fetch('/api/portfolio-ai' + (i === 0 ? '?refresh=1' : ''));
+                const type = resp.headers.get('content-type') || '';
+                if (!resp.ok || !type.includes('json')) {
+                    body.innerHTML = '<span class="text-danger">Сервер ответил ' + resp.status + '</span>';
+                    btn.disabled = false;
+                    return;
+                }
+                data = await resp.json();
+                if (data.available || data.error) break;
+                body.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>'
+                    + 'модель думает… ' + Math.round((Date.now() - started) / 1000) + ' с';
+                await new Promise((r) => setTimeout(r, 4000));
+            }
+            if (!data || !data.available) {
+                body.innerHTML = '<span class="text-warning">Оценка недоступна: '
+                    + ((data && data.error) || 'нет ответа') + '</span>';
+            } else {
+                render(data);
+                btn.innerHTML = '<i class="bi bi-arrow-clockwise"></i> переоценить';
+            }
+        } catch (err) {
+            body.innerHTML = '<span class="text-danger">Ошибка: ' + err + '</span>';
+        }
+        btn.disabled = false;
+    });
+
+    fetch('/api/portfolio-ai').then((r) => (r.ok ? r.json() : null))
+        .then((d) => { if (d && d.available) render(d); }).catch(() => {});
+})();
+
 (function () {
     const addBtn = document.getElementById('mfAdd');
     if (!addBtn) return;

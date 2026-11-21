@@ -56,10 +56,13 @@
     /* Своя ось справа (цена + %): шкала библиотеки скрыта — её ширина
        не управляется, а подписи прижаты вправо, из-за чего оставалась
        пустая полоса. */
+    /* Ширина колонки подстраивается под самую длинную подпись (цена + %):
+       при фиксированных 68 px трёхзначная цена обрезалась слева
+       («00.00 +1.0%» вместо «100.00 +1.0%»). */
     #chart-page .axis-gap { flex: 0 0 68px; width: 68px; }
     #chart-page .chart-axis {
-        position: relative; width: 68px; flex: 0 0 68px;
-        font-size: 10px; color: #6c757d; overflow: hidden;
+        position: relative; flex: 0 0 68px; width: 68px;
+        font-size: 10px; color: #6c757d;
         border-left: 1px solid #f1f3f5; pointer-events: none;
     }
     #chart-page .chart-axis .row-label {
@@ -203,6 +206,22 @@
                 <div class="chart-axis" id="chart-axis" style="height:300px"
                      title="Цена и изменение в % от первой свечи диапазона"></div>
             </div>
+        </div>
+    </div>
+
+    <div class="card mb-2">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <span><i class="bi bi-stars"></i> AI-план на день
+                <span class="text-muted fw-normal" style="font-size:.68rem">
+                    горизонтальные объёмы · ATR · всплески объёмов</span></span>
+            <button class="btn btn-outline-primary btn-sm" id="ch-ai-run">
+                <i class="bi bi-lightning-charge"></i> проанализировать
+            </button>
+        </div>
+        <div class="card-body py-2" id="ch-ai-body" style="font-size:.8rem">
+            <div class="text-muted">Нажмите кнопку: модель по нашим расчётам уровней, ATR и крупных
+            сделок скажет, в какую сторону торговать, что делают крупные игроки, где точки входа
+            в лонг на сегодня и какие поддержки/сопротивления важны на 3 дня и на месяц.</div>
         </div>
     </div>
 
@@ -548,6 +567,26 @@
             frag.appendChild(row);
         }
         axisEl.appendChild(frag);
+        fitAxisWidth();
+    }
+
+    // Подписи оси абсолютные (right: 3px), поэтому ширину колонки считаем
+    // по самой длинной: иначе отрицательные/трёхзначные цены обрезаются.
+    function fitAxisWidth() {
+        const rows = axisEl.querySelectorAll('.row-label');
+        let widest = 0;
+        rows.forEach((row) => { widest = Math.max(widest, row.scrollWidth || 0); });
+        if (!widest) widest = 56;
+        const width = Math.min(120, Math.max(56, Math.ceil(widest) + 10));
+        const h = axisEl.style.height;
+        axisEl.style.width = width + 'px';
+        axisEl.style.flex = '0 0 ' + width + 'px';
+        axisEl.style.height = h;
+        const gap = document.getElementById('chart-delta-gap');
+        if (gap) {
+            gap.style.width = width + 'px';
+            gap.style.flex = '0 0 ' + width + 'px';
+        }
     }
 
     // Общая ось времени: скролл/зум основного графика двигает панель дельты.
@@ -1160,6 +1199,101 @@
         equitySeries.setData([]);
         applyMarkers();
     });
+
+    // ── AI-план по графику ─────────────────────────────────────
+    (function initChartAi() {
+        const btn = document.getElementById('ch-ai-run');
+        const body = document.getElementById('ch-ai-body');
+        if (!btn || !body) return;
+        const fmtNum = (v) => (v == null || v === '' ? '—'
+            : Number(v).toLocaleString('ru-RU', {maximumFractionDigits: 2}));
+        const list = (items, render) => '<ul class="mb-1 ps-3">'
+            + items.map(render).join('') + '</ul>';
+
+        const money = (v) => (v == null ? '—'
+            : Number(v).toLocaleString('ru-RU', {maximumFractionDigits: 2}));
+
+        function render(d) {
+            const m = d.metrics || {};
+            const sideCls = d.direction === 'лонг' ? 'success'
+                          : d.direction === 'шорт' ? 'danger' : 'secondary';
+            const medCls = d.medium_term === 'покупать' ? 'success'
+                         : d.medium_term === 'продавать' ? 'danger' : 'secondary';
+            const cell = (label, value, cls) => '<div class="col-6 col-md-3 mb-2">'
+                + '<div class="text-muted" style="font-size:.7rem">' + label + '</div>'
+                + '<div class="fw-bold ' + (cls || '') + '" style="font-size:1rem">' + value + '</div></div>';
+
+            let html = '<div class="row g-2 mb-2">';
+            html += cell('Направление', '<span class="badge bg-' + sideCls + '">'
+                         + (d.direction || '—') + '</span> ' + (d.confidence || 0) + '%');
+            html += cell('Вход', d.entry != null ? money(d.entry) + ' ₽' : 'ждать уровня');
+            html += cell('Стоп', d.stop != null ? money(d.stop) + ' ₽' : '—', 'text-danger');
+            html += cell('Цель', d.target != null ? money(d.target) + ' ₽' : '—', 'text-success');
+            html += '</div>';
+
+            if (m.profit_pct != null) {
+                const sign = m.profit_pct >= 0 ? '+' : '';
+                html += '<div class="mb-2">Ожидаемый ход до цели: <b>' + sign + m.profit_pct + '%</b>'
+                     + (m.risk_pct != null ? ' · риск до стопа: <b>−' + m.risk_pct + '%</b>' : '')
+                     + (m.rr != null ? ' · соотношение <b>' + m.rr + ' : 1</b>' : '')
+                     + '</div>';
+            }
+            html += '<div class="mb-2">Среднесрочно (месяц): <span class="badge bg-' + medCls + '">'
+                 + (d.medium_term || '—') + '</span> ' + (d.medium_term_why || '') + '</div>';
+            if (d.big_players) html += '<div class="mb-2"><b>Крупные игроки:</b> ' + d.big_players + '</div>';
+            if (d.why && d.why.length) {
+                html += '<ul class="mb-1 ps-3">' + d.why.map((x) => '<li>' + x + '</li>').join('') + '</ul>';
+            }
+            if (d.risks && d.risks.length) {
+                html += '<div class="text-muted"><b>Риски:</b> ' + d.risks.join(' · ') + '</div>';
+            }
+            html += '<div class="text-muted mt-1" style="font-size:.7rem">' + (d.model || '')
+                 + (d.cached ? ' · из кэша' : '') + (d.updated_at ? ' · ' + d.updated_at : '') + '</div>';
+            body.innerHTML = html;
+        }
+
+        btn.addEventListener('click', async () => {
+            const started = Date.now();
+            btn.disabled = true;
+            body.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>'
+                + 'считаю уровни, ATR и крупные сделки, затем спрошу модель — 30–60 с…';
+            try {
+                let data = null;
+                for (let i = 0; i < 45; i++) {
+                    const resp = await fetch('/api/chart-ai/' + encodeURIComponent(TICKER)
+                                              + (i === 0 ? '?refresh=1' : ''));
+                    const type = resp.headers.get('content-type') || '';
+                    if (!resp.ok || !type.includes('json')) {
+                        body.innerHTML = '<span class="text-danger">Сервер ответил ' + resp.status
+                            + (type.includes('json') ? '' : ' (не JSON)') + '</span>';
+                        btn.disabled = false;
+                        return;
+                    }
+                    data = await resp.json();
+                    if (data.available || data.error) break;
+                    body.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>'
+                        + 'модель думает… ' + Math.round((Date.now() - started) / 1000) + ' с';
+                    await new Promise((r) => setTimeout(r, 4000));
+                }
+                if (!data || !data.available) {
+                    body.innerHTML = '<span class="text-warning">AI-план недоступен: '
+                        + ((data && data.error) || 'нет ответа') + '</span>';
+                } else {
+                    render(data);
+                    btn.innerHTML = '<i class="bi bi-arrow-clockwise"></i> пересчитать';
+                }
+            } catch (err) {
+                body.innerHTML = '<span class="text-danger">Ошибка: ' + err + '</span>';
+            }
+            btn.disabled = false;
+        });
+
+        // Если план уже посчитан (кэш 30 минут) — показываем сразу.
+        fetch('/api/chart-ai/' + encodeURIComponent(TICKER))
+            .then((r) => (r.ok ? r.json() : null))
+            .then((d) => { if (d && d.available) render(d); })
+            .catch(() => {});
+    })();
 
     window.addEventListener('resize', () => {
         [mainChart, deltaChart, equityChart].forEach((c) => {

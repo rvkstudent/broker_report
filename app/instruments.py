@@ -343,6 +343,16 @@ def _stocks() -> tuple[list[dict], list[str]]:
             'lot': r.get('lot'),
         })
     out.sort(key=lambda r: -(r['turnover'] or 0))
+    # Предварительные сигналы (только акции): считаются по минутным данным
+    # скринера, без сети, и попадают в тот же снимок.
+    try:
+        from app import prelim
+        signals = prelim.for_tickers([r['code'] for r in out])
+        for row in out:
+            row['prelim'] = signals.get((row.get('code') or '').upper())
+    except Exception:  # noqa: BLE001
+        for row in out:
+            row['prelim'] = None
     return out, errors
 
 

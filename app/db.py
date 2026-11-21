@@ -290,6 +290,18 @@ def init_db():
             payload         TEXT NOT NULL,
             updated_at      TEXT
         )""",
+        # Кэш ИИ-оценки портфеля (одна строка, живёт час).
+        """CREATE TABLE IF NOT EXISTS portfolio_ai (
+            id              INTEGER PRIMARY KEY,
+            payload         TEXT NOT NULL,
+            updated_at      TEXT
+        )""",
+        # Кэш AI-разбора графика: торговый план по тикеру (30 минут).
+        """CREATE TABLE IF NOT EXISTS chart_ai (
+            ticker          TEXT PRIMARY KEY,
+            payload         TEXT NOT NULL,
+            updated_at      TEXT
+        )""",
         # Кэш AI-разбора по конкретной бумаге: запрос к LLM дорогой и медленный,
         # поэтому ответ хранится и переиспользуется (по умолчанию 7 дней).
         """CREATE TABLE IF NOT EXISTS instrument_ai (

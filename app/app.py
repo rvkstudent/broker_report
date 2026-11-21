@@ -31,7 +31,7 @@ from app.replication import push_async as push_to_cloud
 from app import (screener, chartdata, backtest, volatility, levels,
                 strategy_levels, signals_cache, signal_days, signal_journal, adaptive,
                 portfolio_growth, bond_ladder, instruments, models, advisor,
-                instrument_ai, ai_signals)
+                instrument_ai, ai_signals, market_ai, portfolio_ai)
 from app import dashboard_prices as tinkoff_prices
 from app.allowed_devices import (is_device_allowed, add_pending_device,
                                   approve_device, reject_device, remove_device,
@@ -1375,6 +1375,37 @@ def portfolio_growth_view():
                 'start': '', 'end': '', 'error': str(exc)}
     return render_template('portfolio_growth.html', data=data,
                            manual_flows=get_manual_flows())
+
+
+@flask_app.route('/api/portfolio-ai')
+def api_portfolio_ai():
+    """ИИ-оценка портфеля: преимущества, недостатки, прогноз, ребалансировка."""
+    if not portfolio_ai.llm_config():
+        return jsonify({'available': False, 'error': 'нейросеть не настроена'})
+    refresh = request.args.get('refresh') == '1'
+    current = portfolio_ai.status()
+    if current.get('available') and not refresh:
+        return jsonify(current)
+    portfolio_ai.start()
+    return jsonify(portfolio_ai.status())
+
+
+@flask_app.route('/api/chart-ai/<ticker>')
+def api_chart_ai(ticker):
+    """AI-план по графику: направление, крупные игроки, входы и уровни.
+
+    Асинхронно: первый запрос возвращает pending, страница опрашивает,
+    пока модель не закончит (иначе упираемся в таймаут Cloudflare).
+    """
+    ticker = (ticker or '').upper()
+    if not market_ai.llm_config():
+        return jsonify({'available': False, 'error': 'нейросеть не настроена'})
+    refresh = request.args.get('refresh') == '1'
+    current = market_ai.status(ticker)
+    if current.get('available') and not refresh:
+        return jsonify(current)
+    market_ai.start(ticker)
+    return jsonify(market_ai.status(ticker))
 
 
 @flask_app.route('/api/instrument-ai')

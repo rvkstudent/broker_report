@@ -99,6 +99,15 @@
                 Смысл: дивиденды высокие и повторяющиеся, оценка не заоблачная, бумага ликвидна.</li>
           </ul>
 
+          <p class="mb-1"><b>Предварительный сигнал на лонг (колонка «Сигнал»)</b></p>
+          <p class="mb-2">Считается по минутным данным скринера, без нейросети и без запросов в сеть:
+          цена выше VWAP и открытия дня, перевес покупок за последние 30 минут, положение
+          в трёхдневном диапазоне (пробой сверху или отскок снизу при покупках), всплеск объёма.
+          <span class="badge bg-success">лонг</span> — совпали тренд и покупки (повод открыть график
+          и запустить AI-план), <span class="badge bg-warning text-dark">наблюдать</span> — часть
+          условий есть, <span class="text-muted">—</span> — нет. Наведите на бейдж: покажет, какие
+          именно условия сработали. Это фильтр внимания, а не сигнал на сделку.</p>
+
           <p class="mb-1"><b>AI-разбор бумаги</b></p>
           <p class="mb-2">В карточке (значок ⓘ) есть кнопка «спросить ИИ». Модель получает факты из таблицы
           и историю выплат и отвечает: плюсы, минусы, <b>устойчивость дивиденда или купона</b> и общий вердикт.
@@ -222,6 +231,16 @@
               <td class="text-end">{{ '{:,.0f}'.format(r.turnover) }}</td>
               <td class="text-end fw-bold">{{ '%.0f'|format(r.score) if r.score is not none else '—' }}</td>
               <td class="text-center">
+                {% set pr = r.prelim or {} %}
+                {% if pr.signal == 'лонг' %}
+                  <span class="badge bg-success" title="{{ (pr.reasons or [])|join(' · ') }}">лонг {{ pr.score }}</span>
+                {% elif pr.signal == 'наблюдать' %}
+                  <span class="badge bg-warning text-dark" title="{{ (pr.reasons or [])|join(' · ') }}">наблюдать {{ pr.score }}</span>
+                {% else %}
+                  <span class="text-muted">—</span>
+                {% endif %}
+              </td>
+              <td class="text-center">
                 {% set rel = r.reliability or {} %}
                 <span class="badge {{ 'bg-success' if rel.letter == 'A' else ('bg-primary' if rel.letter == 'B' else ('bg-warning text-dark' if rel.letter == 'C' else 'bg-danger')) }}"
                       title="{{ rel.text }} · {{ '%.1f'|format(rel.score) }}/10&#10;{{ (rel.reasons or [])|join('&#10;') }}">{{ rel.letter }}</span>
@@ -313,6 +332,7 @@
               <th class="text-end" data-sort="8">ROE</th>
               <th class="text-end" data-sort="9">Оборот</th>
               <th class="text-end" data-sort="10">Балл</th>
+              <th class="text-center" data-sort="10.5" title="Предварительный сигнал на лонг по внутридневным данным: тренд, перевес покупок, всплеск объёма">Сигнал</th>
               <th class="text-center" title="Наша оценка устойчивости 1–10: дивидендная история, ROE, P/E, ликвидность">Надёж.</th>
               <th>Флаги</th>
             </tr>
@@ -344,6 +364,16 @@
               <td class="text-end">{{ '%.1f'|format(r.roe) if r.roe else '—' }}{% if r.roe %}%{% endif %}</td>
               <td class="text-end">{{ '{:,.0f}'.format(r.turnover) }}</td>
               <td class="text-end fw-bold">{{ '%.0f'|format(r.score) if r.score is not none else '—' }}</td>
+              <td class="text-center">
+                {% set pr = r.prelim or {} %}
+                {% if pr.signal == 'лонг' %}
+                  <span class="badge bg-success" title="{{ (pr.reasons or [])|join(' · ') }}">лонг {{ pr.score }}</span>
+                {% elif pr.signal == 'наблюдать' %}
+                  <span class="badge bg-warning text-dark" title="{{ (pr.reasons or [])|join(' · ') }}">наблюдать {{ pr.score }}</span>
+                {% else %}
+                  <span class="text-muted">—</span>
+                {% endif %}
+              </td>
               <td class="text-center">
                 {% set rel = r.reliability or {} %}
                 <span class="badge {{ 'bg-success' if rel.letter == 'A' else ('bg-primary' if rel.letter == 'B' else ('bg-warning text-dark' if rel.letter == 'C' else 'bg-danger')) }}"
