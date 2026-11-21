@@ -1,0 +1,181 @@
+{% extends "base.html" %}
+{% block title %}AI-сигналы — BrokerReport{% endblock %}
+{% block content %}
+<style>
+    .ui-compact .card-header { padding: .3rem .55rem; font-size: .78rem; }
+    .ui-compact .card-body { padding: .55rem .6rem; font-size: .82rem; }
+    .ui-compact table { font-size: .8rem; }
+    .ui-compact table td, .ui-compact table th { padding: .22rem .4rem; vertical-align: top; }
+    .ui-compact .form-control { font-size: .75rem; height: 28px; }
+    .ui-compact .btn { --bs-btn-padding-y: .12rem; --bs-btn-padding-x: .5rem; --bs-btn-font-size: .74rem; }
+    .sig-buy { border-left: 3px solid #198754; }
+    .sig-wait { border-left: 3px solid #ffc107; }
+    .sig-no { border-left: 3px solid #dc3545; }
+    .hint { font-size: .72rem; color: #6c757d; }
+</style>
+
+<div class="ui-compact">
+  <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+    <div>
+      <h4 class="mb-0"><i class="bi bi-stars"></i> AI-сигналы по моему списку</h4>
+      <div class="hint">
+        выбранные бумаги → кнопка → модель решает по каждой: покупать, ждать или не покупать
+        {% if data.status.model %}· модель: {{ data.status.model }}{% endif %}
+        · сигналы живут {{ data.status.ttl_hours }} ч
+      </div>
+    </div>
+    <form method="post" action="/ai-signals/generate" class="d-flex gap-2 align-items-center">
+      <button class="btn btn-primary" {{ 'disabled' if data.status.running or not data.watchlist }}>
+        <i class="bi bi-lightning-charge"></i>
+        {{ 'идёт генерация…' if data.status.running else 'сгенерировать сигналы' }}
+      </button>
+    </form>
+  </div>
+
+  {% if data.message %}
+  <div class="alert alert-info py-1 px-2 small">{{ data.message }}</div>
+  {% endif %}
+
+  {% if not data.status.llm_enabled %}
+  <div class="alert alert-warning py-1 px-2 small">
+    Нейросеть не настроена (нет ADVISOR_LLM_* в .env) — генерация недоступна, список работать будет.
+  </div>
+  {% endif %}
+
+  {% if data.status.running %}
+  <div class="alert alert-primary py-1 px-2 small">
+    <span class="spinner-border spinner-border-sm me-2"></span>
+    обработка {{ data.status.done }} из {{ data.status.total }} · страница обновится сама через 15 с
+  </div>
+  <script>setTimeout(() => location.reload(), 15000);</script>
+  {% endif %}
+
+  {% if data.status.errors %}
+  <div class="alert alert-warning py-1 px-2 small">
+    {% for e in data.status.errors %}<div>{{ e }}</div>{% endfor %}
+  </div>
+  {% endif %}
+
+  <div class="card mb-3">
+    <div class="card-header"><i class="bi bi-list-check"></i> Мой список ({{ data.watchlist|length }} из {{ data.max_items }})</div>
+    <div class="card-body">
+      <form method="post" action="/ai-signals/add" class="d-flex gap-2 mb-2">
+        <input class="form-control" name="code" placeholder="тикер или ISIN, например MTSS или RU000A106E90" style="max-width:420px">
+        <button class="btn btn-outline-primary"><i class="bi bi-plus-lg"></i> добавить</button>
+        <span class="hint align-self-center">берутся только бумаги из скринера (ликвидные)</span>
+      </form>
+      {% if data.watchlist %}
+      <div class="d-flex flex-wrap gap-2">
+        {% for it in data.watchlist %}
+        <form method="post" action="/ai-signals/remove" class="d-flex align-items-center gap-1 border rounded px-2 py-1">
+          <span class="badge {{ 'bg-primary' if it.kind == 'bond' else ('bg-info text-dark' if it.kind == 'fx' else 'bg-secondary') }}">
+            {{ {'bond': 'ОФЗ/корп', 'fx': 'валютная', 'stock': 'акция'}.get(it.kind, it.kind) }}</span>
+          <b>{{ it.code }}</b> <span class="text-muted">{{ it.name }}</span>
+          <input type="hidden" name="code" value="{{ it.code }}">
+          <button class="btn btn-link p-0 ms-1 text-danger" title="убрать"><i class="bi bi-x-circle"></i></button>
+        </form>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="text-muted small">Список пуст. Добавьте бумаги — по ним модель сгенерирует сигналы.</div>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if data.signals %}
+  <div class="card">
+    <div class="card-header"><i class="bi bi-graph-up-arrow"></i> Сигналы</div>
+    <div class="card-body">
+      <table class="table table-sm mb-0">
+        <thead>
+          <tr>
+            <th style="width:12%">Бумага</th>
+            <th style="width:13%">Сигнал</th>
+            <th style="width:9%">Вход</th>
+            <th style="width:9%">Цель</th>
+            <th style="width:9%">Стоп</th>
+            <th>Почему</th>
+            <th style="width:20%">Риски</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for s in data.signals %}
+          <tr class="{{ 'sig-buy' if s.signal == 'покупать' else ('sig-wait' if s.signal == 'ждать' else 'sig-no') }}">
+            <td><b>{{ s.code }}</b><div class="text-muted" style="font-size:.7rem">{{ s.name }}</div></td>
+            <td>
+              <span class="badge {{ 'bg-success' if s.signal == 'покупать' else ('bg-warning text-dark' if s.signal == 'ждать' else 'bg-danger') }}">
+                {{ s.signal }}</span>
+              <div class="hint">уверенность {{ s.confidence }}% · {{ s.horizon }}</div>
+            </td>
+            <td class="small">{{ s.entry or '—' }}</td>
+            <td class="small">{{ s.target or '—' }}</td>
+            <td class="small">{{ s.stop or '—' }}</td>
+            <td class="small">
+              <ul class="mb-0 ps-3">
+                {% for w in s.why %}<li>{{ w }}</li>{% endfor %}
+              </ul>
+              {% if s.updated_at %}<div class="hint">{{ s.updated_at }}{% if s.cached is defined and s.cached %} · из кэша{% endif %}</div>{% endif %}
+            </td>
+            <td class="small text-muted">
+              <ul class="mb-0 ps-3">
+                {% for r in s.risks %}<li>{{ r }}</li>{% endfor %}
+              </ul>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="accordion mt-3" id="howto">
+    <div class="accordion-item">
+      <h2 class="accordion-header">
+        <button class="accordion-button collapsed py-1" type="button" data-bs-toggle="collapse" data-bs-target="#howto-body">
+          <i class="bi bi-question-circle me-1"></i> Как это работает и как читать сигналы
+        </button>
+      </h2>
+      <div id="howto-body" class="accordion-collapse collapse" data-bs-parent="#howto">
+        <div class="accordion-body py-2" style="font-size:.8rem">
+          <p class="mb-2"><b>Зачем.</b> Скринер отвечает «какие бумаги вообще хороши по метрикам».
+          Эта страница — про момент: по <b>выбранному вами списку</b> модель решает, есть ли
+          сигнал на покупку <b>сейчас</b>, и объясняет, почему.</p>
+
+          <p class="mb-1"><b>Что получает модель по каждой бумаге:</b></p>
+          <ul class="mb-2">
+            <li>все метрики из скринера: доходность, дюрация и спред к ОФЗ (облигации),
+                дивиденды за 12 мес, объявленные выплаты и история, P/E, P/B, ROE (акции);</li>
+            <li>рыночный контекст по акциям: цена, изменение за 12 мес, годовой максимум и минимум,
+                насколько цена ниже максимума, реализованная волатильность;</li>
+            <li>наши правила стратегии (акции — только в риск-бюджете, длинные ОФЗ — ставка на ставку,
+                цель 30% не прогнозируется).</li>
+          </ul>
+
+          <p class="mb-1"><b>Сигналы:</b></p>
+          <ul class="mb-2">
+            <li><span class="badge bg-success">покупать</span> — факты поддерживают вход: доходность
+                или оценка выше альтернатив, цена в разумной части диапазона, выплаты устойчивы.</li>
+            <li><span class="badge bg-warning text-dark">ждать</span> — идея есть, но момент/цена/данные
+                не сходятся. Модель обязана объяснить, чего ждать.</li>
+            <li><span class="badge bg-danger">не покупать</span> — противоречит стратегии или риск
+                не оправдан: кредитный риск, разовая выплата, оценка завышена.</li>
+          </ul>
+
+          <p class="mb-1"><b>Вход / цель / стоп</b> считаются от фактической цены из данных. Если
+          обосновать цель нельзя — поле пустое: модель не имеет права выдумывать уровни.</p>
+
+          <p class="mb-2"><b>Уверенность</b> — субъективная оценка модели, а не вероятность. Читайте
+          её вместе с причинами и рисками, а не как «85% что вырастет».</p>
+
+          <p class="mb-0"><b>Ограничения:</b> генерация идёт в фоне (20–50 с на бумагу), результат
+          кэшируется на {{ data.status.ttl_hours }} часов; при повторном нажатии считается заново.
+          Список ограничен {{ data.max_items }} бумагами — это не техническое, а разумное ограничение
+          по времени и стоимости запросов. Сигналы — расчёт по вашим правилам, не инвестиционная
+          рекомендация; проверяйте новости и отчётность эмитента самостоятельно.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

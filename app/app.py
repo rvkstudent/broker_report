@@ -31,7 +31,7 @@ from app.replication import push_async as push_to_cloud
 from app import (screener, chartdata, backtest, volatility, levels,
                 strategy_levels, signals_cache, signal_days, signal_journal, adaptive,
                 portfolio_growth, bond_ladder, instruments, models, advisor,
-                instrument_ai)
+                instrument_ai, ai_signals)
 from app import dashboard_prices as tinkoff_prices
 from app.allowed_devices import (is_device_allowed, add_pending_device,
                                   approve_device, reject_device, remove_device,
@@ -1398,6 +1398,45 @@ def api_instrument_ai():
         return jsonify(instrument_ai.analyze(kind, code.upper(), row, refresh=refresh))
     except Exception as exc:  # noqa: BLE001
         return jsonify({'available': False, 'error': str(exc)}), 500
+
+
+@flask_app.route('/ai-signals')
+def ai_signals_view():
+    """AI-сигналы по выбранному пользователем списку инструментов."""
+    message = request.args.get('msg', '')
+    return render_template('ai_signals.html',
+                           data={'watchlist': ai_signals.items(),
+                                 'signals': ai_signals.cached(),
+                                 'status': ai_signals.status(),
+                                 'message': message,
+                                 'max_items': ai_signals.MAX_ITEMS})
+
+
+@flask_app.route('/ai-signals/add', methods=['POST'])
+def ai_signals_add():
+    ok, msg = ai_signals.add_item(request.form.get('code') or '')
+    return redirect(url_for('ai_signals_view', msg=msg))
+
+
+@flask_app.route('/ai-signals/remove', methods=['POST'])
+def ai_signals_remove():
+    code = request.form.get('code') or ''
+    ai_signals.remove_item(code)
+    return redirect(url_for('ai_signals_view', msg=f'{code} убран из списка'))
+
+
+@flask_app.route('/ai-signals/generate', methods=['POST'])
+def ai_signals_generate():
+    ok, msg = ai_signals.generate_async()
+    return redirect(url_for('ai_signals_view', msg=msg))
+
+
+@flask_app.route('/api/ai-signals')
+def api_ai_signals():
+    """JSON: вотчлист, статус генерации и сигналы (для автопроверки страницы)."""
+    return jsonify({'status': ai_signals.status(),
+                    'items': ai_signals.items(),
+                    'signals': ai_signals.cached()})
 
 
 @flask_app.route('/models')

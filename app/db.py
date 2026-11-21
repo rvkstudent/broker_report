@@ -278,6 +278,18 @@ def init_db():
             duration_days   REAL,
             updated_at      TEXT
         )""",
+        # Вотчлист для AI-сигналов и сохранённые сигналы по нему.
+        """CREATE TABLE IF NOT EXISTS ai_watchlist (
+            code            TEXT PRIMARY KEY,
+            kind            TEXT NOT NULL,
+            name            TEXT,
+            added_at        TEXT
+        )""",
+        """CREATE TABLE IF NOT EXISTS ai_signals (
+            code            TEXT PRIMARY KEY,
+            payload         TEXT NOT NULL,
+            updated_at      TEXT
+        )""",
         # Кэш AI-разбора по конкретной бумаге: запрос к LLM дорогой и медленный,
         # поэтому ответ хранится и переиспользуется (по умолчанию 7 дней).
         """CREATE TABLE IF NOT EXISTS instrument_ai (
