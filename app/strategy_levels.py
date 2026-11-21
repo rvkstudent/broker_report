@@ -488,6 +488,8 @@ def analyze_range(ticker: str, from_ns: int, to_ns: int, raw_params: dict | None
     rr_by_time = result.get('rr_by_time') or {}
     signal_rows = []
     for item in found:
+        if item['time'] in trend_skips or item['time'] in skipped:
+            continue          # отсеянные в журнал не попадают: они не торгуются
         date_label, time_label = _signal_moment(item['time'])
         signal_rows.append({
             'taken': item['time'] not in skipped and item['time'] not in trend_skips,
@@ -532,10 +534,16 @@ def analyze_range(ticker: str, from_ns: int, to_ns: int, raw_params: dict | None
 
 
 def signal_markers(rows: list[dict]) -> list[dict]:
-    """Входы «Покупать» — принятые зелёным, отсеянные серым (не торгуем)."""
+    """Маркеры только принятых сигналов.
+
+    Отсеянные показывались серым, но пользы не несли: решение уже принято,
+    а визуальный шум мешал читать график. Их количество остаётся в метриках.
+    """
     markers = []
     for row in rows:
         taken = row.get('taken', True)
+        if not taken:
+            continue
         # Строки журнала хранят момент сигнала в ``signal_ts``.
         moment = row.get('time', row.get('signal_ts'))
         if moment is None:

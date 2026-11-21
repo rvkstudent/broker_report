@@ -30,6 +30,7 @@ from app.parser_nalog import (parse_nalog_report, get_nalog_summary,
 from app.replication import push_async as push_to_cloud
 from app import (screener, chartdata, backtest, volatility, levels,
                 strategy_levels, signals_cache, signal_days, signal_journal, adaptive,
+                strategy_tune,
                 portfolio_growth, bond_ladder, instruments, models, advisor,
                 instrument_ai, ai_signals, market_ai, portfolio_ai)
 from app import dashboard_prices as tinkoff_prices
@@ -1375,6 +1376,27 @@ def portfolio_growth_view():
                 'start': '', 'end': '', 'error': str(exc)}
     return render_template('portfolio_growth.html', data=data,
                            manual_flows=get_manual_flows())
+
+
+@flask_app.route('/api/strategy/tune/<ticker>')
+def api_strategy_tune(ticker):
+    """Подобрать параметры стратегии под инструмент на истории (сетка + бэктест)."""
+    ticker = (ticker or '').upper()
+    days = max(3, min(int(request.args.get('days', 14)), 90))
+    from app import chartdata
+    now_ns = chartdata.resolve_range('today')[1]
+    from_ns = now_ns - days * 86400 * 1_000_000_000
+    try:
+        result = strategy_tune.tune(ticker, from_ns, now_ns)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({'error': str(exc)}), 500
+    return jsonify(result)
+
+
+@flask_app.route('/api/strategy/tuned/<ticker>')
+def api_strategy_tuned(ticker):
+    """Что уже подобрано для инструмента (без пересчёта)."""
+    return jsonify(strategy_tune.load((ticker or '').upper()) or {})
 
 
 @flask_app.route('/api/portfolio-ai')

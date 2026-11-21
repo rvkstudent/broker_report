@@ -342,6 +342,12 @@
             </div>
 
             <div id="bt-results" class="d-none">
+                <div class="d-flex align-items-center gap-2 mb-1">
+                    <button class="btn btn-outline-secondary btn-sm" id="tune-run">
+                        <i class="bi bi-sliders"></i> подобрать параметры под инструмент</button>
+                    <span class="text-muted" id="tune-status" style="font-size:.72rem">
+                        параметры подбираются по истории: торгуем только то, что на ней прибыльно</span>
+                </div>
                 <div class="row g-1 mb-2" id="bt-metrics"></div>
                 <div class="mb-2 d-none" id="bt-diagnosis" style="font-size:.72rem"></div>
                 <div class="row g-2">
@@ -1123,6 +1129,44 @@
             box.classList.add('d-none');
         }
     }
+
+    // ── автоподбор параметров под инструмент ───────────────────
+    (function initTune() {
+        const btn = document.getElementById('tune-run');
+        const status = document.getElementById('tune-status');
+        if (!btn) return;
+        btn.addEventListener('click', async () => {
+            btn.disabled = true;
+            status.textContent = 'перебираю конфигурации на истории — 10–30 секунд…';
+            try {
+                const resp = await fetch('/api/strategy/tune/' + encodeURIComponent(TICKER) + '?days=14');
+                const d = await resp.json();
+                if (d.error) { status.textContent = 'Ошибка: ' + d.error; btn.disabled = false; return; }
+                if (!d.profitable) {
+                    status.innerHTML = '<span class="text-danger">Прибыльной настройки на истории нет'
+                        + ' (' + d.tried + ' конфигураций, нужно ≥' + d.min_trades + ' сделок).'
+                        + ' Сигналы по этой бумаге не торгуются — смотрите AI-план и уровни.</span>';
+                    btn.disabled = false;
+                    return;
+                }
+                const b = d.best;
+                const pretty = Object.entries(b.params)
+                    .map(([k, v]) => k + '=' + v).join(', ');
+                status.innerHTML = '<span class="text-success">Подобрано: ' + pretty
+                    + ' · сделок ' + b.trades + ', ожидание <b>' + b.expectancy + ' ₽</b>'
+                    + ', винрейт ' + b.win_rate + '%</span>';
+                // применяем к форме и пересчитываем бэктест
+                Object.entries(b.params).forEach(([k, v]) => {
+                    const input = document.querySelector('[data-key="' + k + '"]');
+                    if (input && input.type !== 'range') input.value = v;
+                });
+                if (typeof runBacktest === 'function') await runBacktest();
+            } catch (err) {
+                status.textContent = 'Ошибка: ' + err;
+            }
+            btn.disabled = false;
+        });
+    })();
 
     async function runBacktest() {
         const err = document.getElementById('bt-error');

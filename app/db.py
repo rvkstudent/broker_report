@@ -290,6 +290,13 @@ def init_db():
             payload         TEXT NOT NULL,
             updated_at      TEXT
         )""",
+        # Подобранные под инструмент параметры стратегии (история, не на глаз).
+        """CREATE TABLE IF NOT EXISTS strategy_tuned (
+            ticker          TEXT PRIMARY KEY,
+            params          TEXT NOT NULL,
+            metrics         TEXT,
+            updated_at      TEXT
+        )""",
         # Кэш ИИ-оценки портфеля (одна строка, живёт час).
         """CREATE TABLE IF NOT EXISTS portfolio_ai (
             id              INTEGER PRIMARY KEY,
