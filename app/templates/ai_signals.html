@@ -88,8 +88,8 @@
         <div class="col-md-6 col-xl-4">
           <label class="pos-chip d-flex align-items-center gap-2 border rounded px-2 py-1 w-100">
             <input class="form-check-input m-0" type="checkbox" name="codes" value="{{ p.code }}" checked>
-            <span class="badge {{ 'bg-primary' if p.kind == 'bond' else ('bg-info text-dark' if p.kind == 'fx' else 'bg-secondary') }}">
-              {{ {'bond': 'ОФЗ/корп', 'fx': 'валютная', 'stock': 'акция'}.get(p.kind, p.kind) }}</span>
+            <span class="badge {{ 'bg-primary' if p.kind == 'bond' else ('bg-info text-dark' if p.kind == 'fx' else ('bg-warning text-dark' if p.kind == 'future' else 'bg-secondary')) }}">
+              {{ {'bond': 'ОФЗ/корп', 'fx': 'валютная', 'stock': 'акция', 'future': 'фьючерс'}.get(p.kind, p.kind) }}</span>
             <b>{{ p.code }}</b>
             <span class="text-muted text-truncate">{{ p.name }}</span>
             {% if p.position and p.position.qty %}
@@ -191,6 +191,11 @@
       </h2>
       <div id="howto-body" class="accordion-collapse collapse" data-bs-parent="#howto">
         <div class="accordion-body py-2" style="font-size:.8rem">
+          <p class="mb-2"><b>Сигналы не зависят от скринера.</b> Скринер — это фильтр по ликвидности
+          для «что вообще купить». Здесь работает любой инструмент, который знает MOEX: фьючерсы
+          (срочный рынок), фонды, бумаги вне досок скринера. По фьючерсу модель отдельно учитывает
+          дату экспирации, гарантийное обеспечение и базовый актив — это не «покупка актива».</p>
+
           <p class="mb-2"><b>По умолчанию считаются ваши открытые позиции.</b> Это то, что реально
           лежит в портфеле: по каждой бумаге модель получает ещё и факт владения (количество, средняя
           цена, вложено) — поэтому она может отличить «покупать» от «докупать» и «сокращать».

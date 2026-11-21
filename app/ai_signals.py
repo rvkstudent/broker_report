@@ -68,9 +68,103 @@ def _resolve(code: str, snapshot: dict) -> tuple[dict, str] | None:
             ref = bond_ladder._ref_for(code, bond_ladder._load_cache())
         isin = (ref or {}).get('isin')
         if isin:
-            return _find(snapshot, isin)
+            found = _find(snapshot, isin)
+            if found:
+                return found
     except Exception:  # noqa: BLE001
         pass
+    # Последний рубеж — сам ISS: так работают фьючерсы, фонды и всё, чего нет
+    # в скринере. Сигналы не должны зависеть от фильтров скринера.
+    return _iss_facts(code)
+
+
+def _iss_facts(code: str) -> tuple[dict, str] | None:
+    """Любой инструмент с MOEX ISS — независимо от скринера.
+
+    Скринер намеренно узкий (ликвидные акции и облигации), но сигналы нужны и
+    по фьючерсам, фондам и прочим позициям. Здесь берём паспорт бумаги и
+    рыночные данные с нужного рынка ISS.
+    """
+    key = (code or '').strip().upper()
+    if not key:
+        return None
+    doc = _get_json('/securities/%s.json' % key)
+    desc = {r.get('name'): r.get('value') for r in _table(doc, 'description')}
+    if not desc:
+        # Код может быть торговым псевдонимом (RURMARG, LQDT): ищем по строке.
+        found = _table(_get_json('/securities.json', {'q': key}), 'securities')
+        exact = [r for r in found
+                 if key in (str(r.get('secid') or '').upper(),
+                            str(r.get('isin') or '').upper(),
+                            str(r.get('regnumber') or '').upper())]
+        if not exact:
+            return None
+        secid = exact[0].get('secid') or key
+        doc = _get_json('/securities/%s.json' % secid)
+        desc = {r.get('name'): r.get('value') for r in _table(doc, 'description')}
+        if not desc:
+            return None
+        desc.setdefault('SHORTNAME', exact[0].get('shortname') or key)
+        desc.setdefault('TYPE', exact[0].get('type') or '')
+        desc.setdefault('GROUP', exact[0].get('group') or '')
+    sec_type = str(desc.get('TYPE') or '').lower()
+    group = str(desc.get('GROUP') or '')
+    name = desc.get('SHORTNAME') or desc.get('SECNAME') or key
+
+    if 'futures' in sec_type or 'forts' in group:
+        md_doc = _get_json('/engines/futures/markets/forts/securities/%s.json' % key)
+        md = (_table(md_doc, 'marketdata') or [{}])[0]
+        price = _num(md.get('LAST')) or _num(md.get('SETTLEPRICE'))
+        expiry = ''
+        for field in ('LASTTRADEDATE', 'LASTDELIVERYDATE', 'EXPIRATIONDATE'):
+            value = str(desc.get(field) or '')
+            if value and value != '0000-00-00':
+                expiry = value
+                break
+        if not expiry:
+            # у срочного рынка дата часто только в имени: «MTSI-12.26»
+            suffix = str(name).split('-')[-1]
+            if '.' in suffix:
+                month, year = suffix.split('.')[:2]
+                expiry = f'20{year}-{int(month):02d} (из названия контракта)'
+        return {
+            'code': key,
+            'name': name,
+            'kind': 'future',
+            'type': 'фьючерс',
+            'asset_code': desc.get('ASSETCODE') or '',
+            'expiry': expiry,
+            'price': price,
+            'settle': _num(md.get('SETTLEPRICE')),
+            'turnover': _num(md.get('VALTODAY')),
+            'trades': _num(md.get('NUMTRADES')),
+            'open_position': _num(md.get('OPENPOSITION')),
+            'lot': _num(desc.get('LOTVOLUME')),
+        }, 'future'
+
+    if 'bond' in sec_type or 'bond' in group:
+        price_pct = _num(desc.get('PREVPRICE'))
+        return {
+            'code': key,
+            'name': name,
+            'type': 'облигация',
+            'currency': 'RUB' if str(desc.get('FACEUNIT') or 'SUR').upper() in ('SUR', 'RUB', '') else desc.get('FACEUNIT'),
+            'matdate': desc.get('MATDATE') or '',
+            'coupon_pct': _num(desc.get('COUPONPERCENT')),
+            'price': price_pct,
+        }, ('fx' if str(desc.get('FACEUNIT') or 'SUR').upper() not in ('SUR', 'RUB', '') else 'bond')
+
+    if 'share' in sec_type or 'stock' in group or 'etf' in group or 'fund' in sec_type:
+        md_doc = _get_json('/engines/stock/markets/shares/securities/%s.json' % key)
+        md = (_table(md_doc, 'marketdata') or [{}])[0]
+        return {
+            'code': key,
+            'name': name,
+            'type': 'акция/фонд',
+            'price': _num(md.get('LAST')) or _num(md.get('LCURRENTPRICE')),
+            'turnover': _num(md.get('VALTODAY')),
+            'trades': _num(md.get('NUMTRADES')),
+        }, 'stock'
     return None
 
 
@@ -188,9 +282,9 @@ def add_item(code: str, kind: str = 'auto') -> tuple[bool, str]:
     if len(items()) >= MAX_ITEMS:
         return False, f'в списке уже {MAX_ITEMS} бумаг — это предел'
     snapshot = _snapshot()
-    found = _find(snapshot, code)
+    found = _find(snapshot, code) or _resolve(code, snapshot)
     if not found:
-        return False, f'«{code}» не найден среди ликвидных бумаг скринера'
+        return False, f'«{code}» не найден ни в скринере, ни в справочнике MOEX ISS'
     row, real_kind = found
     try:
         conn = get_connection()
@@ -245,44 +339,119 @@ def _find(snapshot: dict, code: str) -> tuple[dict, str] | None:
     return None
 
 
+_HISTORY_MARKETS = (
+    '/history/engines/stock/markets/shares/securities/%s.json',
+    '/history/engines/futures/markets/forts/securities/%s.json',
+)
+
+_PRICE_BOARDS = (
+    ('/engines/stock/markets/shares/boards/TQBR/securities/%s.json',),
+    ('/engines/stock/markets/shares/boards/TQTF/securities/%s.json',),
+    ('/engines/stock/markets/shares/boards/TQIF/securities/%s.json',),
+    ('/engines/stock/markets/bonds/boards/TQOB/securities/%s.json',),
+    ('/engines/stock/markets/bonds/boards/TQCB/securities/%s.json',),
+    ('/engines/futures/markets/forts/securities/%s.json',),
+)
+
+
+def current_price(code: str) -> float | None:
+    """Актуальная цена с MOEX ISS (marketdata), а не из истории.
+
+    История ISS отдаётся с 2011 года, если не передать ``from``, и «последняя»
+    строка такой выборки — цена давно прошедшего дня. Поэтому текущую цену
+    берём из marketdata нужной доски, а историю используем только для
+    диапазона и волатильности.
+    """
+    key = (code or '').upper()
+    cached = _context_cache.get('price:' + key)
+    if cached and time.time() - cached[0] < 600:
+        return cached[1]
+    price = None
+    for (template,) in _PRICE_BOARDS:
+        doc = _get_json(template % key)
+        rows = _table(doc, 'marketdata')
+        if not rows:
+            continue
+        row = rows[0]
+        price = (_num(row.get('LAST')) or _num(row.get('LCURRENTPRICE'))
+                 or _num(row.get('SETTLEPRICE')) or _num(row.get('MARKETPRICE')))
+        if price:
+            break
+    if price:
+        _context_cache['price:' + key] = (time.time(), price)
+    return price
+
+
 def _history(secid: str, days: int = 400) -> list[tuple[str, float]]:
-    """Дневные закрытия с ISS (для диапазона и динамики)."""
+    """Дневные закрытия за последний год (окно задаём через ``from``).
+
+    Параметр ``start`` листает с самого начала истории (2011 год), поэтому
+    без ``from`` выборка получается «древней». Фильтруем по дате ещё раз.
+    """
     cached = _context_cache.get('hist:' + secid)
     if cached and time.time() - cached[0] < CONTEXT_TTL:
         return cached[1]
     frm = (date.today() - timedelta(days=days)).isoformat()
-    doc = _get_json('/history/engines/stock/markets/shares/securities/%s.json' % secid,
-                    {'history.columns': 'TRADEDATE,CLOSE', 'from': frm})
-    rows = [(_num(r.get('CLOSE')), str(r.get('TRADEDATE') or ''))
-            for r in _table(doc, 'history')]
-    series = [(d, v) for v, d in rows if v and d]
+    series: list[tuple[str, float]] = []
+    for template in _HISTORY_MARKETS:
+        collected: list[tuple[str, float]] = []
+        start = 0
+        for _ in range(6):
+            doc = _get_json(template % secid,
+                            {'history.columns': 'TRADEDATE,CLOSE',
+                             'from': frm, 'start': start})
+            rows = _table(doc, 'history')
+            if not rows:
+                break
+            for r in rows:
+                value = _num(r.get('CLOSE'))
+                day = str(r.get('TRADEDATE') or '')
+                if value and day and day >= frm:
+                    collected.append((day, value))
+            start += len(rows)
+            if len(rows) < 100:
+                break
+        if collected:
+            series = collected
+            break
     series.sort()
     _context_cache['hist:' + secid] = (time.time(), series)
     return series
 
 
 def market_context(row: dict, kind: str) -> dict:
-    """Что рынок говорит о бумаге прямо сейчас (компактно, для промпта)."""
+    """Что рынок говорит о бумаге прямо сейчас (компактно, для промпта).
+
+    Текущая цена — из marketdata ISS; история — только для диапазона,
+    динамики за 12 мес и волатильности.
+    """
     ctx = {'today': date.today().isoformat()}
-    if kind == 'stock':
-        series = _history(row.get('code') or '')
-        if series:
-            closes = [v for _, v in series]
-            last = closes[-1]
+    if kind in ('stock', 'future'):
+        code = row.get('code') or ''
+        series = _history(code)
+        closes = [v for _, v in series]
+        # Текущая цена — из marketdata; история нужна для диапазона.
+        last = current_price(code) or row.get('price') or (closes[-1] if closes else None)
+        if closes and last and (closes[-1] / last > 2 or last / closes[-1] > 2):
+            # история явно из другого периода — не используем её вовсе
+            series, closes = [], []
+        if closes:
             year = closes[-250:] if len(closes) > 250 else closes
             hi, lo = max(year), min(year)
             ctx.update({
-                'last_price': round(last, 2),
+                'last_price': round(last, 2) if last else None,
                 'year_high': round(hi, 2),
                 'year_low': round(lo, 2),
-                'from_high_pct': round((last / hi - 1) * 100, 1) if hi else None,
-                'from_low_pct': round((last / lo - 1) * 100, 1) if lo else None,
-                'change_12m_pct': (round((last / closes[-250] - 1) * 100, 1)
-                                   if len(closes) > 250 else None),
+                'from_high_pct': round((last / hi - 1) * 100, 1) if last and hi else None,
+                'from_low_pct': round((last / lo - 1) * 100, 1) if last and lo else None,
+                'change_12m_pct': (round((last / closes[0] - 1) * 100, 1)
+                                   if last and closes and len(closes) > 60 else None),
                 'volatility_pct': (round(_stdev(
-                    [closes[i] / closes[i - 1] - 1 for i in range(1, len(closes[-250:]))])
-                    * math.sqrt(252) * 100, 1) if len(closes) > 20 else None),
+                    [closes[i] / closes[i - 1] - 1 for i in range(1, len(year))])
+                    * math.sqrt(252) * 100, 1) if len(year) > 20 else None),
             })
+        elif last:
+            ctx['last_price'] = round(last, 2)
     return ctx
 
 
@@ -307,6 +476,11 @@ PROMPT = """Ты — риск-менеджер частного портфеля
 - Дивдоходность по последней выплате может быть разовой: смотри объявленные выплаты
   и историю, а не только цифру за 12 мес.
 - Для облигаций: высокая премия к ОФЗ — это кредитный риск, а не «выгодно».
+- Если kind = "фьючерс": это срочный контракт, а не покупка актива. Обязательно учти:
+  дату экспирации (в фактах expiry; если нет — скажи, что неизвестна), гарантийное
+  обеспечение (плечо), базовый актив (asset_code) и открытый интерес. «Покупать» значит
+  занять длинную позицию по контракту; перенос на следующий контракт — отдельное решение.
+  Не переноси купонные и дивидендные аргументы на фьючерс.
 
 СТРАТЕГИЯ:
 """ + STRATEGY_TEXT + """
@@ -405,13 +579,27 @@ def _worker(watch: list[dict], snapshot: dict) -> None:
             continue
         row, kind = found
         facts = {k: v for k, v in row.items() if v not in (None, '', [])}
-        facts['kind'] = 'облигация' if kind in ('bond', 'fx') else 'акция'
+        facts['kind'] = ('облигация' if kind in ('bond', 'fx')
+                         else 'фьючерс' if kind == 'future' else 'акция')
+        facts['source'] = ('скринер' if kind in ('bond', 'fx', 'stock') and row.get('score') is not None
+                           else 'MOEX ISS')
         if item.get('position'):
             facts['position'] = item['position']   # уже в портфеле: qty/средняя/вложено
         try:
             facts['market'] = market_context(row, kind)
         except Exception:  # noqa: BLE001
             pass
+        if kind == 'future':
+            facts['instrument_type'] = 'фьючерс'
+            asset = row.get('asset_code') or ''
+            if asset:
+                facts['underlying'] = asset
+                try:
+                    sub = market_context({'code': asset}, 'stock')
+                    if sub.get('last_price'):
+                        facts['underlying_market'] = sub
+                except Exception:  # noqa: BLE001
+                    pass
         result = _call(item, facts)
         if result:
             result.update({'code': item['code'], 'name': item.get('name') or row.get('name'),
