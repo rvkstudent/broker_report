@@ -1,0 +1,347 @@
+{% extends "base.html" %}
+{% block title %}Модели — BrokerReport{% endblock %}
+{% block content %}
+<style>
+    .ui-compact .card-header { padding: .3rem .55rem; font-size: .78rem; }
+    .ui-compact .card-body { padding: .55rem .6rem; font-size: .82rem; }
+    .ui-compact table { font-size: .78rem; }
+    .ui-compact table td, .ui-compact table th { padding: .18rem .4rem; }
+    .ui-compact .form-control, .ui-compact .form-select { font-size: .75rem; height: 26px; padding: .05rem .35rem; }
+    .ui-compact .form-label { font-size: .72rem; }
+    .ui-compact .badge { font-size: .66rem; }
+    .metric { font-size: 1.02rem; font-weight: 700; line-height: 1.1; }
+    .hint { font-size: .72rem; color: #6c757d; }
+    .kv td:first-child { color: #6c757d; width: 45%; }
+</style>
+
+<div class="ui-compact">
+  <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+    <div>
+      <h4 class="mb-0"><i class="bi bi-calculator"></i> Модели инвестирования</h4>
+      <div class="text-muted small">детерминированные, статистические и с индексом страха · на {{ data.as_of }}</div>
+    </div>
+    {% if data.rvi.available %}
+    <div class="d-flex align-items-center gap-2">
+      <span class="badge {{ 'bg-danger' if data.rvi.regime in ('страх', 'паника') else ('bg-success' if data.rvi.regime == 'спокойствие' else 'bg-secondary') }}">
+        RVI {{ data.rvi.current }} · {{ data.rvi.regime }} · перцентиль {{ data.rvi.percentile }}%
+      </span>
+      <span class="hint">медиана {{ data.rvi.median }} · P25 {{ data.rvi.p25 }} · P75 {{ data.rvi.p75 }} · P90 {{ data.rvi.p90 }}</span>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- Инструкции -->
+  <div class="accordion mb-2" id="howto">
+    <div class="accordion-item">
+      <h2 class="accordion-header">
+        <button class="accordion-button collapsed py-1" type="button" data-bs-toggle="collapse" data-bs-target="#howto-body">
+          <i class="bi bi-question-circle me-1"></i> Как читать эти модели: формулы, допущения и где они ломаются
+        </button>
+      </h2>
+      <div id="howto-body" class="accordion-collapse collapse" data-bs-parent="#howto">
+        <div class="accordion-body py-2" style="font-size:.8rem">
+
+          <p class="mb-2"><b>Главное различие:</b> три модели из четырёх дают <i>распределение</i>, а не прогноз.
+          Единственная модель с известным заранее результатом — купонная машина, и только пока
+          выполняются её условия (держать до погашения, реинвестировать по ставке не ниже YTM, нет дефолта).
+          Всё остальное — про вероятность и размер риска.</p>
+
+          <p class="mb-1"><b>1. Купонная машина</b> (детерминированная)</p>
+          <p class="mb-2">IRR денежных потоков облигаций с налогами: купоны облагаются НДФЛ 13% каждый год,
+          дисконт (номинал минус цена покупки) — тоже 13%, но при погашении. Формула —
+          <code>NPV = Σ CF/(1+r)^t = 0</code>. Если реинвестировать купоны по ставке ниже IRR,
+          фактический результат будет ниже — это видно в строке «налоговая нагрузка» и в сценариях.</p>
+
+          <p class="mb-1"><b>2. Иммунизация (Редингтон)</b></p>
+          <p class="mb-2">Правило: <code>дюрация = горизонт</code>. Тогда рост ставок бьёт по цене ровно
+          настолько, насколько выгоднее становится реинвестирование купонов, и результат к горизонту
+          не меняется. Если дюрация меньше горизонта — вы не защищены: ставки выросли, а компенсировать
+          это реинвестированием уже не успеть. Расчёт первого порядка: <code>ΔP ≈ −D × Δy</code>,
+          эффект реинвестирования <code>≈ (H − D) × Δy</code>.</p>
+
+          <p class="mb-1"><b>3. Индекс страха как регулятор риска</b></p>
+          <p class="mb-2">RVI — индекс волатильности российского рынка (аналог VIX): ожидаемая волатильность
+          на 30 дней вперёд, в процентах годовых. Правило размера риска:
+          <code>w = min(cap, σ*/RVI)</code>, где σ* — ваш бюджет риска (например, 15%), cap — потолок доли
+          акций. Смысл: RVI 20 → волатильность низкая, можно держать больше акций; RVI 45 → риск втрое выше,
+          доля акций автоматически уменьшается. <b>Это не «покупай на панике»</b>: бэктест 2014–2026
+          показал, что наивное «при страхе — всё в акции» даёт CAGR 5% и просадку −49%, а таргетирование
+          волатильности — CAGR 10,4% при σ 12,5%.</p>
+
+          <p class="mb-1"><b>4. Монте-Карло</b></p>
+          <p class="mb-2">Симуляция <code>N</code> траекторий на горизонт: доходности облигаций и акций —
+          нормальные с заданными μ и σ, корреляция +0,45 (по истории MCFTR/RGBITR 2008–2026).
+          P10 — плохой сценарий (10% траекторий хуже), P50 — медиана, P90 — хороший.
+          Планировать надо по P10, а не по среднему. «P(≥30%)» — доля траекторий, где годовая доходность
+          достигла 30%: если она равна нулю, цель 30% — это не модель, а ставка на событие.</p>
+
+          <p class="mb-1"><b>5. Келли</b></p>
+          <p class="mb-2">Доля акций, максимизирующая логарифм капитала: <code>f* = (μ_акций − μ_облигаций) / σ²_акций</code>.
+          Если облигации дают больше, чем ожидаемая доходность акций, Келли даёт отрицательную долю —
+          то есть «не добавлять акции». На практике берут половину Келли.</p>
+
+          <p class="mb-0"><b>Ограничения:</b> μ акций — историческая (MCFTR CAGR 7,85%, σ 23,8%),
+          μ облигаций — текущая IRR вашего портфеля после налогов. Обе оценки не гарантируют будущее;
+          модель не учитывает дефолты, ликвидность и налог на продажу при ребалансировке.
+          Это расчёт, а не инвестиционная рекомендация.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Аналитика: рекомендации -->
+  {% if data.advice %}
+  {% set adv = data.advice %}
+  <div class="card mb-3">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <div><i class="bi bi-lightbulb"></i> Аналитика и рекомендации
+        <small class="text-muted">по стратегии сайта · {{ adv.as_of }}</small></div>
+      <div>
+        <span class="badge bg-secondary" title="Детерминированные правила: иммунизация, концентрация, RVI, Келли">правила: {{ adv.rules|length }}</span>
+        {% if adv.llm_enabled %}
+          <span class="badge bg-primary" title="Рекомендации сгенерированы нейросетью {{ adv.llm_model }}">
+            нейросеть: {{ adv.llm_model or 'вкл' }}{% if adv.llm %}, {{ adv.llm|length }}{% endif %}</span>
+          {% if adv.llm_pending %}
+          <span class="badge bg-light text-dark border" title="Запрос выполняется в фоне, страница не ждёт ответа">
+            <i class="bi bi-hourglass-split"></i> считает — обновите через минуту</span>
+          {% endif %}
+        {% else %}
+          <span class="badge bg-light text-dark border" title="Нейросеть не настроена: данные никуда не отправляются">нейросеть: выкл</span>
+        {% endif %}
+      </div>
+    </div>
+    <div class="card-body">
+      {% if adv.llm %}
+      <table class="table table-sm mb-3">
+        <thead><tr><th style="width:34%">Нейросеть: вывод</th><th>Почему</th><th>Что делать</th><th>Риск</th></tr></thead>
+        <tbody>
+        {% for r in adv.llm %}
+          <tr>
+            <td><span class="badge {{ 'bg-danger' if r.severity == 'action' else ('bg-warning text-dark' if r.severity == 'watch' else 'bg-light text-dark border') }}">{{ r.severity }}</span> {{ r.title }}</td>
+            <td>{{ r.why }}</td><td>{{ r.action }}</td><td class="text-muted">{{ r.risk }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% endif %}
+
+      <table class="table table-sm mb-0">
+        <thead><tr><th style="width:26%">Правило</th><th>Почему (цифры)</th><th style="width:28%">Что делать</th><th style="width:18%">Риск</th></tr></thead>
+        <tbody>
+        {% for r in adv.rules %}
+          <tr>
+            <td>
+              <span class="badge {{ 'bg-danger' if r.severity == 'action' else ('bg-warning text-dark' if r.severity == 'watch' else 'bg-light text-dark border') }}">{{ 'действие' if r.severity == 'action' else ('наблюдать' if r.severity == 'watch' else 'справка') }}</span>
+              {{ r.title }}
+            </td>
+            <td class="small">{{ r.why }}</td>
+            <td class="small">{{ r.action }}</td>
+            <td class="small text-muted">{{ r.risk or '—' }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+
+      <div class="accordion mt-2" id="adv-how">
+        <div class="accordion-item">
+          <h2 class="accordion-header">
+            <button class="accordion-button collapsed py-1" type="button" data-bs-toggle="collapse" data-bs-target="#adv-how-body">
+              <i class="bi bi-info-circle me-1"></i> Откуда берутся рекомендации и что уходит в нейросеть
+            </button>
+          </h2>
+          <div id="adv-how-body" class="accordion-collapse collapse" data-bs-parent="#adv-how">
+            <div class="accordion-body py-2" style="font-size:.79rem">
+              <p class="mb-2"><b>Правила (работают всегда).</b> Это наш собственный движок, а не «мнение модели».
+              Каждая рекомендация — следствие порога из стратегии:</p>
+              <ul class="mb-2">
+                <li><b>Иммунизация:</b> сравнивается дюрация и горизонт; зазор больше {{ 1 }} года → предупреждение.</li>
+                <li><b>Концентрация:</b> доля облигаций в одном годе погашения больше {{ "%.0f"|format(30) }}% → разгружать.</li>
+                <li><b>Дыры лестницы:</b> годы между ближайшим и дальним погашением без поступлений.</li>
+                <li><b>Кредитный риск:</b> доля бумаг с премией к ОФЗ больше 6 п.п. или купоном выше 20%.</li>
+                <li><b>Валюта:</b> меньше 10% — нет хеджа, больше 30% — перекос.</li>
+                <li><b>Индекс страха:</b> RVI задаёт долю риска w = σ*/RVI, максимум 25%.</li>
+                <li><b>Келли:</b> если ожидаемая доходность акций ниже доходности облигаций — акции не добавляют роста.</li>
+                <li><b>Цель 30%:</b> вероятность берётся из Монте-Карло, а не из обещаний.</li>
+                <li><b>Кандидаты:</b> лучшие строки скринера с баллом и флагами риска.</li>
+              </ul>
+              <p class="mb-2"><b>Нейросеть (опционально, по умолчанию выключена).</b> Если на сервере заданы
+              <code>ADVISOR_LLM_URL</code>, <code>ADVISOR_LLM_KEY</code>, <code>ADVISOR_LLM_MODEL</code>,
+              тот же профиль портфеля и найденные правила отправляются в языковую модель — она пишет
+              объяснение человеческим языком. <b>Это передача состава портфеля внешнему сервису</b>,
+              поэтому включается только владельцем данных, вручную. Пока бейдж «нейросеть: выкл» —
+              страница работает полностью локально.</p>
+              <p class="mb-0"><b>Чего здесь нет:</b> конкретных сумм к покупке, кредитного плеча и обещаний
+              доходности. Рекомендации — это расчёт по вашим же правилам, а не инвестиционный совет.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Параметры -->
+  <form class="row g-2 align-items-end mb-3" method="get">
+    <div class="col-auto">
+      <label class="form-label mb-0">горизонт, лет</label>
+      <input class="form-control" type="number" name="horizon" min="1" max="40" value="{{ data.params.horizon }}">
+    </div>
+    <div class="col-auto">
+      <label class="form-label mb-0">бюджет риска σ*, %</label>
+      <input class="form-control" type="number" name="sigma" min="5" max="40" step="1" value="{{ data.params.sigma_star }}">
+    </div>
+    <div class="col-auto">
+      <label class="form-label mb-0">доля акций, %</label>
+      <input class="form-control" type="number" name="equity" min="0" max="100" step="5" value="{{ data.params.equity_pct }}">
+    </div>
+    <div class="col-auto">
+      <label class="form-label mb-0">траекторий</label>
+      <input class="form-control" type="number" name="paths" min="500" max="20000" step="500" value="{{ data.params.paths }}">
+    </div>
+    <div class="col-auto"><button class="btn btn-primary">пересчитать</button></div>
+  </form>
+
+  <div class="row g-3">
+    <!-- 1. Купонная машина -->
+    <div class="col-lg-6">
+      <div class="card h-100">
+        <div class="card-header"><i class="bi bi-safe"></i> 1. Купонная машина — единственный «прогноз»</div>
+        <div class="card-body">
+          <div class="row text-center g-2 mb-2">
+            <div class="col-4">
+              <div class="hint">IRR после налогов</div>
+              <div class="metric {{ 'profit-positive' if data.machine.irr_net and data.machine.irr_net > 0 else '' }}">
+                {{ '%.2f'|format(data.machine.irr_net) if data.machine.irr_net is not none else '—' }}%</div>
+            </div>
+            <div class="col-4">
+              <div class="hint">до налогов</div>
+              <div class="metric">{{ '%.2f'|format(data.machine.irr_gross) if data.machine.irr_gross is not none else '—' }}%</div>
+            </div>
+            <div class="col-4">
+              <div class="hint">налоговая нагрузка</div>
+              <div class="metric">{{ '%.2f'|format(data.machine.tax_drag) if data.machine.tax_drag is not none else '—' }} п.п.</div>
+            </div>
+          </div>
+          <table class="table table-sm kv mb-0">
+            <tr><td>Облигаций сейчас</td><td class="text-end">{{ '{:,.0f}'.format(data.machine.value) }} ₽</td></tr>
+            <tr><td>Через {{ data.machine.horizon }} лет (реинвест по IRR)</td>
+              <td class="text-end fw-bold">{{ '{:,.0f}'.format(data.machine.future) if data.machine.future else '—' }} ₽</td></tr>
+            <tr><td>Ближайший купон</td><td class="text-end">{{ data.machine.next_flow or '—' }}</td></tr>
+            <tr><td>Средняя YTM портфеля</td><td class="text-end">{{ data.bond_metrics.ytm or '—' }}%</td></tr>
+          </table>
+          <div class="hint mt-1">Работает только при удержании до погашения и реинвестировании купонов по ставке ≥ IRR.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2. Иммунизация -->
+    <div class="col-lg-6">
+      <div class="card h-100">
+        <div class="card-header"><i class="bi bi-rulers"></i> 2. Иммунизация: дюрация против горизонта</div>
+        <div class="card-body">
+          <div class="d-flex justify-content-between mb-1">
+            <div><span class="hint">дюрация</span> <b>{{ data.immunization.duration }}</b> лет</div>
+            <div><span class="hint">горизонт</span> <b>{{ data.immunization.horizon }}</b> лет</div>
+            <div class="{{ 'text-success' if data.immunization.immunized else 'text-danger' }}">
+              <span class="hint">зазор</span> <b>{{ '%+.1f'|format(data.immunization.gap) }}</b></div>
+          </div>
+          <div class="alert {{ 'alert-success' if data.immunization.immunized else 'alert-warning' }} py-1 px-2 small mb-2">
+            {{ data.immunization.advice }}
+          </div>
+          <table class="table table-sm mb-0">
+            <thead><tr><th>сдвиг ставок</th><th class="text-end">цена</th><th class="text-end">итог к горизонту</th><th class="text-end">в рублях</th></tr></thead>
+            <tbody>
+            {% for s in data.immunization.shocks %}
+              <tr>
+                <td>{{ '%+d'|format(s.dy) }} п.п.</td>
+                <td class="text-end">{{ '%+.1f'|format(s.price_pct) }}%</td>
+                <td class="text-end fw-bold {{ 'profit-positive' if s.total_pct > 0 else ('profit-negative' if s.total_pct < 0 else '') }}">{{ '%+.1f'|format(s.total_pct) }}%</td>
+                <td class="text-end">{{ '{:,.0f}'.format(s.rub) }} ₽</td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+          <div class="hint mt-1">Иммунизация — когда дюрация равна горизонту: сдвиг ставок не меняет итог.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3. Индекс страха -->
+    <div class="col-lg-6">
+      <div class="card h-100">
+        <div class="card-header"><i class="bi bi-activity"></i> 3. Индекс страха (RVI) как регулятор риска</div>
+        <div class="card-body">
+          {% if data.vol_target.available %}
+          <div class="row text-center g-2 mb-2">
+            <div class="col-4"><div class="hint">RVI сейчас</div><div class="metric">{{ data.rvi.current }}</div></div>
+            <div class="col-4"><div class="hint">доля риска w = σ*/RVI</div>
+              <div class="metric">{{ data.vol_target.raw }}%</div></div>
+            <div class="col-4"><div class="hint">после потолка {{ data.vol_target.cap }}%</div>
+              <div class="metric text-primary">{{ data.vol_target.weight }}%</div></div>
+          </div>
+          <table class="table table-sm mb-0">
+            <thead><tr><th>уровень страха</th><th class="text-end">RVI</th><th class="text-end">доля акций</th></tr></thead>
+            <tbody>
+            {% for row in data.vol_target.table %}
+              <tr><td>{{ row.label }}</td><td class="text-end">{{ row.rvi }}</td><td class="text-end fw-bold">{{ row.weight }}%</td></tr>
+            {% endfor %}
+            </tbody>
+          </table>
+          <div class="hint mt-1">Бэктест 2014–2026: таргет 15% → CAGR 10,4% при σ 12,5% против 9,5% при σ 13,3% у статичных 50/50.</div>
+          {% else %}
+          <div class="text-muted">RVI недоступен (нет данных MOEX ISS).</div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
+    <!-- 4. Монте-Карло -->
+    <div class="col-lg-6">
+      <div class="card h-100">
+        <div class="card-header"><i class="bi bi-dice-5"></i> 4. Монте-Карло: разброс вместо «среднего»</div>
+        <div class="card-body">
+          {% if data.monte_carlo.available %}
+          <div class="row text-center g-2 mb-2">
+            <div class="col-4"><div class="hint">P10 (плохой)</div>
+              <div class="metric profit-negative">{{ '{:,.0f}'.format(data.monte_carlo.p10) }} ₽</div>
+              <div class="hint">{{ data.monte_carlo.cagr_p10 }}% годовых</div></div>
+            <div class="col-4"><div class="hint">медиана</div>
+              <div class="metric">{{ '{:,.0f}'.format(data.monte_carlo.p50) }} ₽</div>
+              <div class="hint">{{ data.monte_carlo.cagr_p50 }}% годовых</div></div>
+            <div class="col-4"><div class="hint">P90 (хороший)</div>
+              <div class="metric profit-positive">{{ '{:,.0f}'.format(data.monte_carlo.p90) }} ₽</div>
+              <div class="hint">{{ data.monte_carlo.cagr_p90 }}% годовых</div></div>
+          </div>
+          <table class="table table-sm kv mb-0">
+            <tr><td>Доля акций / горизонт / траекторий</td>
+              <td class="text-end">{{ data.monte_carlo.equity_pct }}% · {{ data.monte_carlo.years }} лет · {{ data.monte_carlo.paths }}</td></tr>
+            <tr><td>P(годовая доходность ≥ 30%)</td>
+              <td class="text-end fw-bold {{ 'text-danger' if data.monte_carlo.p_target < 5 else '' }}">{{ data.monte_carlo.p_target }}%</td></tr>
+            <tr><td>Доходность облигаций (μ) / акций (μ)</td>
+              <td class="text-end">{{ data.bond_mu }}% · 10,5% (история MCFTR)</td></tr>
+            <tr><td>Келли: полная / половина</td>
+              <td class="text-end">{{ data.kelly.full }}% / {{ data.kelly.half }}%</td></tr>
+          </table>
+          <div class="hint mt-1">
+            {% if not data.kelly.positive %}
+            Облигации сейчас дают больше, чем ожидаемая доходность акций → Келли отрицательный: акции не добавляют роста, только риск.
+            {% else %}
+            Премия акций к облигациям положительная → акции добавляют ожидаемый рост.
+            {% endif %}
+          </div>
+          {% else %}
+          <div class="text-muted">Модель недоступна: нет данных по позициям.</div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="small text-muted mt-3">
+    Параметры: облигации — IRR вашего портфеля после налогов ({{ data.bond_mu }}%), σ 6%;
+    акции — исторические 10,5% / σ 23,8% (MCFTR, 2008–2026); корреляция +0,45.
+    RVI — индекс волатильности МосБиржи (ISS). Модели считаются на сервере, данные кэшируются.
+    Это расчёт для планирования, а не инвестиционная рекомендация.
+  </div>
+</div>
+{% endblock %}

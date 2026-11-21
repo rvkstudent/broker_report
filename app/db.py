@@ -255,6 +255,47 @@ def init_db():
             sec_code    TEXT NOT NULL,
             updated_at  TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
         )""",
+        # Справочник облигаций из MOEX ISS: дата погашения, купон, биржевая
+        # YTM и дюрация. Нужен лестнице погашений — в отчётах брокера этих
+        # полей нет, а ISS отдаёт их бесплатно. Кэш, чтобы не ходить в сеть
+        # на каждый показ страницы (обновляется по TTL в app/bond_ladder.py).
+        """CREATE TABLE IF NOT EXISTS bond_ref (
+            code            TEXT PRIMARY KEY,
+            secid           TEXT,
+            isin            TEXT,
+            name            TEXT,
+            kind            TEXT,
+            currency        TEXT,
+            matdate         TEXT,
+            offerdate       TEXT,
+            coupon_pct      REAL,
+            coupon_value    REAL,
+            coupon_freq     INTEGER,
+            facevalue       REAL,
+            board           TEXT,
+            price_pct       REAL,
+            ytm             REAL,
+            duration_days   REAL,
+            updated_at      TEXT
+        )""",
+        # Кэш AI-разбора по конкретной бумаге: запрос к LLM дорогой и медленный,
+        # поэтому ответ хранится и переиспользуется (по умолчанию 7 дней).
+        """CREATE TABLE IF NOT EXISTS instrument_ai (
+            kind            TEXT NOT NULL,
+            code            TEXT NOT NULL,
+            payload         TEXT NOT NULL,
+            updated_at      TEXT,
+            PRIMARY KEY (kind, code)
+        )""",
+        # Кэш скринера инструментов («Акции» и «Облигации»): справочник и
+        # метрики собираются из MOEX ISS и T-Invest в фоне, страница читает
+        # готовый JSON. Одна строка на вид — так проще атомарно заменить снимок.
+        """CREATE TABLE IF NOT EXISTS instrument_screen (
+            kind            TEXT PRIMARY KEY,
+            payload         TEXT NOT NULL,
+            source          TEXT DEFAULT '',
+            updated_at      TEXT
+        )""",
         # Таблица nalog крупная (сотни тысяч строк), а страница «Налоги»
         # группирует её по году и инструменту. Без индексов это 4–5 полных
         # сканов на каждый заход — около секунды. Строки вставляются пакетно

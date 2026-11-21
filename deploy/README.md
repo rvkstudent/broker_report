@@ -15,6 +15,39 @@ QUIK (prices.lua) ──HTTPS──┐
 
 ---
 
+## 0. Текущий сервер (после миграции 21.11.2026)
+
+| Параметр | Значение |
+|---|---|
+| IP | `111.88.80.148` (HostKey, Ubuntu 24.04, 2 vCPU / 2 ГБ / 60 ГБ SSD) |
+| SSH | `ssh vps-broker` (пользователь `roman`, доступ по ключу, sudo без пароля) |
+| Каталог | `/home/roman/broker-report` |
+| Домен | `broker.roman-it.dev` — **через Cloudflare Tunnel**, не через IP |
+| DNS | зона `roman-it.dev` на Cloudflare (`newt`/`grannbo.ns.cloudflare.com`); запись `broker` — CNAME на `<tunnel-id>.cfargotunnel.com`, прокси включён |
+| Туннель | `broker-report`, ID `8f70e77d-a6ce-4fc3-b573-53a4bf18627c`; ingress: `broker.roman-it.dev` и `broker-cf.roman-it.dev` → `http://broker-report:5000` |
+| Порты снаружи | только 22 (ufw); 80/443 закрыты — TLS даёт Cloudflare |
+
+> **Важно:** A-запись `broker → <IP>` удалена. Отдельный nginx больше не нужен:
+> cloudflared сам публикует приложение. Если понадобится вернуть схему с IP —
+> см. «Вариант B» ниже, но тогда нужен nginx + TLS и открытые 80/443.
+
+**Первичная настройка чистого сервера** — `deploy/bootstrap-server.sh`
+(обновления, swap 2 ГБ, Docker CE + compose, пользователь `roman`, ufw, автообновления):
+
+```bash
+scp deploy/bootstrap-server.sh root@<ip>:/root/
+ssh root@<ip> sh /root/bootstrap-server.sh
+```
+
+**Как выбрать между схемами публикации:**
+
+| Схема | Плюсы | Минусы |
+|---|---|---|
+| Cloudflare Tunnel (текущая) | ничего не открыто наружу, TLS и DDoS на Cloudflare, нет nginx и сертификатов | нужен cloudflared и токен туннеля |
+| nginx + A-запись на IP | не зависит от Cloudflare | открытые 80/443, renew сертификата, IP в DNS при смене сервера |
+
+---
+
 ## 1. Что нужно подготовить заранее
 
 | Что | Где взять |
@@ -30,11 +63,16 @@ QUIK (prices.lua) ──HTTPS──┐
 С локальной машины (из корня проекта):
 
 ```bash
-rsync -av --delete \
+# Без --delete: на сервере лежат данные (reports/, import-archive/, *.bak-*),
+# которых нет в репозитории.
+rsync -av \
   --exclude '.git' --exclude 'temp' --exclude 'lua_modules' \
-  --exclude '*.db' --exclude 'logs' --exclude '.venv' --exclude '__pycache__' \
-  --exclude 'app/firebase-key.json' --exclude '.env' \
-  ./ vps-root:/home/roman/broker-report/
+  --exclude '*.db' --exclude '*.db-shm' --exclude '*.db-wal' --exclude 'logs' \
+  --exclude '.venv' --exclude 'venv' --exclude '__pycache__' \
+  --exclude 'app/firebase-key.json' --exclude '.env' --exclude 'secrets' \
+  --exclude 'reports' --exclude 'data' --exclude 'import-archive' \
+  --exclude '.backup-*' --exclude '*.bak-*' --exclude '.DS_Store' \
+  ./ vps-broker:/home/roman/broker-report/
 ```
 
 > Если `rsync` запускается от `root` (`vps-root`), владельцами файлов станут `root`,
@@ -187,10 +225,17 @@ return {
 ## 6. Обновление версии
 
 ```bash
-cd /home/roman/broker-report
-# (повторить rsync с локальной машины)
-docker compose -f docker-compose.server.yml up -d --build
+# с локальной машины
+rsync -av --exclude '.git' --exclude '*.db' --exclude '.env' --exclude 'secrets' \
+      --exclude 'reports' --exclude 'data' --exclude 'import-archive' \
+      ./ vps-broker:/home/roman/broker-report/
+ssh vps-broker 'cd /home/roman/broker-report && docker compose -f docker-compose.server.yml up -d --build'
 ```
+
+> **Сборка на новом VPS медленная:** PyPI отдаёт ~40 кБ/с, `pip install`
+> занимает 30–40 минут. Если нужно быстро — перенести готовый образ со старого
+> сервера: `docker save broker-report:latest | gzip -1 | ssh vps-broker 'gunzip | docker load'`,
+> затем `up -d --no-build`.
 
 База лежит на volume `broker_data`, отчёты — в `./reports`, поэтому обновление
 образа данные не затрагивает.

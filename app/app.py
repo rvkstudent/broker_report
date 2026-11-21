@@ -30,7 +30,8 @@ from app.parser_nalog import (parse_nalog_report, get_nalog_summary,
 from app.replication import push_async as push_to_cloud
 from app import (screener, chartdata, backtest, volatility, levels,
                 strategy_levels, signals_cache, signal_days, signal_journal, adaptive,
-                portfolio_growth)
+                portfolio_growth, bond_ladder, instruments, models, advisor,
+                instrument_ai)
 from app import dashboard_prices as tinkoff_prices
 from app.allowed_devices import (is_device_allowed, add_pending_device,
                                   approve_device, reject_device, remove_device,
@@ -1315,6 +1316,25 @@ def portfolio_growth_view():
             data['portfolio_now'] = portfolio_growth.current_portfolio_summary(data['invested'])
         except Exception as exc:  # noqa: BLE001 — блок не должен ломать страницу
             flask_app.logger.warning('portfolio_now: %s', exc)
+        # Лестница погашений и дюрация облигационной части. Справочник (даты,
+        # купоны) — MOEX ISS; цены — из того же конвейера, что у дашборда
+        # (QUIK, если свежий, иначе T-Invest): в ISS цена отдаётся с задержкой.
+        try:
+            bond_prices, bond_price_src = {}, ''
+            try:
+                bond_pi = _position_instruments(get_open_trades(None, '', '', 'all'),
+                                                get_quik_positions('all'),
+                                                get_my_instruments())
+                bond_prices, bond_price_src = _effective_prices(
+                    get_current_prices(), bond_pi, False)
+                bond_prices = {p['sec_code']: p['price'] for p in bond_prices}
+            except Exception as exc:  # noqa: BLE001 — работаем на цене ISS
+                flask_app.logger.warning('bond_ladder prices: %s', exc)
+            data['bond_ladder'] = bond_ladder.build(
+                total=(data.get('portfolio_now') or {}).get('total'),
+                prices=bond_prices, price_source=bond_price_src)
+        except Exception as exc:  # noqa: BLE001 — блок не должен ломать страницу
+            flask_app.logger.warning('bond_ladder: %s', exc)
         # Сценарий «закрыть всё по таргетам»: прирост стоимости и XIRR при нём
         try:
             targets = get_price_targets()
@@ -1355,6 +1375,99 @@ def portfolio_growth_view():
                 'start': '', 'end': '', 'error': str(exc)}
     return render_template('portfolio_growth.html', data=data,
                            manual_flows=get_manual_flows())
+
+
+@flask_app.route('/api/instrument-ai')
+def api_instrument_ai():
+    """AI-разбор одной бумаги: преимущества, недостатки и устойчивость выплат."""
+    kind = request.args.get('kind', 'bond')
+    code = (request.args.get('code') or '').strip()
+    refresh = request.args.get('refresh') == '1'
+    if kind not in ('bond', 'fx', 'stock') or not code:
+        return jsonify({'available': False, 'error': 'нужны kind и code'}), 400
+    try:
+        snapshot = instruments.build()
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({'available': False, 'error': str(exc)}), 500
+    key = {'bond': 'bonds', 'fx': 'fx_bonds', 'stock': 'stocks'}[kind]
+    rows = snapshot.get(key) or []
+    row = next((r for r in rows if (r.get('code') or '').upper() == code.upper()), None)
+    if row is None:
+        return jsonify({'available': False, 'error': 'бумага не найдена в снимке'}), 404
+    try:
+        return jsonify(instrument_ai.analyze(kind, code.upper(), row, refresh=refresh))
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({'available': False, 'error': str(exc)}), 500
+
+
+@flask_app.route('/models')
+def models_view():
+    """Математические модели: купонная машина, иммунизация, RVI, Монте-Карло."""
+    def _arg(name, default, cast, lo, hi):
+        try:
+            return max(lo, min(hi, cast(request.args.get(name, default))))
+        except (TypeError, ValueError):
+            return default
+
+    horizon = _arg('horizon', 15, int, 1, 40)
+    sigma = _arg('sigma', 15.0, float, 5, 40)
+    equity = _arg('equity', 10.0, float, 0, 100)
+    paths = _arg('paths', 4000, int, 500, 20000)
+    try:
+        data = models.build(horizon=horizon, sigma_star=sigma,
+                            equity_pct=equity, paths=paths)
+    except Exception as exc:  # noqa: BLE001 — страница не должна падать
+        flask_app.logger.warning('models: %s', exc)
+        data = {'error': str(exc), 'params': {'horizon': horizon, 'sigma_star': sigma,
+                                              'equity_pct': equity, 'paths': paths},
+                'machine': {}, 'immunization': {'shocks': []}, 'rvi': {'available': False},
+                'vol_target': {'available': False}, 'monte_carlo': {'available': False},
+                'kelly': {}, 'bond_mu': 0, 'bond_metrics': {}, 'as_of': ''}
+    try:
+        data['advice'] = advisor.recommend(horizon=horizon, sigma_star=sigma, model=data)
+    except Exception as exc:  # noqa: BLE001 — аналитика не должна ломать страницу
+        flask_app.logger.warning('advisor: %s', exc)
+    return render_template('models.html', data=data)
+
+
+@flask_app.route('/api/advisor')
+def api_advisor():
+    """JSON: рекомендации по стратегии (правила + опционально нейросеть)."""
+    force = request.args.get('refresh') == '1'
+    try:
+        return jsonify(advisor.recommend(force=force))
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({'error': str(exc)}), 500
+
+
+@flask_app.route('/instruments')
+def instruments_view():
+    """Скринер инструментов: дивидендные акции и облигации с кандидатами."""
+    try:
+        data = instruments.build()
+    except Exception as exc:  # noqa: BLE001 — страница не должна падать
+        flask_app.logger.warning('instruments: %s', exc)
+        data = {'bonds': [], 'fx_bonds': [], 'stocks': [], 'updated_at': '',
+                'as_of': '', 'errors': [str(exc)], 'candidates': 0,
+                'bond_min_turnover': 0, 'stock_min_turnover': 0}
+    return render_template('instruments.html', data=data)
+
+
+@flask_app.route('/api/instrument-screen')
+def api_instrument_screen():
+    """JSON-снимок скринера инструментов (для внешних клиентов и отладки).
+
+    Путь отличается от ``/api/instruments`` (там справочник инструментов QUIK).
+    """
+    try:
+        data = instruments.build()
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({'error': str(exc)}), 500
+    kind = request.args.get('kind', '')
+    if kind in ('bond', 'stock', 'fx'):
+        key = {'bond': 'bonds', 'stock': 'stocks', 'fx': 'fx_bonds'}[kind]
+        return jsonify({key: data.get(key) or [], 'updated_at': data.get('updated_at')})
+    return jsonify(data)
 
 
 @flask_app.route('/screener')

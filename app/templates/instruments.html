@@ -1,0 +1,641 @@
+{% extends "base.html" %}
+{% block title %}Инструменты — BrokerReport{% endblock %}
+{% block content %}
+<style>
+    .ui-compact .btn { --bs-btn-padding-y: .1rem; --bs-btn-padding-x: .42rem;
+                       --bs-btn-font-size: .71rem; --bs-btn-border-radius: .25rem; --bs-btn-line-height: 1.35; }
+    .ui-compact .form-control, .ui-compact .form-select { font-size: .72rem; padding: .05rem .32rem;
+                                                          height: 22px; min-height: 22px; }
+    .ui-compact .form-check-input { width: .85em; height: .85em; margin-top: .18em; }
+    .ui-compact .form-check-label, .ui-compact .form-label { font-size: .7rem; }
+    .ui-compact .badge { font-size: .62rem; padding: .18em .42em; font-weight: 600; }
+    .ui-compact table { font-size: .78rem; }
+    .ui-compact table td, .ui-compact table th { padding: .18rem .38rem; white-space: nowrap; }
+    .ui-compact .card-header { padding: .3rem .55rem; font-size: .74rem; }
+    .ui-compact .card-body { padding: .5rem .55rem; }
+    .ui-compact .nav-link { padding: .25rem .6rem; font-size: .76rem; }
+
+    /* Подсветка кандидата: не «кричащая», но видно с первого взгляда */
+    tr.cand td { background: rgba(25, 135, 84, .07); }
+    tr.cand td:first-child { box-shadow: inset 3px 0 0 #198754; }
+    tr.risky td { color: #6c757d; }
+    th[data-sort] { cursor: pointer; user-select: none; }
+    th[data-sort]:hover { background: rgba(0,0,0,.04); }
+    th .arrow { opacity: .45; font-size: .85em; }
+    .flag { font-size: .66rem; }
+    .table-wrap { max-height: 72vh; overflow: auto; }
+    .table-wrap thead th { position: sticky; top: 0; background: #f8f9fa; z-index: 2; }
+</style>
+
+<div class="ui-compact">
+  <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+    <div>
+      <h4 class="mb-0"><i class="bi bi-funnel"></i> Инструменты: акции и облигации</h4>
+      <div class="text-muted small">
+        снимок на {{ data.as_of }}{% if data.updated_at %} · обновлён {{ data.updated_at }}{% endif %}
+        · кандидаты — топ-{{ data.candidates }} по баллу
+      </div>
+    </div>
+    <div class="d-flex align-items-center gap-2">
+      <span class="badge bg-light text-dark border">облигации: {{ data.bonds|length }}</span>
+      <span class="badge bg-light text-dark border">валютные: {{ data.fx_bonds|length }}</span>
+      <span class="badge bg-light text-dark border">акции: {{ data.stocks|length }}</span>
+      <button class="btn btn-outline-secondary" onclick="location.reload()">
+        <i class="bi bi-arrow-clockwise"></i> обновить
+      </button>
+    </div>
+  </div>
+
+  {% if data.errors %}
+  <div class="alert alert-warning py-1 px-2 small">
+    <i class="bi bi-exclamation-triangle"></i> {{ data.errors|join('; ') }}
+  </div>
+  {% endif %}
+
+  <!-- ── Инструкции ───────────────────────────────────────── -->
+  <div class="accordion mb-2" id="howto">
+    <div class="accordion-item">
+      <h2 class="accordion-header">
+        <button class="accordion-button collapsed py-1" type="button" data-bs-toggle="collapse" data-bs-target="#howto-body">
+          <i class="bi bi-question-circle me-1"></i> Как пользоваться: что означают колонки, как считается балл и кандидаты
+        </button>
+      </h2>
+      <div id="howto-body" class="accordion-collapse collapse" data-bs-parent="#howto">
+        <div class="accordion-body py-2" style="font-size:.79rem">
+
+          <p class="mb-2"><b>Зачем это.</b> Страница отвечает на вопрос «что купить», а не «что уже есть»
+          (для второго — «Текущий портфель» и «Лестница погашений» на странице роста портфеля).
+          Все бумаги с достаточным оборотом попадают в таблицу; топ по баллу подсвечивается как
+          <span class="badge bg-success">кандидат</span> — с него стоит начинать сравнение, но решение
+          принимается по колонкам, а не по звёздочке.</p>
+
+          <p class="mb-1"><b>Облигации — колонки:</b></p>
+          <table class="table table-sm table-borderless mb-2" style="font-size:.76rem">
+            <tr><td class="text-muted" style="width:130px">YTM</td><td>доходность к погашению по текущей цене — то, что вы получите, если держать до погашения и реинвестировать купоны по той же ставке.</td></tr>
+            <tr><td class="text-muted">Дюрация</td><td>средний срок возврата денег. Бывает так: YTM 17%, дюрация 6 → при росте ставок на 1 п.п. цена упадёт примерно на 6%. Короткая дюрация — меньше риска ставки.</td></tr>
+            <tr><td class="text-muted">Купон</td><td>процент от номинала в год и число выплат. Высокий купон = деньги приходят чаще, но и налог платится каждый год (13%).</td></tr>
+            <tr><td class="text-muted">Спред</td><td>премия к кривой ОФЗ в той же точке дюрации. Положительный спред — плата за кредитный риск эмитента, а не за срок.</td></tr>
+            <tr><td class="text-muted">НКД</td><td>накопленный купонный доход — его платите продавцу сверху цены.</td></tr>
+            <tr><td class="text-muted">Оборот</td><td>оборот за день, ₽. Меньше 3 млн — выйти из позиции быстро не получится.</td></tr>
+          </table>
+
+          <p class="mb-1"><b>Акции — колонки:</b></p>
+          <table class="table table-sm table-borderless mb-2" style="font-size:.76rem">
+            <tr><td class="text-muted" style="width:130px">ДД 12 мес</td><td>дивиденды за последние 12 месяцев / цена. Не путать с «объявленной» доходностью — считаются только фактически выплаченные.</td></tr>
+            <tr><td class="text-muted">ДД 3 года</td><td>средняя годовая дивдоходность за 3 года: показывает, устойчивы ли выплаты, а не была ли одна разовая.</td></tr>
+            <tr><td class="text-muted">ДД форв.</td><td>по <b>объявленным</b>, но ещё не выплаченным дивидендам (их отдаёт T-Invest). Если она заметно ниже «ДД 12 мес» — значит выплата снижается: например, 35 ₽ год платили, а объявлено 7 ₽. Красным подсвечивается падение больше чем на 30%.</td></tr>
+            <tr><td class="text-muted">Лет платит</td><td>сколько разных лет с выплатами есть в истории.</td></tr>
+            <tr><td class="text-muted">P/E</td><td>цена / прибыль. Меньше 12 — дёшево по прибыли; но дешевизна часто означает падение прибыли, проверяйте тренд.</td></tr>
+            <tr><td class="text-muted">P/B</td><td>цена / капитал. Ниже 1 — рынок оценивает компанию дешевле её балансовой стоимости.</td></tr>
+            <tr><td class="text-muted">ROE</td><td>рентабельность капитала — сколько компания зарабатывает на собственный капитал.</td></tr>
+          </table>
+
+          <p class="mb-1"><b>Как считается балл (0–100).</b> Формулы открыты, веса одинаковы для всех бумаг:</p>
+          <ul class="mb-2" style="font-size:.76rem">
+            <li><b>Облигации:</b> YTM — 40%, YTM/дюрация — 20%, ликвидность (оборот, лог. шкала) — 25%, уровень листинга — 15%;
+                штраф −15, если бумага помечена как рискованная (премия к ОФЗ больше 6 п.п. или купон выше 20%).
+                Смысл: платят много и за каждый год ожидания, выйти можно, качество листинга высокое.</li>
+            <li><b>Акции:</b> ДД 12 мес — 45%, ДД 3 года — 20%, P/E ниже 12 — 15%, оборот — 10%, история выплат — 10%.
+                Смысл: дивиденды высокие и повторяющиеся, оценка не заоблачная, бумага ликвидна.</li>
+          </ul>
+
+          <p class="mb-1"><b>AI-разбор бумаги</b></p>
+          <p class="mb-2">В карточке (значок ⓘ) есть кнопка «спросить ИИ». Модель получает факты из таблицы
+          и историю выплат и отвечает: плюсы, минусы, <b>устойчивость дивиденда или купона</b> и общий вердикт.
+          Это важно именно там, где одна цифра обманывает: дивиденд по последней выплате может быть разовым
+          или отражать старую политику. Ответ кэшируется на 7 дней, кнопка «пересчитать» обновляет его.
+          Если ключ модели не задан, кнопка вернёт сообщение — остальная страница работает без неё.</p>
+
+          <p class="mb-1"><b>Рейтинг надёжности (колонка «Надёж.»)</b></p>
+          <p class="mb-2">Это <b>наша оценка 1–10</b>, а не рейтинг АКРА/Эксперт РА: агентских рейтингов в открытом
+          доступе нет (они платные), поэтому считаем прокси из того, что видно рынку. Шкала:
+          <span class="badge bg-success">A</span> ≥ 8,5 — высокая,
+          <span class="badge bg-primary">B</span> 7,0–8,4 — выше средней,
+          <span class="badge bg-warning text-dark">C</span> 5,5–6,9 — средняя,
+          <span class="badge bg-danger">D</span> ниже 5,5 — низкая. Наведите на бейдж — покажет все слагаемые.</p>
+          <ul class="mb-2" style="font-size:.76rem">
+            <li><b>Облигации:</b> база по типу (ОФЗ 9,5 / валютная 7,0 / корпоративная 6,5), минус премия к ОФЗ
+                (главный рыночный индикатор кредитного риска, до −3), плюс листинг 1-го уровня, ликвидность и размер
+                выпуска, минус близкая оферта и купон выше 20%.</li>
+            <li><b>Акции:</b> база 6,0, плюс число лет выплат, ROE, P/E в разумном диапазоне, P/B ≤ 3,
+                листинг и оборот; минус отрицательный ROE, P/E ниже 1 (аномалия) и завышенная оценка.</li>
+            <li><b>Чем не является:</b> это не гарантия платёжеспособности и не прогноз доходности.
+                Для облигаций ориентир по рынку — столбец «Спред»; рейтинг лишь сводит его с качеством
+                листинга и ликвидностью.</li>
+          </ul>
+
+          <p class="mb-1"><b>Флаги риска</b> — не приговор, а повод посмотреть внимательнее:</p>
+          <ul class="mb-2" style="font-size:.76rem">
+            <li><span class="badge bg-warning text-dark">премия к ОФЗ</span> — рынок требует за эту бумагу на несколько пунктов больше, чем за ОФЗ. Так платят за кредитный риск.</li>
+            <li><span class="badge bg-warning text-dark">купон выше 20%</span> — обычно признак проблем эмитента или нестандартной схемы.</li>
+            <li><span class="badge bg-secondary">низкая ликвидность</span> — оборот меньше 3 млн ₽/день.</li>
+            <li><span class="badge bg-secondary">оферта</span> — дата, когда эмитент может выкупить бумагу. Доходность «к погашению» может не реализоваться, если оферта сработает.</li>
+          </ul>
+
+          <p class="mb-1"><b>Ограничения — важно знать:</b></p>
+          <ul class="mb-0" style="font-size:.76rem">
+            <li>Облигации берутся с досок MOEX <code>TQOB</code> (ОФЗ) и <code>TQCB</code> (корпоративные), акции — <code>TQBR</code>; внебиржевые выпуски и «неликвид» не попадают.</li>
+            <li>Фильтр по обороту: облигации — от {{ '{:,.0f}'.format(data.bond_min_turnover) }} ₽, акции — от {{ '{:,.0f}'.format(data.stock_min_turnover) }} ₽ за день.</li>
+            <li>Валютные облигации показаны отдельной вкладкой <b>без балла</b>: у разных выпусков доходность приходит в разных валютах и базах, ранжировать их вместе с рублёвыми нельзя.</li>
+            <li>Мультипликаторы (P/E, P/B, ROE) и дивиденды приходят из T-Invest. Если токен не задан — колонки пустые, остальное работает.</li>
+            <li>Балл — эвристика для быстрого отбора, а не рекомендация. Ни один скоринг не заменяет проверку отчётности эмитента.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Вкладки ──────────────────────────────────────────── -->
+  <ul class="nav nav-tabs mb-2" role="tablist">
+    <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-bonds" type="button">
+      <i class="bi bi-safe"></i> Облигации</button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-fx" type="button">
+      <i class="bi bi-currency-dollar"></i> Валютные</button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-stocks" type="button">
+      <i class="bi bi-bar-chart"></i> Дивидендные акции</button></li>
+  </ul>
+
+  <div class="tab-content">
+    <!-- Облигации -->
+    <div class="tab-pane fade show active" id="tab-bonds">
+      <div class="d-flex flex-wrap gap-2 align-items-end mb-2">
+        <div><label class="form-label mb-0">YTM от, %</label>
+          <input class="form-control" id="b-ytm" type="number" step="0.1" placeholder="—" style="width:70px"></div>
+        <div><label class="form-label mb-0">дюрация до, лет</label>
+          <input class="form-control" id="b-dur" type="number" step="0.1" placeholder="—" style="width:80px"></div>
+        <div><label class="form-label mb-0">тип</label>
+          <select class="form-select" id="b-type" style="width:130px">
+            <option value="">все</option><option value="ОФЗ">только ОФЗ</option>
+            <option value="Корпоративная">корпоративные</option>
+          </select></div>
+        <div><label class="form-label mb-0">оборот от, млн ₽</label>
+          <select class="form-select" id="b-turn" style="width:110px">
+            <option value="0">любой</option><option value="3">3</option><option value="10">10</option><option value="30">30</option>
+          </select></div>
+        <div class="form-check ms-1"><input class="form-check-input" type="checkbox" id="b-cand">
+          <label class="form-check-label" for="b-cand">только кандидаты</label></div>
+        <div class="form-check ms-1"><input class="form-check-input" type="checkbox" id="b-safe">
+          <label class="form-check-label" for="b-safe">скрыть рискованные</label></div>
+        <div class="ms-auto text-muted small" id="b-count"></div>
+      </div>
+      <div class="table-wrap">
+        <table class="table table-sm table-hover align-middle mb-0" id="tbl-bonds">
+          <thead>
+            <tr>
+              <th data-sort="0">Бумага</th>
+              <th data-sort="1">Тип</th>
+              <th class="text-end" data-sort="2">YTM</th>
+              <th class="text-end" data-sort="3">Дюр.</th>
+              <th class="text-end" data-sort="4">Спред</th>
+              <th class="text-end" data-sort="5">Купон</th>
+              <th class="text-end" data-sort="6">Погашение</th>
+              <th class="text-end" data-sort="7">Лет</th>
+              <th class="text-end" data-sort="8">Цена</th>
+              <th class="text-end" data-sort="9">НКД</th>
+              <th class="text-end" data-sort="10">Оборот</th>
+              <th class="text-end" data-sort="11">Балл</th>
+              <th class="text-center" data-sort="12" title="Наша оценка надёжности 1–10: тип, спред к ОФЗ, листинг, ликвидность">Надёж.</th>
+              <th>Флаги</th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for r in data.bonds %}
+            <tr class="{{ 'cand' if r.candidate }} {{ 'risky' if r.risky }}"
+                data-ytm="{{ r.ytm or 0 }}" data-dur="{{ r.duration or 99 }}"
+                data-type="{{ r.type }}" data-turn="{{ r.turnover or 0 }}"
+                data-score="{{ r.score or 0 }}" data-risky="{{ 1 if r.risky else 0 }}">
+              <td>
+                {% if r.candidate %}<span class="badge bg-success me-1">кандидат</span>{% endif %}
+                {{ r.name }} <span class="text-muted" style="font-size:.7rem">{{ r.code }}</span>
+                <button class="btn btn-link p-0 ms-1 info-btn" data-kind="bond" data-code="{{ r.code }}"
+                        title="Полная информация"><i class="bi bi-info-circle"></i></button>
+              </td>
+              <td><span class="badge {{ 'bg-primary' if r.type == 'ОФЗ' else 'bg-secondary' }}">{{ r.type }}</span></td>
+              <td class="text-end fw-bold">{{ '%.2f'|format(r.ytm) }}%</td>
+              <td class="text-end">{{ '%.1f'|format(r.duration) if r.duration else '—' }}</td>
+              <td class="text-end">{{ '{:+.1f}'.format(r.spread) if r.spread is not none else '—' }}</td>
+              <td class="text-end">{{ '%.1f'|format(r.coupon_pct) if r.coupon_pct else '—' }}%<span class="text-muted">×{{ r.coupon_freq or 0 }}</span></td>
+              <td class="text-end">{{ r.matdate }}</td>
+              <td class="text-end">{{ '%.1f'|format(r.years) if r.years is not none else '—' }}</td>
+              <td class="text-end">{{ '%.2f'|format(r.price) if r.price else '—' }}</td>
+              <td class="text-end">{{ '%.2f'|format(r.aci) if r.aci else '—' }}</td>
+              <td class="text-end">{{ '{:,.0f}'.format(r.turnover) }}</td>
+              <td class="text-end fw-bold">{{ '%.0f'|format(r.score) if r.score is not none else '—' }}</td>
+              <td class="text-center">
+                {% set rel = r.reliability or {} %}
+                <span class="badge {{ 'bg-success' if rel.letter == 'A' else ('bg-primary' if rel.letter == 'B' else ('bg-warning text-dark' if rel.letter == 'C' else 'bg-danger')) }}"
+                      title="{{ rel.text }} · {{ '%.1f'|format(rel.score) }}/10&#10;{{ (rel.reasons or [])|join('&#10;') }}">{{ rel.letter }}</span>
+                <span class="text-muted" style="font-size:.68rem">{{ '%.1f'|format(rel.score) }}</span>
+              </td>
+              <td>{% for f in r.flags %}<span class="badge bg-light text-dark border flag me-1">{{ f }}</span>{% endfor %}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Валютные -->
+    <div class="tab-pane fade" id="tab-fx">
+      <div class="alert alert-light border py-1 px-2 small">
+        Валютные выпуски (замещающие, юаневые) не ранжируются: доходность приходит в валюте номинала.
+        Сравнивайте купон с доходностью валютного депозита и смотрите на дату погашения и ликвидность.
+      </div>
+      <div class="table-wrap">
+        <table class="table table-sm table-hover align-middle mb-0" id="tbl-fx">
+          <thead>
+            <tr>
+              <th data-sort="0">Бумага</th><th>Валюта</th>
+              <th class="text-end" data-sort="2">YTM (вал.)</th>
+              <th class="text-end" data-sort="3">Дюр.</th>
+              <th class="text-end" data-sort="4">Купон</th>
+              <th class="text-end" data-sort="5">Погашение</th>
+              <th class="text-end" data-sort="6">Цена</th>
+              <th class="text-end" data-sort="7">Оборот</th>
+              <th class="text-center" title="Наша оценка надёжности 1–10">Надёж.</th>
+              <th>Флаги</th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for r in data.fx_bonds %}
+            <tr>
+              <td>{{ r.name }} <span class="text-muted" style="font-size:.7rem">{{ r.code }}</span>
+                <button class="btn btn-link p-0 ms-1 info-btn" data-kind="fx" data-code="{{ r.code }}"
+                        title="Полная информация"><i class="bi bi-info-circle"></i></button></td>
+              <td><span class="badge bg-info text-dark">{{ r.currency }}</span></td>
+              <td class="text-end fw-bold">{{ '%.2f'|format(r.ytm) }}%</td>
+              <td class="text-end">{{ '%.1f'|format(r.duration) if r.duration else '—' }}</td>
+              <td class="text-end">{{ '%.1f'|format(r.coupon_pct) if r.coupon_pct else '—' }}%<span class="text-muted">×{{ r.coupon_freq or 0 }}</span></td>
+              <td class="text-end">{{ r.matdate }}</td>
+              <td class="text-end">{{ '%.2f'|format(r.price) if r.price else '—' }}</td>
+              <td class="text-end">{{ '{:,.0f}'.format(r.turnover) }}</td>
+              <td class="text-center">
+                {% set rel = r.reliability or {} %}
+                <span class="badge {{ 'bg-success' if rel.letter == 'A' else ('bg-primary' if rel.letter == 'B' else ('bg-warning text-dark' if rel.letter == 'C' else 'bg-danger')) }}"
+                      title="{{ rel.text }} · {{ '%.1f'|format(rel.score) }}/10&#10;{{ (rel.reasons or [])|join('&#10;') }}">{{ rel.letter }}</span>
+              </td>
+              <td>{% for f in r.flags %}<span class="badge bg-light text-dark border flag me-1">{{ f }}</span>{% endfor %}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Акции -->
+    <div class="tab-pane fade" id="tab-stocks">
+      <div class="d-flex flex-wrap gap-2 align-items-end mb-2">
+        <div><label class="form-label mb-0">ДД 12 мес от, %</label>
+          <input class="form-control" id="s-div" type="number" step="0.5" placeholder="—" style="width:80px"></div>
+        <div><label class="form-label mb-0">P/E до</label>
+          <input class="form-control" id="s-pe" type="number" step="0.5" placeholder="—" style="width:70px"></div>
+        <div><label class="form-label mb-0">оборот от, млн ₽</label>
+          <select class="form-select" id="s-turn" style="width:110px">
+            <option value="0">любой</option><option value="10">10</option><option value="50">50</option><option value="200">200</option>
+          </select></div>
+        <div class="form-check ms-1"><input class="form-check-input" type="checkbox" id="s-cand">
+          <label class="form-check-label" for="s-cand">только кандидаты</label></div>
+        <div class="ms-auto text-muted small" id="s-count"></div>
+      </div>
+      <div class="table-wrap">
+        <table class="table table-sm table-hover align-middle mb-0" id="tbl-stocks">
+          <thead>
+            <tr>
+              <th data-sort="0">Бумага</th>
+              <th class="text-end" data-sort="1">Цена</th>
+              <th class="text-end" data-sort="2">ДД 12 мес</th>
+              <th class="text-end" data-sort="3">ДД 3 года</th>
+              <th class="text-end" data-sort="3.5" title="Дивдоходность по объявленным, но ещё не выплаченным дивидендам (T-Invest) — показывает, сохранится ли текущая ДД">ДД форв.</th>
+              <th class="text-end" data-sort="4">Лет платит</th>
+              <th class="text-end" data-sort="5">Последний див.</th>
+              <th class="text-end" data-sort="6">P/E</th>
+              <th class="text-end" data-sort="7">P/B</th>
+              <th class="text-end" data-sort="8">ROE</th>
+              <th class="text-end" data-sort="9">Оборот</th>
+              <th class="text-end" data-sort="10">Балл</th>
+              <th class="text-center" title="Наша оценка устойчивости 1–10: дивидендная история, ROE, P/E, ликвидность">Надёж.</th>
+              <th>Флаги</th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for r in data.stocks %}
+            <tr class="{{ 'cand' if r.candidate }}"
+                data-div="{{ r.div12 if r.div12 is not none else -1 }}"
+                data-pe="{{ r.pe or 999 }}" data-turn="{{ r.turnover or 0 }}"
+                data-score="{{ r.score or 0 }}">
+              <td>
+                {% if r.candidate %}<span class="badge bg-success me-1">кандидат</span>{% endif %}
+                {{ r.code }} <span class="text-muted">{{ r.name }}</span>
+                <button class="btn btn-link p-0 ms-1 info-btn" data-kind="stock" data-code="{{ r.code }}"
+                        title="Полная информация"><i class="bi bi-info-circle"></i></button>
+              </td>
+              <td class="text-end">{{ '%.2f'|format(r.price) if r.price else '—' }}</td>
+              <td class="text-end fw-bold">{{ '%.2f'|format(r.div12) if r.div12 is not none else '—' }}{% if r.div12 is not none %}%{% endif %}</td>
+              <td class="text-end">{{ '%.2f'|format(r.div3y) if r.div3y is not none else '—' }}{% if r.div3y is not none %}%{% endif %}</td>
+              <td class="text-end {{ 'text-danger fw-bold' if r.div_forward is not none and r.div12 is not none and r.div_forward < r.div12 * 0.7 else '' }}">
+                {{ '%.2f'|format(r.div_forward) if r.div_forward is not none else '—' }}{% if r.div_forward is not none %}%{% endif %}
+                {% if r.forward_date %}<span class="text-muted" style="font-size:.66rem">{{ r.forward_date }}</span>{% endif %}
+              </td>
+              <td class="text-end">{{ r.years_paid or '—' }}</td>
+              <td class="text-end">{{ '%.2f'|format(r.last_div) if r.last_div else '—' }}
+                <span class="text-muted" style="font-size:.68rem">{{ r.last_date }}</span></td>
+              <td class="text-end">{{ '%.2f'|format(r.pe) if r.pe else '—' }}</td>
+              <td class="text-end">{{ '%.2f'|format(r.pb) if r.pb else '—' }}</td>
+              <td class="text-end">{{ '%.1f'|format(r.roe) if r.roe else '—' }}{% if r.roe %}%{% endif %}</td>
+              <td class="text-end">{{ '{:,.0f}'.format(r.turnover) }}</td>
+              <td class="text-end fw-bold">{{ '%.0f'|format(r.score) if r.score is not none else '—' }}</td>
+              <td class="text-center">
+                {% set rel = r.reliability or {} %}
+                <span class="badge {{ 'bg-success' if rel.letter == 'A' else ('bg-primary' if rel.letter == 'B' else ('bg-warning text-dark' if rel.letter == 'C' else 'bg-danger')) }}"
+                      title="{{ rel.text }} · {{ '%.1f'|format(rel.score) }}/10&#10;{{ (rel.reasons or [])|join('&#10;') }}">{{ rel.letter }}</span>
+                <span class="text-muted" style="font-size:.68rem">{{ '%.1f'|format(rel.score) }}</span>
+              </td>
+              <td>{% for f in r.flags or [] %}<span class="badge bg-light text-dark border flag me-1">{{ f }}</span>{% endfor %}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Модалка «полная информация по бумаге» -->
+  <div class="modal fade" id="info-modal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header py-2">
+          <h6 class="modal-title" id="info-title">—</h6>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body" id="info-body" style="font-size:.82rem"></div>
+        <div class="modal-footer py-1">
+          <a class="btn btn-outline-secondary" id="info-moex" target="_blank" rel="noopener">
+            <i class="bi bi-box-arrow-up-right"></i> карточка на MOEX</a>
+          <a class="btn btn-outline-primary d-none" id="info-chart">
+            <i class="bi bi-candlestick-chart"></i> график и бэктест</a>
+          <button class="btn btn-secondary" data-bs-dismiss="modal">закрыть</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="application/json" id="instrument-data">{{ {'bond': data.bonds, 'fx': data.fx_bonds, 'stock': data.stocks}|tojson }}</script>
+
+  <div class="small text-muted mt-2">
+    Истоник данных: MOEX ISS (цены, обороты, купоны, YTM, дюрации) и T-Invest (дивиденды, P/E, P/B, ROE).
+    Снимок пересобирается раз в 4 часа. Балл — эвристика для сортировки, не инвестиционная рекомендация;
+    проверяйте кредитное качество эмитента и налоговые последствия самостоятельно.
+  </div>
+</div>
+
+<script>
+(function () {
+    // Сортировка по клику на заголовок: первый клик — по убыванию.
+    function attachSort(tableId) {
+        const table = document.getElementById(tableId);
+        if (!table) return;
+        table.querySelectorAll('th[data-sort]').forEach((th) => {
+            th.addEventListener('click', () => {
+                const idx = parseInt(th.dataset.sort, 10);
+                const desc = th.dataset.dir !== 'desc';
+                table.querySelectorAll('th[data-sort]').forEach((o) => { o.dataset.dir = ''; });
+                th.dataset.dir = desc ? 'desc' : 'asc';
+                const body = table.tBodies[0];
+                const rows = Array.from(body.rows);
+                rows.sort((a, b) => {
+                    const va = a.cells[idx] ? a.cells[idx].innerText.replace(/[^\d.,+-]/g, '').replace(',', '.') : '';
+                    const vb = b.cells[idx] ? b.cells[idx].innerText.replace(/[^\d.,+-]/g, '').replace(',', '.') : '';
+                    const na = parseFloat(va), nb = parseFloat(vb);
+                    const cmp = (!isNaN(na) && !isNaN(nb)) ? na - nb : va.localeCompare(vb, 'ru');
+                    return desc ? -cmp : cmp;
+                });
+                rows.forEach((r) => body.appendChild(r));
+            });
+        });
+    }
+    attachSort('tbl-bonds');
+
+    function applyBondFilter() {
+        const ytm = parseFloat(document.getElementById('b-ytm').value);
+        const dur = parseFloat(document.getElementById('b-dur').value);
+        const type = document.getElementById('b-type').value;
+        const turn = parseFloat(document.getElementById('b-turn').value) * 1e6;
+        const onlyCand = document.getElementById('b-cand').checked;
+        const hideRisky = document.getElementById('b-safe').checked;
+        let shown = 0, total = 0;
+        document.querySelectorAll('#tbl-bonds tbody tr').forEach((tr) => {
+            total++;
+            const okYtm = isNaN(ytm) || parseFloat(tr.dataset.ytm) >= ytm;
+            const okDur = isNaN(dur) || parseFloat(tr.dataset.dur) <= dur;
+            const okType = !type || tr.dataset.type === type;
+            const okTurn = parseFloat(tr.dataset.turn) >= turn;
+            const okCand = !onlyCand || tr.classList.contains('cand');
+            const okSafe = !hideRisky || tr.dataset.risky === '0';
+            const ok = okYtm && okDur && okType && okTurn && okCand && okSafe;
+            tr.style.display = ok ? '' : 'none';
+            if (ok) shown++;
+        });
+        document.getElementById('b-count').textContent = shown + ' из ' + total;
+    }
+    ['b-ytm', 'b-dur', 'b-type', 'b-turn', 'b-cand', 'b-safe'].forEach((id) => {
+        document.getElementById(id).addEventListener('input', applyBondFilter);
+        document.getElementById(id).addEventListener('change', applyBondFilter);
+    });
+    applyBondFilter();
+
+    function applyStockFilter() {
+        const div = parseFloat(document.getElementById('s-div').value);
+        const pe = parseFloat(document.getElementById('s-pe').value);
+        const turn = parseFloat(document.getElementById('s-turn').value) * 1e6;
+        const onlyCand = document.getElementById('s-cand').checked;
+        let shown = 0, total = 0;
+        document.querySelectorAll('#tbl-stocks tbody tr').forEach((tr) => {
+            total++;
+            const okDiv = isNaN(div) || parseFloat(tr.dataset.div) >= div;
+            const okPe = isNaN(pe) || (parseFloat(tr.dataset.pe) > 0 && parseFloat(tr.dataset.pe) <= pe);
+            const okTurn = parseFloat(tr.dataset.turn) >= turn;
+            const okCand = !onlyCand || tr.classList.contains('cand');
+            const ok = okDiv && okPe && okTurn && okCand;
+            tr.style.display = ok ? '' : 'none';
+            if (ok) shown++;
+        });
+        document.getElementById('s-count').textContent = shown + ' из ' + total;
+    }
+    ['s-div', 's-pe', 's-turn', 's-cand'].forEach((id) => {
+        document.getElementById(id).addEventListener('input', applyStockFilter);
+        document.getElementById(id).addEventListener('change', applyStockFilter);
+    });
+    applyStockFilter();
+
+    // ── Полная информация по бумаге ────────────────────────────
+    let INFO = {};
+    try { INFO = JSON.parse(document.getElementById('instrument-data').textContent); }
+    catch (e) { INFO = {}; }
+
+    const fmt = (v, digits, suffix) => {
+        if (v === null || v === undefined || v === '') return '—';
+        if (typeof v === 'number') {
+            return v.toLocaleString('ru-RU', {minimumFractionDigits: digits || 0,
+                                              maximumFractionDigits: digits || 0}) + (suffix || '');
+        }
+        return String(v) + (suffix || '');
+    };
+    const rowHtml = (label, value) =>
+        '<tr><td class="text-muted" style="width:38%">' + label + '</td><td>' + value + '</td></tr>';
+
+    function relBadge(rel) {
+        if (!rel) return '—';
+        const cls = rel.letter === 'A' ? 'bg-success' : rel.letter === 'B' ? 'bg-primary'
+                  : rel.letter === 'C' ? 'bg-warning text-dark' : 'bg-danger';
+        return '<span class="badge ' + cls + '">' + rel.letter + '</span> ' +
+               fmt(rel.score, 1) + '/10 · ' + (rel.text || '');
+    }
+
+    function openInfo(kind, code) {
+        const list = INFO[kind === 'bond' ? 'bond' : kind === 'fx' ? 'fx' : 'stock'] || [];
+        const r = list.find((x) => x.code === code);
+        if (!r) return;
+        document.getElementById('info-title').textContent =
+            (r.name || r.code) + (r.code && r.name !== r.code ? ' · ' + r.code : '');
+
+        let html = '';
+        if (kind === 'stock') {
+            html += '<table class="table table-sm mb-2"><tbody>'
+                 + rowHtml('Цена', fmt(r.price, 2, ' ₽'))
+                 + rowHtml('Дивиденды 12 мес', fmt(r.div12, 2, '%'))
+                 + rowHtml('Дивиденды, средняя за 3 года', fmt(r.div3y, 2, '%'))
+                 + rowHtml('Лет с выплатами', fmt(r.years_paid))
+                 + rowHtml('Последний дивиденд', fmt(r.last_div, 2, ' ₽') +
+                           (r.last_date ? ' <span class="text-muted">(' + r.last_date + ')</span>' : ''))
+                 + rowHtml('P/E', fmt(r.pe, 2))
+                 + rowHtml('P/B', fmt(r.pb, 2))
+                 + rowHtml('ROE', fmt(r.roe, 1, '%'))
+                 + rowHtml('Капитализация', r.marketcap ? fmt(r.marketcap / 1e9, 1, ' млрд ₽') : '—')
+                 + rowHtml('Оборот за день', fmt(r.turnover, 0, ' ₽'))
+                 + rowHtml('Уровень листинга', fmt(r.listlevel))
+                 + rowHtml('Лот', fmt(r.lot))
+                 + '</tbody></table>';
+        } else {
+            html += '<table class="table table-sm mb-2"><tbody>'
+                 + rowHtml('Тип', (r.type || '') + (r.currency && r.currency !== 'RUB' ? ' · ' + r.currency : ''))
+                 + rowHtml('ISIN', fmt(r.isin))
+                 + rowHtml('YTM (в валюте номинала)', fmt(r.ytm, 2, '%'))
+                 + rowHtml('Дюрация, лет', fmt(r.duration, 2))
+                 + rowHtml('Спред к кривой ОФЗ', r.spread != null ? fmt(r.spread, 1, ' п.п.') : '—')
+                 + rowHtml('Купон', fmt(r.coupon_pct, 2, '%') + ' · ' + fmt(r.coupon_freq) + ' выпл./год')
+                 + rowHtml('Купон за выплату', r.coupon_pct && r.facevalue
+                           ? fmt(r.facevalue * r.coupon_pct / 100 / (r.coupon_freq || 1), 2, ' ' + (r.currency || 'RUB'))
+                           : '—')
+                 + rowHtml('Дата погашения', fmt(r.matdate) + (r.years != null ? ' · ' + fmt(r.years, 1) + ' лет' : ''))
+                 + rowHtml('Оферта', r.offer ? r.offer.split(':')[1] : '—')
+                 + rowHtml('Номинал', fmt(r.facevalue, 0, ' ' + (r.currency || 'RUB')))
+                 + rowHtml('Цена, % от номинала', fmt(r.price, 2, '%'))
+                 + rowHtml('НКД', fmt(r.aci, 2))
+                 + rowHtml('Размер выпуска', r.issuesize ? fmt(r.issuesize, 0, ' шт') : '—')
+                 + rowHtml('Оборот за день', fmt(r.turnover, 0, ' ₽'))
+                 + rowHtml('Сделок за день', fmt(r.trades))
+                 + rowHtml('Уровень листинга', fmt(r.listlevel))
+                 + '</tbody></table>';
+        }
+
+        if (kind === 'stock' && r.div_forward != null) {
+            html += '<div class="mb-2"><b>Объявленная (форвардная) ДД:</b> ' + fmt(r.div_forward, 2, '%')
+                  + (r.forward_date ? ' <span class="text-muted">выплата ' + r.forward_date + '</span>' : '')
+                  + '</div>';
+        }
+        if (kind === 'stock' && (r.div_history || []).length) {
+            html += '<div class="mb-2"><b>История выплат</b> <span class="text-muted" style="font-size:.72rem">' +
+                    '(для оценки устойчивости: разовая выплата или регулярная)</span>' +
+                    '<table class="table table-sm mb-0 mt-1" style="font-size:.76rem"><tbody>' +
+                    r.div_history.map((d) => rowHtml(d.pay, fmt(d.value, 2, ' ₽'))).join('') +
+                    '</tbody></table></div>';
+        }
+
+        html += '<div class="mb-2"><b>Рейтинг надёжности:</b> ' + relBadge(r.reliability) + '</div>';
+        if (r.reliability && r.reliability.reasons) {
+            html += '<ul class="small text-muted mb-2">'
+                  + r.reliability.reasons.map((x) => '<li>' + x + '</li>').join('') + '</ul>';
+        }
+        if (kind !== 'stock') {
+            html += '<div class="mb-2"><b>Балл отбора:</b> ' + fmt(r.score, 1) + '/100'
+                  + (r.reason ? ' <span class="text-muted">(' + r.reason + ')</span>' : '')
+                  + (r.candidate ? ' <span class="badge bg-success">кандидат</span>' : '') + '</div>';
+        }
+        if (r.flags && r.flags.length) {
+            html += '<div class="mb-2"><b>Флаги:</b> '
+                  + r.flags.map((f) => '<span class="badge bg-light text-dark border me-1">' + f + '</span>').join('')
+                  + '</div>';
+        }
+        html += '<div class="small text-muted">Источник: MOEX ISS'
+              + (kind === 'stock' ? ' + T-Invest (дивиденды, мультипликаторы)' : '')
+              + '. Снимок обновляется раз в 4 часа.</div>';
+
+        html += '<hr class="my-2"><div id="ai-block">'
+              + '<div class="d-flex justify-content-between align-items-center">'
+              + '<b><i class="bi bi-stars"></i> AI-разбор: плюсы, минусы, устойчивость выплат</b>'
+              + '<button class="btn btn-outline-primary btn-sm" id="ai-run" data-kind="' + kind + '" data-code="' + r.code + '">'
+              + '<i class="bi bi-lightning-charge"></i> спросить ИИ</button></div>'
+              + '<div id="ai-body" class="mt-2 small text-muted">Нажмите кнопку: модель оценит бумагу '
+              + 'по фактам из таблицы — в том числе повторяемость дивиденда, а не только доходность за 12 мес.</div></div>';
+
+        document.getElementById('info-body').innerHTML = html;
+        const moex = document.getElementById('info-moex');
+        moex.href = 'https://www.moex.com/ru/issue.aspx?code=' + encodeURIComponent(r.code);
+        const chart = document.getElementById('info-chart');
+        if (kind === 'stock') {
+            chart.classList.remove('d-none');
+            chart.href = '/chart?ticker=' + encodeURIComponent(r.code);
+        } else {
+            chart.classList.add('d-none');
+        }
+        new bootstrap.Modal(document.getElementById('info-modal')).show();
+    }
+
+    document.querySelectorAll('.info-btn').forEach((btn) => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            openInfo(btn.dataset.kind, btn.dataset.code);
+        });
+    });
+
+    // ── AI-разбор по кнопке ────────────────────────────────────
+    document.addEventListener('click', async (e) => {
+        const btn = e.target.closest('#ai-run');
+        if (!btn) return;
+        const body = document.getElementById('ai-body');
+        const force = btn.dataset.done === '1';
+        btn.disabled = true;
+        body.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>'
+                       + 'модель читает историю выплат и метрики — обычно 20–40 секунд…';
+        try {
+            const url = '/api/instrument-ai?kind=' + encodeURIComponent(btn.dataset.kind)
+                      + '&code=' + encodeURIComponent(btn.dataset.code) + (force ? '&refresh=1' : '');
+            const resp = await fetch(url);
+            const data = await resp.json();
+            if (!data.available) {
+                body.innerHTML = '<span class="text-warning">AI-разбор недоступен: '
+                               + (data.error || 'нет ответа модели') + '</span>';
+            } else {
+                const list = (items) => items && items.length
+                    ? '<ul class="mb-1 ps-3">' + items.map((x) => '<li>' + x + '</li>').join('') + '</ul>' : '';
+                let out = '<div class="mb-2">' + data.summary + '</div>';
+                if (data.pros && data.pros.length) out += '<div class="text-success small"><b>Плюсы</b></div>' + list(data.pros);
+                if (data.cons && data.cons.length) out += '<div class="text-danger small"><b>Минусы</b></div>' + list(data.cons);
+                if (data.dividend_note) out += '<div class="mb-1"><b>Устойчивость выплат:</b> ' + data.dividend_note + '</div>';
+                if (data.risks && data.risks.length) out += '<div class="text-muted small"><b>Риски</b></div>' + list(data.risks);
+                out += '<div class="mt-1"><span class="badge bg-primary">' + (data.verdict || '—') + '</span> '
+                     + '<span class="text-muted" style="font-size:.7rem">' + (data.model || '')
+                     + (data.cached ? ' · из кэша' : ' · ' + (data.seconds || '?') + ' с')
+                     + (data.updated_at ? ' · ' + data.updated_at : '') + '</span></div>';
+                body.innerHTML = out;
+                btn.dataset.done = '1';
+                btn.innerHTML = '<i class="bi bi-arrow-clockwise"></i> пересчитать';
+            }
+        } catch (err) {
+            body.innerHTML = '<span class="text-danger">Ошибка запроса: ' + err + '</span>';
+        }
+        btn.disabled = false;
+    });
+})();
+</script>
+{% endblock %}

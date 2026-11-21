@@ -64,6 +64,14 @@ def _bootstrap():
     # Сигналы стратегии считаем постоянно в фоне, а не при открытии страницы.
     from app.signals_cache import start_background_refresh
     start_background_refresh()
+
+    # Снимок скринера инструментов (акции/облигации) — раз в 4 часа в фоне.
+    from app.instruments import start_background_refresh as start_instruments_refresh
+    start_instruments_refresh()
+
+    # Прогрев рекомендаций (RVI, модели, скринер) — чтобы первая страница не ждала сеть.
+    from app.advisor import warmup as advisor_warmup
+    advisor_warmup()
     print('  Сигналы: фоновый пересчёт запущен', flush=True)
 
     # Индивидуальные параметры на инструмент + донастройка после сделок.

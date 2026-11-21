@@ -358,6 +358,16 @@
                         </a>
                     </li>
                     <li class="nav-item">
+                        <a class="nav-link {% if request.path == '/models' %}active{% endif %}" href="/models">
+                            <i class="bi bi-calculator"></i> Модели
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.path == '/instruments' %}active{% endif %}" href="/instruments">
+                            <i class="bi bi-collection"></i> Инструменты
+                        </a>
+                    </li>
+                    <li class="nav-item">
                         <a class="nav-link {% if request.path == '/screener' %}active{% endif %}" href="/screener">
                             <i class="bi bi-funnel"></i> Скринер
                         </a>

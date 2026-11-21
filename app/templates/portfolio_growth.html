@@ -205,6 +205,119 @@
     </div>
     {% endif %}
 
+    {% if data.bond_ladder and data.bond_ladder.rows %}
+    {% set bl = data.bond_ladder %}
+    <div class="card mb-3">
+        <div class="card-header bg-white d-flex justify-content-between align-items-center">
+            <div>
+                <i class="bi bi-layers"></i> Лестница погашений и дюрация
+                <small class="text-muted">облигационная часть · справочник MOEX ISS</small>
+            </div>
+            <small class="text-muted">
+                на {{ bl.as_of }}{% if bl.updated_at %} · справочник обновлён {{ bl.updated_at }}{% endif %}
+            </small>
+        </div>
+        <div class="card-body">
+            <div class="row text-center g-3 mb-3">
+                <div class="col-6 col-lg-3">
+                    <div class="text-muted small" title="Средневзвешенная по стоимости доходность к погашению">YTM средневзвешенная</div>
+                    <div class="fw-bold">{{ '{:+.2f}'.format(bl.ytm_avg) if bl.ytm_avg is not none else '—' }}{% if bl.ytm_avg is not none %}%{% endif %}</div>
+                </div>
+                <div class="col-6 col-lg-3">
+                    <div class="text-muted small" title="Средневзвешенная дюрация Маколея облигационной части, в годах">Дюрация</div>
+                    <div class="fw-bold">{{ '%.2f'|format(bl.duration_avg) if bl.duration_avg is not none else '—' }}{% if bl.duration_avg is not none %} г.{% endif %}</div>
+                </div>
+                <div class="col-6 col-lg-3">
+                    <div class="text-muted small" title="Изменение стоимости облигаций при сдвиге ставок на 1 п.п.">±1 п.п. ставок</div>
+                    <div class="fw-bold">{{ '{:,.0f}'.format(bl.dv01) }} ₽</div>
+                </div>
+                <div class="col-6 col-lg-3">
+                    <div class="text-muted small" title="Купонный поток за год по текущим выпускам, после НДФЛ 13%">Купон / год (после НДФЛ)</div>
+                    <div class="fw-bold profit-positive">{{ '{:,.0f}'.format(bl.coupon_year_net) }} ₽</div>
+                    <div class="text-muted small">{{ '{:,.0f}'.format(bl.coupon_month) }} ₽/мес до налога</div>
+                </div>
+            </div>
+
+            <div class="row g-3">
+                <div class="col-lg-4">
+                    <div class="small text-muted mb-2">
+                        Погашения по годам
+                        {% if bl.bonds_pct is not none %}· {{ '%.1f'|format(bl.bonds_pct) }}% портфеля{% endif %}
+                    </div>
+                    {% for b in bl.ladder %}
+                    <div class="mb-2">
+                        <div class="d-flex justify-content-between small">
+                            <span class="fw-bold">{{ b.year }}</span>
+                            <span>{{ '{:,.0f}'.format(b.value) }} ₽ · {{ '%.1f'|format(b.pct) }}%</span>
+                        </div>
+                        <div class="progress" style="height:6px">
+                            <div class="progress-bar{{ ' bg-warning' if bl.warn and bl.max_year.year == b.year else '' }}"
+                                 role="progressbar" style="width: {{ b.pct }}%"
+                                 aria-valuenow="{{ b.pct }}" aria-valuemin="0" aria-valuemax="100"></div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                    {% if bl.warn %}
+                    <div class="alert alert-warning py-1 px-2 small mb-0 mt-2">
+                        <i class="bi bi-exclamation-triangle"></i>
+                        {{ '%.1f'|format(bl.max_year.pct) }}% облигаций погашается в {{ bl.max_year.year }} —
+                        всё окно реинвестирования в одном году.
+                    </div>
+                    {% endif %}
+                </div>
+
+                <div class="col-lg-8">
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle mb-0" style="font-size:13px">
+                            <thead class="text-muted">
+                                <tr>
+                                    <th>Бумага</th>
+                                    <th class="text-end" title="Купон, % годовых от номинала">Купон</th>
+                                    <th class="text-end">Погашение</th>
+                                    <th class="text-end">Лет</th>
+                                    <th class="text-end" title="Доходность к погашению по текущей цене">YTM</th>
+                                    <th class="text-end" title="Дюрация Маколея, лет">Дюрация</th>
+                                    <th class="text-end">Стоимость</th>
+                                    <th class="text-end">Доля</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                            {% for r in bl.rows %}
+                                <tr>
+                                    <td>
+                                        {{ r.name }}
+                                        <span class="badge {{ 'bg-primary' if r.kind == 'ОФЗ' else ('bg-info text-dark' if r.kind == 'Валютная' else 'bg-secondary') }}">{{ r.kind }}</span>
+                                    </td>
+                                    <td class="text-end">{{ '%.2f'|format(r.coupon_pct) if r.coupon_pct is not none else '—' }}{% if r.coupon_pct is not none %}%{% endif %}</td>
+                                    <td class="text-end">{{ r.matdate or '—' }}</td>
+                                    <td class="text-end">{{ '%.1f'|format(r.years) if r.years is not none else '—' }}</td>
+                                    <td class="text-end fw-bold">{{ '%.2f'|format(r.ytm) if r.ytm is not none else '—' }}{% if r.ytm is not none %}%{% endif %}</td>
+                                    <td class="text-end">{{ '%.2f'|format(r.duration) if r.duration is not none else '—' }}</td>
+                                    <td class="text-end">
+                                        {{ '{:,.0f}'.format(r.value) if r.value else '—' }}
+                                        {% if r.price_src == 'iss' %}<i class="bi bi-clock-history text-warning" title="Цены в QUIK/T-Invest нет — взята котировка MOEX с задержкой"></i>{% endif %}
+                                    </td>
+                                    <td class="text-end">{{ '%.1f'|format(r.pct) }}%</td>
+                                </tr>
+                            {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <div class="small text-muted mt-2">
+                Даты погашения, купоны и номиналы — из MOEX ISS (кэш 6 ч); цены и стоимость —
+                из конвейера котировок QUIK/T-Invest, как у дашборда (в ISS они приходят с задержкой).
+                <i class="bi bi-clock-history text-warning"></i> — цены в QUIK/T-Invest не было, взята котировка MOEX.
+                YTM валютных выпусков — в валюте номинала (без учёта курса).
+                «±1 п.п.» — сколько рублей стоимости добавит/уберёт сдвиг ставок на процентный пункт.
+                {% if bl.pending %}Часть бумаг ещё не найдена на ISS — данные догрузятся при следующем обновлении страницы.{% endif %}
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
     <div class="card">
         <div class="card-header bg-white d-flex justify-content-between align-items-center">
             <div>
