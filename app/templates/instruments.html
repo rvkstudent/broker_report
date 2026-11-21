@@ -605,13 +605,40 @@
         const body = document.getElementById('ai-body');
         const force = btn.dataset.done === '1';
         btn.disabled = true;
+        const started = Date.now();
         body.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>'
-                       + 'модель читает историю выплат и метрики — обычно 20–40 секунд…';
+                       + 'модель читает историю выплат и метрики — обычно 30–60 секунд…';
         try {
-            const url = '/api/instrument-ai?kind=' + encodeURIComponent(btn.dataset.kind)
-                      + '&code=' + encodeURIComponent(btn.dataset.code) + (force ? '&refresh=1' : '');
-            const resp = await fetch(url);
-            const data = await resp.json();
+            // Разбор идёт в фоне: опрашиваем, пока не появится результат.
+            // Так запрос не упирается в таймаут Cloudflare (100 с), который
+            // раньше возвращал HTML-страницу вместо JSON.
+            const base = '/api/instrument-ai?kind=' + encodeURIComponent(btn.dataset.kind)
+                       + '&code=' + encodeURIComponent(btn.dataset.code);
+            let data = null;
+            for (let attempt = 0; attempt < 45; attempt++) {
+                const resp = await fetch(base + (force && attempt === 0 ? '&refresh=1' : ''));
+                if (!resp.ok && resp.status !== 202) {
+                    const text = (await resp.text()).slice(0, 120);
+                    body.innerHTML = '<span class="text-danger">Сервер ответил ' + resp.status
+                                   + (text && text[0] !== '<' ? ': ' + text : '') + '</span>';
+                    btn.disabled = false;
+                    return;
+                }
+                const type = resp.headers.get('content-type') || '';
+                if (!type.includes('json')) {
+                    body.innerHTML = '<span class="text-danger">Сервер вернул не JSON ('
+                                   + resp.status + '). Возможно, ответ не успел за таймаут.</span>';
+                    btn.disabled = false;
+                    return;
+                }
+                data = await resp.json();
+                if (data.available || data.error) break;
+                const secs = Math.round((Date.now() - started) / 1000);
+                body.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>'
+                               + 'модель думает… ' + secs + ' с';
+                await new Promise((r) => setTimeout(r, 4000));
+            }
+            if (!data) data = {available: false, error: 'нет ответа'};
             if (!data.available) {
                 body.innerHTML = '<span class="text-warning">AI-разбор недоступен: '
                                + (data.error || 'нет ответа модели') + '</span>';

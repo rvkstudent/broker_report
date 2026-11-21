@@ -1395,7 +1395,18 @@ def api_instrument_ai():
     if row is None:
         return jsonify({'available': False, 'error': 'бумага не найдена в снимке'}), 404
     try:
-        return jsonify(instrument_ai.analyze(kind, code.upper(), row, refresh=refresh))
+        if not instrument_ai.llm_config():
+            return jsonify({'available': False,
+                            'error': 'нейросеть не настроена (ADVISOR_LLM_*)'})
+        # Сначала отдаём готовое из кэша, иначе запускаем разбор в фоне и
+        # возвращаем pending — браузер опрашивает, пока не будет результата.
+        current = instrument_ai.status(kind, code.upper())
+        if current.get('available') and not refresh:
+            return jsonify(current)
+        # Нет кэша или просят пересчитать — запускаем фон и отдаём pending:
+        # страница опрашивает эндпоинт, пока не появится результат.
+        instrument_ai.start(kind, code.upper(), row)
+        return jsonify(instrument_ai.status(kind, code.upper()))
     except Exception as exc:  # noqa: BLE001
         return jsonify({'available': False, 'error': str(exc)}), 500
 

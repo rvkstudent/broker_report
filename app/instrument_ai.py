@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 import json
-import os
+import threading
 import time
 import urllib.request
 from datetime import datetime
@@ -24,6 +24,13 @@ from app.advisor import llm_config, STRATEGY_TEXT
 from app.db import get_connection
 
 TTL = 7 * 24 * 3600
+
+# Фоновые запросы к модели: страница не должна ждать 40–120 секунд, иначе
+# Cloudflare отдаёт свою HTML-страницу таймаута (524), а браузер пытается
+# разобрать её как JSON и падает с SyntaxError.
+_running: dict[str, float] = {}
+_failed: dict[str, str] = {}
+_lock = threading.Lock()
 
 
 # ── кэш ─────────────────────────────────────────────────────
@@ -176,6 +183,66 @@ def _parse(text: str) -> dict | None:
         'verdict': str(doc.get('verdict') or '')[:60],
         'risks': as_list('risks'),
     }
+
+
+def _key(kind: str, code: str) -> str:
+    return f'{kind}:{code.upper()}'
+
+
+def is_running(kind: str, code: str) -> bool:
+    with _lock:
+        return _key(kind, code) in _running
+
+
+def _worker(kind: str, code: str, row: dict) -> None:
+    try:
+        result = _call_llm(_payload(kind, row))
+        if result:
+            result['updated_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            _save(kind, code, result)
+            _failed.pop(_key(kind, code), None)
+        else:
+            _failed[_key(kind, code)] = 'модель не вернула ответ'
+    except Exception as exc:  # noqa: BLE001
+        _failed[_key(kind, code)] = f'{type(exc).__name__}: {exc}'
+    finally:
+        with _lock:
+            _running.pop(_key(kind, code), None)
+
+
+def start(kind: str, code: str, row: dict) -> bool:
+    """Запустить разбор в фоне. True — поток создан (или уже работает)."""
+    key = _key(kind, code)
+    with _lock:
+        if key in _running:
+            return True
+        _failed.pop(key, None)      # новый запуск сбрасывает прошлую ошибку
+        _running[key] = time.time()
+    threading.Thread(target=_worker, args=(kind, code, row),
+                     name=f'instrument-ai-{code}', daemon=True).start()
+    return True
+
+
+def status(kind: str, code: str) -> dict:
+    """Состояние разбора: готов / в работе / ошибка.
+
+    Проверка «идёт пересчёт» стоит ПЕРЕД кэшем: иначе после нажатия
+    «пересчитать» клиент сразу получил бы старый результат из кэша и решил,
+    что ничего не произошло.
+    """
+    if is_running(kind, code):
+        started = _running.get(_key(kind, code)) or time.time()
+        return {'available': False, 'pending': True,
+                'seconds': round(time.time() - started)}
+    cached = _load(kind, code)
+    if _fresh(cached):
+        cached = dict(cached or {})
+        cached.update({'available': True, 'cached': True})
+        return cached
+    error = _failed.get(_key(kind, code))
+    if error:
+        return {'available': False, 'error': error}
+    return {'available': False, 'idle': True}
 
 
 def analyze(kind: str, code: str, row: dict | None, refresh: bool = False) -> dict:
